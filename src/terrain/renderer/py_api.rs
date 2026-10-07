@@ -269,6 +269,14 @@ impl TerrainRenderer {
             ));
         }
 
+        if params.decoded().clouds.enabled {
+            crate::core::degradation::record_degradation(
+                "rendering_fallback",
+                "terrain_clouds_offline_only",
+                "volumetric clouds composite on the offline accumulation path only; one-shot forward renders draw no clouds until phase 2",
+            );
+        }
+
         if target.is_some() {
             return Err(PyRuntimeError::new_err(
                 "Custom render targets not yet supported. Use target=None for offscreen rendering.",
@@ -345,6 +353,14 @@ impl TerrainRenderer {
             return Err(PyRuntimeError::new_err(
                 "An offline accumulation session is active; call end_offline_accumulation() before one-shot rendering.",
             ));
+        }
+
+        if params.decoded().clouds.enabled {
+            crate::core::degradation::record_degradation(
+                "rendering_fallback",
+                "terrain_clouds_offline_only",
+                "volumetric clouds composite on the offline accumulation path only; one-shot forward renders draw no clouds until phase 2",
+            );
         }
 
         self.scene

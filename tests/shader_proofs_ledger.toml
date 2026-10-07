@@ -43,6 +43,12 @@ owner = "atmosphere"
 expiry = "2027-08-06"
 
 [[unproven]]
+path = "src/shaders/atmosphere/clouds.wgsl"
+reason = "atmosphere/clouds.wgsl: 3D texture sampling, slab intersection, and the Beer-Powder/Henyey-Greenstein nonlinear envelopes are not yet modeled; the terrain cloud no-op and parallax tests plus offline accumulation provide executable coverage"
+owner = "terrain"
+expiry = "2027-10-07"
+
+[[unproven]]
 path = "src/shaders/bloom_blur_h.wgsl"
 reason = "bloom_blur_h.wgsl: texture/resource dimension and sampling relations are not yet modeled"
 owner = "render-quality"

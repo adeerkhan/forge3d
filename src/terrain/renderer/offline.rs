@@ -866,6 +866,46 @@ impl TerrainScene {
             }
         }
 
+        // Volumetric clouds composite into the linear-HDR beauty after terrain
+        // and before accumulation, so accumulation denoises them per sample.
+        // Depth binding (and therefore this path) requires single-sample depth.
+        if state.render_targets.sample_count == 1 {
+            let inv_view_proj = (jittered_proj * view).inverse().to_cols_array_2d();
+            let light = &state.decoded.light;
+            let cloud_frame = super::clouds::CloudFrameParams {
+                inv_view_proj,
+                camera_pos: [eye.x, eye.y, eye.z],
+                sun_direction: light.direction,
+                sun_radiance: [
+                    light.color[0] * light.intensity,
+                    light.color[1] * light.intensity,
+                    light.color[2] * light.intensity,
+                ],
+                sample_index: state.total_samples,
+            };
+            let cloud_rendered = self.clouds.render(
+                self.device.as_ref(),
+                self.queue.as_ref(),
+                &mut encoder,
+                &state.render_targets.internal_view,
+                state.render_targets.internal_texture.as_ref(),
+                &state.render_targets.depth_view,
+                state.render_targets.internal_width,
+                state.render_targets.internal_height,
+                &state.decoded,
+                cloud_frame,
+            )?;
+            if cloud_rendered {
+                crate::core::shader_registry::record_shader_use("terrain.clouds.shader");
+            }
+        } else if state.decoded.clouds.enabled {
+            crate::core::degradation::record_degradation(
+                "rendering_fallback",
+                "terrain_clouds_require_single_sample_depth",
+                "volumetric clouds need a bindable single-sample depth target; the multi-sample offline path renders no clouds",
+            );
+        }
+
         self.dispatch_offline_accumulation_pass(
             &mut encoder,
             &state.render_targets.internal_view,

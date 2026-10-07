@@ -28,6 +28,7 @@ impl TerrainScene {
         let height_curve_lut_sampler = base_resources.height_curve_lut_sampler;
         let atmosphere_resources =
             create_atmosphere_init_resources(device.as_ref(), queue.as_ref())?;
+        let clouds = super::clouds::CloudVolumeResources::new(device.as_ref(), queue.as_ref())?;
         let sky_bind_group_layout0 = atmosphere_resources.sky_bind_group_layout0;
         let sky_bind_group_layout1 = atmosphere_resources.sky_bind_group_layout1;
         let sky_pipeline = atmosphere_resources.sky_pipeline;
@@ -629,6 +630,7 @@ impl TerrainScene {
             aether_sky_bind_group_layout2,
             aether_sky_pipeline,
             atmosphere_lut_cache,
+            clouds,
             _sky_fallback_texture: sky_fallback_texture,
             sky_fallback_view,
             _atmosphere_scattering_fallback_texture: atmosphere_scattering_fallback_texture,

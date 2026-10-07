@@ -31,6 +31,7 @@ mod anamnesis;
 mod aov;
 mod atmosphere;
 mod bind_groups;
+mod clouds;
 mod constructor;
 mod core;
 mod draw;

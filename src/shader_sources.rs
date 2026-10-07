@@ -394,6 +394,27 @@ pub(crate) fn aether_blit() -> String {
     assemble_parts(aether_blit_parts())
 }
 
+/// Volumetric cloud raymarch, composited into the terrain linear-HDR beauty
+/// buffer after the terrain pass and before accumulation/tonemap.
+pub(crate) fn atmosphere_clouds_parts() -> &'static [SourcePart] {
+    &[
+        SourcePart {
+            path: "src/shaders/includes/determinism.wgsl",
+            text: include_str!("shaders/includes/determinism.wgsl"),
+            strip: false,
+        },
+        SourcePart {
+            path: "src/shaders/atmosphere/clouds.wgsl",
+            text: include_str!("shaders/atmosphere/clouds.wgsl"),
+            strip: false,
+        },
+    ]
+}
+
+pub(crate) fn atmosphere_clouds() -> String {
+    assemble_parts(atmosphere_clouds_parts())
+}
+
 /// Standalone PROMETHEUS aerial post. Keeping this source out of
 /// `hybrid_kernel()` is the contract that the established traversal and
 /// accumulation bind-group layouts remain byte-for-byte untouched.
@@ -1111,6 +1132,7 @@ pub(crate) fn deterministic_module_parts() -> Vec<(&'static str, Vec<SourcePart>
         ("tone_map", tone_map_parts().to_vec()),
         ("det_probe", det_probe_parts().to_vec()),
         ("det_raster", det_raster_parts().to_vec()),
+        ("atmosphere_clouds", atmosphere_clouds_parts().to_vec()),
     ];
     #[cfg(any(test, all(feature = "enable-pbr", feature = "enable-tbn")))]
     modules.push(("pbr", pbr_parts().to_vec()));
@@ -1130,6 +1152,7 @@ mod tests {
             ("hybrid_kernel", hybrid_kernel()),
             ("aether_sky", aether_sky()),
             ("aether_blit", aether_blit()),
+            ("atmosphere_clouds", atmosphere_clouds()),
             ("prometheus_aerial", prometheus_aerial()),
             ("terrain", terrain()),
             ("terrain_bindless", terrain_bindless()),

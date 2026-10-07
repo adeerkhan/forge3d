@@ -28,6 +28,7 @@ pub struct TerrainScene {
     pub(super) aether_sky_bind_group_layout2: wgpu::BindGroupLayout,
     pub(super) aether_sky_pipeline: wgpu::ComputePipeline,
     pub(super) atmosphere_lut_cache: Mutex<Vec<super::atmosphere::luts::AtmosphereGpuLuts>>,
+    pub(super) clouds: super::clouds::CloudVolumeResources,
     pub(super) _sky_fallback_texture: TrackedTexture,
     pub(super) sky_fallback_view: wgpu::TextureView,
     pub(super) _atmosphere_scattering_fallback_texture: TrackedTexture,
