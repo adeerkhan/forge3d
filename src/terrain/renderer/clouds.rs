@@ -26,6 +26,7 @@ struct CloudUniforms {
     optics: [f32; 4],
     wind: [f32; 4],
     screen: [f32; 4],
+    up_axis: [f32; 4],
 }
 
 /// Per-frame camera/sun inputs for the cloud raymarch.
@@ -34,6 +35,8 @@ pub(in crate::terrain::renderer) struct CloudFrameParams {
     pub camera_pos: [f32; 3],
     pub sun_direction: [f32; 3],
     pub sun_radiance: [f32; 3],
+    /// World up axis of the camera frame: `Y` for screen/north, `Z` for Z-up mesh.
+    pub up_axis: [f32; 3],
     pub sample_index: u32,
 }
 
@@ -420,6 +423,7 @@ impl CloudVolumeResources {
                 frame.sample_index as f32,
             ],
             screen: [width as f32, height as f32, 1.0, 1.0],
+            up_axis: [frame.up_axis[0], frame.up_axis[1], frame.up_axis[2], 0.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
