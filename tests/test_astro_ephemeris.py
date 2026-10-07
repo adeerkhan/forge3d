@@ -13,6 +13,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import hashlib
 import math
+import threading
 from pathlib import Path
 
 import pytest
@@ -489,6 +490,8 @@ def test_manual_sun_success_clears_stale_observation_replay(command):
     )
     handle = object.__new__(viewer_module.ViewerHandle)
     handle._socket = Socket()
+    handle._io_lock = threading.Lock()
+    handle._recv_buffer = b""
     handle._send_command(command)
     viewer = FakeViewer()
     try:
@@ -513,6 +516,8 @@ def test_non_sun_terrain_success_preserves_observation_replay():
     )
     handle = object.__new__(viewer_module.ViewerHandle)
     handle._socket = Socket()
+    handle._io_lock = threading.Lock()
+    handle._recv_buffer = b""
     try:
         handle._send_command(
             {"cmd": "set_terrain", "zscale": 2.0, "sun_azimuth": None}
@@ -543,6 +548,8 @@ def test_inactive_viewer_manual_sun_preserves_active_viewer_replay():
 
     inactive = object.__new__(viewer_module.ViewerHandle)
     inactive._socket = Socket()
+    inactive._io_lock = threading.Lock()
+    inactive._recv_buffer = b""
     active = ActiveViewer()
     sky._set_active_viewer(active)
     try:
@@ -575,6 +582,8 @@ def test_rejected_manual_terrain_sun_preserves_observation_replay():
     )
     handle = object.__new__(viewer_module.ViewerHandle)
     handle._socket = Socket()
+    handle._io_lock = threading.Lock()
+    handle._recv_buffer = b""
     try:
         with pytest.raises(viewer_module.ViewerError, match="terrain rejected"):
             handle._send_command(

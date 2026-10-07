@@ -204,6 +204,8 @@ class ViewerHandle:
         self._port = port
         self._timeout = timeout
         self._socket: Optional[socket.socket] = None
+        self._io_lock = threading.Lock()
+        self._recv_buffer = b""
         self._cleanup_paths = list(cleanup_paths or [])
         self._stdout_drain_thread: Optional[threading.Thread] = None
         self._connect()
@@ -212,28 +214,34 @@ class ViewerHandle:
         """Connect to the viewer's IPC server."""
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._socket.settimeout(self._timeout)
+        self._recv_buffer = b""
         self._socket.connect((self._host, self._port))
     
     def _send_command(self, cmd: Dict[str, Any]) -> Dict[str, Any]:
-        """Send a command and wait for response."""
+        """Send a command and wait for the response.
+
+        Serialized by ``_io_lock`` so concurrent callers (threads, a GUI, or an
+        asyncio executor) cannot interleave requests and responses on the single
+        IPC socket. Bytes received past the first newline are retained in
+        ``_recv_buffer`` for the next command instead of being discarded.
+        """
         if self._socket is None:
             raise ViewerError("Not connected to viewer")
-        
-        # Send NDJSON request
+
         request = json.dumps(cmd) + "\n"
-        self._socket.sendall(request.encode("utf-8"))
-        
-        # Read response line
-        response_data = b""
-        while b"\n" not in response_data:
-            chunk = self._socket.recv(4096)
-            if not chunk:
-                raise ViewerError("Connection closed by viewer")
-            response_data += chunk
-        
-        line = response_data.split(b"\n")[0].decode("utf-8")
+        with self._io_lock:
+            self._socket.sendall(request.encode("utf-8"))
+
+            while b"\n" not in self._recv_buffer:
+                chunk = self._socket.recv(4096)
+                if not chunk:
+                    raise ViewerError("Connection closed by viewer")
+                self._recv_buffer += chunk
+
+            line, _, self._recv_buffer = self._recv_buffer.partition(b"\n")
+
         try:
-            response = json.loads(line)
+            response = json.loads(line.decode("utf-8"))
         except json.JSONDecodeError as e:
             raise ViewerError(f"Invalid JSON response: {e}")
         

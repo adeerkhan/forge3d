@@ -876,3 +876,69 @@ class TestNDJSONProtocol:
         for i, line in enumerate(lines):
             parsed = json.loads(line)
             assert parsed["cmd"] == cmds[i]["cmd"]
+
+
+class TestCommandSerialization:
+    """`_send_command` serializes concurrent callers and keeps trailing bytes."""
+
+    def _connected_handle(self, sock):
+        handle = object.__new__(ViewerHandle)
+        handle._socket = sock
+        handle._io_lock = threading.Lock()
+        handle._recv_buffer = b""
+        return handle
+
+    def test_leftover_bytes_after_newline_are_buffered(self):
+        class _Socket:
+            def __init__(self, payloads):
+                self._payloads = list(payloads)
+                self.recv_calls = 0
+
+            def sendall(self, _data):
+                pass
+
+            def recv(self, _n):
+                self.recv_calls += 1
+                return self._payloads.pop(0) if self._payloads else b""
+
+        sock = _Socket([b'{"ok": true, "n": 1}\n{"ok": true, "n": 2}\n'])
+        handle = self._connected_handle(sock)
+
+        first = handle._send_command({"cmd": "one"})
+        second = handle._send_command({"cmd": "two"})
+
+        assert first["n"] == 1
+        assert second["n"] == 2
+        # Both responses arrived in one recv; the second must come from the buffer.
+        assert sock.recv_calls == 1
+
+    def test_concurrent_callers_never_overlap_a_transaction(self):
+        class _Socket:
+            def __init__(self):
+                self.active = 0
+                self.max_active = 0
+
+            def sendall(self, _data):
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+
+            def recv(self, _n):
+                time.sleep(0.02)
+                self.active -= 1
+                return b'{"ok": true}\n'
+
+        sock = _Socket()
+        handle = self._connected_handle(sock)
+
+        threads = [
+            threading.Thread(target=handle._send_command, args=({"cmd": f"c{i}"},))
+            for i in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        # The lock serializes send+recv, so no two transactions overlap.
+        assert sock.max_active == 1
+
