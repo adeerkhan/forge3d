@@ -80,6 +80,53 @@ fn optional_attr<'py>(obj: &Bound<'py, PyAny>, name: &str) -> PyResult<Option<Bo
     }
 }
 
+/// Extract an optional attribute, distinguishing "absent" (`None`) from a
+/// present-but-wrong-type value (error), so a malformed setting can never be
+/// silently replaced by its default.
+fn extract_optional<'py, T: pyo3::FromPyObject<'py>>(
+    obj: &Bound<'py, PyAny>,
+    name: &str,
+) -> PyResult<Option<T>> {
+    optional_attr(obj, name)?
+        .map(|value| value.extract::<T>())
+        .transpose()
+}
+
+/// Read the visible-cloud / cloud-shadow settings from `params.clouds`.
+///
+/// Every field defaults to [`CloudsSettingsNative::default`], so an absent or
+/// `None` `clouds` attribute yields a disabled cloud layer. Range and finiteness
+/// are enforced by the Python `CloudSettings` dataclass; this seam only mirrors
+/// the values it is handed.
+pub(super) fn parse_clouds_settings(params: &Bound<'_, PyAny>) -> PyResult<CloudsSettingsNative> {
+    let Some(clouds) = optional_attr(params, "clouds")? else {
+        return Ok(CloudsSettingsNative::default());
+    };
+    if clouds.is_none() {
+        return Ok(CloudsSettingsNative::default());
+    }
+
+    let base = CloudsSettingsNative::default();
+    Ok(CloudsSettingsNative {
+        enabled: extract_optional(&clouds, "enabled")?.unwrap_or(base.enabled),
+        shadows_enabled: extract_optional(&clouds, "shadows_enabled")?.unwrap_or(base.shadows_enabled),
+        coverage: extract_optional(&clouds, "coverage")?.unwrap_or(base.coverage),
+        density: extract_optional(&clouds, "density")?.unwrap_or(base.density),
+        shadow_strength: extract_optional(&clouds, "shadow_strength")?
+            .unwrap_or(base.shadow_strength),
+        quality: extract_optional(&clouds, "quality")?.unwrap_or(base.quality),
+        altitude_m: extract_optional(&clouds, "altitude_m")?.unwrap_or(base.altitude_m),
+        thickness_m: extract_optional(&clouds, "thickness_m")?.unwrap_or(base.thickness_m),
+        scatter_strength: extract_optional(&clouds, "scatter_strength")?
+            .unwrap_or(base.scatter_strength),
+        phase_g: extract_optional(&clouds, "phase_g")?.unwrap_or(base.phase_g),
+        detail: extract_optional(&clouds, "detail")?.unwrap_or(base.detail),
+        wind_dir: extract_optional(&clouds, "wind_dir")?.unwrap_or(base.wind_dir),
+        wind_speed: extract_optional(&clouds, "wind_speed")?.unwrap_or(base.wind_speed),
+        powder: extract_optional(&clouds, "powder")?.unwrap_or(base.powder),
+    })
+}
+
 pub(super) fn parse_sky_settings(params: &Bound<'_, PyAny>) -> PyResult<SkySettingsNative> {
     let Some(sky) = optional_attr(params, "sky")? else {
         return Ok(SkySettingsNative::default());

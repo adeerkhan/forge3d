@@ -262,7 +262,13 @@ class WaterSettings:
 
 @dataclass
 class CloudSettings:
-    """Terrain cloud-shadow settings for MapScene/TerrainRenderer."""
+    """Visible volumetric cloud layer and terrain cloud-shadow settings.
+
+    ``enabled`` turns on the depth-aware volumetric cloud composite. The
+    ``shadow_*`` fields drive the terrain cloud-shadow mask and share the same
+    density field as the visible clouds. When ``enabled`` is False the cloud
+    pass is a byte-exact no-op.
+    """
 
     enabled: bool = False
     shadows_enabled: bool = False
@@ -271,12 +277,86 @@ class CloudSettings:
     shadow_strength: float = 0.35
     quality: str = "medium"
 
+    # Visible cloud layer geometry and shading.
+    altitude_m: float = 1500.0      # cloud layer base altitude above the terrain datum
+    thickness_m: float = 800.0      # vertical extent of the cloud slab
+    scatter_strength: float = 1.0   # in-scatter multiplier
+    phase_g: float = 0.8            # Henyey-Greenstein forward-scatter anisotropy
+    detail: float = 0.5             # high-frequency erosion amount [0, 1]
+    wind_dir: float = 0.0           # horizontal advection direction in degrees [0, 360]
+    wind_speed: float = 0.0         # horizontal advection speed
+    powder: float = 1.0             # powder / dark-edge term strength [0, 1]
+
     def __post_init__(self) -> None:
-        for name in ("coverage", "density", "shadow_strength"):
-            if not 0.0 <= float(getattr(self, name)) <= 1.0:
-                raise ValueError(f"{name} must be in [0, 1]")
+        for name in ("coverage", "density", "shadow_strength", "detail", "powder"):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
         if str(self.quality) not in {"low", "medium", "high", "ultra"}:
             raise ValueError("quality must be one of: low, medium, high, ultra")
+        if not math.isfinite(float(self.altitude_m)) or float(self.altitude_m) < 0.0:
+            raise ValueError("altitude_m must be finite and >= 0")
+        if not math.isfinite(float(self.thickness_m)) or float(self.thickness_m) < 0.0:
+            raise ValueError("thickness_m must be finite and >= 0")
+        if not math.isfinite(float(self.scatter_strength)) or float(self.scatter_strength) < 0.0:
+            raise ValueError("scatter_strength must be finite and >= 0")
+        if not math.isfinite(float(self.phase_g)) or not 0.0 <= float(self.phase_g) <= 0.99:
+            raise ValueError("phase_g must be finite and in [0.0, 0.99]")
+        if not math.isfinite(float(self.wind_dir)) or not 0.0 <= float(self.wind_dir) <= 360.0:
+            raise ValueError("wind_dir must be finite and in [0, 360] degrees")
+        if not math.isfinite(float(self.wind_speed)) or float(self.wind_speed) < 0.0:
+            raise ValueError("wind_speed must be finite and >= 0")
+
+
+# Named visible-cloud presets. Each value is a plain mapping of ``CloudSettings``
+# keyword arguments, so it can be dropped straight into
+# ``LightingPreset.settings["clouds"]`` or ``TerrainSource.metadata["clouds"]``.
+CLOUD_PRESETS = {
+    "fair-weather": {
+        "enabled": True,
+        "coverage": 0.35,
+        "density": 0.4,
+        "altitude_m": 1800.0,
+        "thickness_m": 600.0,
+        "scatter_strength": 1.0,
+        "phase_g": 0.75,
+        "detail": 0.4,
+        "powder": 1.0,
+    },
+    "scattered": {
+        "enabled": True,
+        "coverage": 0.55,
+        "density": 0.5,
+        "altitude_m": 1600.0,
+        "thickness_m": 800.0,
+        "scatter_strength": 1.0,
+        "phase_g": 0.8,
+        "detail": 0.5,
+        "powder": 1.0,
+    },
+    "storm": {
+        "enabled": True,
+        "coverage": 0.85,
+        "density": 0.85,
+        "altitude_m": 1200.0,
+        "thickness_m": 1600.0,
+        "scatter_strength": 1.2,
+        "phase_g": 0.85,
+        "detail": 0.7,
+        "powder": 0.8,
+    },
+    "cirrus": {
+        "enabled": True,
+        "coverage": 0.45,
+        "density": 0.25,
+        "altitude_m": 8000.0,
+        "thickness_m": 1200.0,
+        "scatter_strength": 0.8,
+        "phase_g": 0.6,
+        "detail": 0.8,
+        "powder": 0.4,
+    },
+}
 
 
 @dataclass
@@ -2554,6 +2634,7 @@ __all__ = [
     "ReflectionSettings",
     "WaterSettings",
     "CloudSettings",
+    "CLOUD_PRESETS",
     "BloomSettings",
     "ScreenSpaceSettings",
     "HeightAoSettings",

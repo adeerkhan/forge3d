@@ -960,13 +960,24 @@ def _mapscene_cloud_settings(recipe: "SceneRecipe") -> Any | None:
     if data is None:
         return None
     shadows_enabled = bool(data.get("shadows_enabled", data.get("shadow_enabled", False)))
+    defaults = CloudSettings()
     return CloudSettings(
         enabled=bool(data.get("enabled", shadows_enabled)),
         shadows_enabled=shadows_enabled,
-        coverage=float(data.get("coverage", 0.5)),
-        density=float(data.get("density", 0.5)),
-        shadow_strength=float(data.get("shadow_strength", data.get("shadow_intensity", 0.35))),
-        quality=str(data.get("quality", "medium")),
+        coverage=float(data.get("coverage", defaults.coverage)),
+        density=float(data.get("density", defaults.density)),
+        shadow_strength=float(
+            data.get("shadow_strength", data.get("shadow_intensity", defaults.shadow_strength))
+        ),
+        quality=str(data.get("quality", defaults.quality)),
+        altitude_m=float(data.get("altitude_m", defaults.altitude_m)),
+        thickness_m=float(data.get("thickness_m", defaults.thickness_m)),
+        scatter_strength=float(data.get("scatter_strength", defaults.scatter_strength)),
+        phase_g=float(data.get("phase_g", defaults.phase_g)),
+        detail=float(data.get("detail", defaults.detail)),
+        wind_dir=float(data.get("wind_dir", defaults.wind_dir)),
+        wind_speed=float(data.get("wind_speed", defaults.wind_speed)),
+        powder=float(data.get("powder", defaults.powder)),
     )
 
 

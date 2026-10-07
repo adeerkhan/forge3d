@@ -738,3 +738,80 @@ def test_mapscene_cloud_settings_reach_terrain_params(tmp_path, monkeypatch):
     assert clouds.density == pytest.approx(0.55)
     assert clouds.shadow_strength == pytest.approx(0.4)
     assert clouds.quality == "high"
+
+
+def test_mapscene_visible_cloud_fields_reach_terrain_params(tmp_path, monkeypatch):
+    scene = f3d.MapScene(
+        terrain=f3d.TerrainSource(
+            data=np.zeros((8, 8), dtype=np.float32),
+            crs="EPSG:32610",
+            metadata={"width": 8, "height": 8, "source_id": "inline-dem"},
+        ),
+        camera=f3d.OrbitCamera(target=(0.0, 0.0, 0.0), distance=100.0),
+        lighting=f3d.LightingPreset(
+            name="volumetric-clouds",
+            settings={
+                "clouds": {
+                    "enabled": True,
+                    "coverage": 0.6,
+                    "altitude_m": 2100.0,
+                    "thickness_m": 1400.0,
+                    "phase_g": 0.85,
+                    "wind_dir": 90.0,
+                    "wind_speed": 3.0,
+                    "powder": 0.5,
+                }
+            },
+        ),
+        output=f3d.OutputSpec(width=64, height=64, format="png"),
+    )
+    calls: dict[str, object] = {}
+
+    class FakeSession:
+        def __init__(self, *, window=False):
+            calls["session_window"] = window
+
+    class FakeMaterialSet:
+        @staticmethod
+        def terrain_default():
+            return "material-set"
+
+    class FakeIbl:
+        @staticmethod
+        def from_hdr(_path, intensity=1.0, rotate_deg=0.0, quality="auto"):
+            return "ibl"
+
+    class FakeParams:
+        def __init__(self, config):
+            calls["clouds"] = config.clouds
+
+    class FakeFrame:
+        def to_numpy(self):
+            rgba = np.zeros((64, 64, 4), dtype=np.uint8)
+            rgba[..., 3] = 255
+            return rgba
+
+    class FakeTerrainRenderer:
+        def __init__(self, _session):
+            pass
+
+        def render_terrain_pbr_pom(self, **_kwargs):
+            return FakeFrame()
+
+    monkeypatch.setattr(f3d, "Session", FakeSession)
+    monkeypatch.setattr(f3d, "MaterialSet", FakeMaterialSet)
+    monkeypatch.setattr(f3d, "IBL", FakeIbl)
+    monkeypatch.setattr(f3d, "TerrainRenderParams", FakeParams)
+    monkeypatch.setattr(f3d, "TerrainRenderer", FakeTerrainRenderer)
+
+    scene.render(str(tmp_path / "volumetric-clouds.png"))
+
+    clouds = calls["clouds"]
+    assert isinstance(clouds, CloudSettings)
+    assert clouds.enabled is True
+    assert clouds.altitude_m == pytest.approx(2100.0)
+    assert clouds.thickness_m == pytest.approx(1400.0)
+    assert clouds.phase_g == pytest.approx(0.85)
+    assert clouds.wind_dir == pytest.approx(90.0)
+    assert clouds.wind_speed == pytest.approx(3.0)
+    assert clouds.powder == pytest.approx(0.5)

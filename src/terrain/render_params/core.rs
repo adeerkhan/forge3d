@@ -25,6 +25,7 @@ pub struct DecodedTerrainSettings {
     pub lens_effects: LensEffectsSettingsNative,
     pub denoise: DenoiseSettingsNative,
     pub volumetrics: VolumetricsSettingsNative,
+    pub clouds: CloudsSettingsNative,
     pub sky: SkySettingsNative,
     pub probes: ProbeSettingsNative,
     pub reflection_probes: ReflectionProbeSettingsNative,

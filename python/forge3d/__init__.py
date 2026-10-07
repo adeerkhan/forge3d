@@ -280,6 +280,7 @@ from .terrain_params import (
     TerrainVTSettings,
     validate_terrain_vt_support,
     SkySettings,
+    CLOUD_PRESETS,
 )
 from .offline import OfflineProgress, OfflineResult, render_offline
 from .denoise_oidn import oidn_available, oidn_denoise
@@ -853,6 +854,7 @@ __all__ = [
     "ReflectionSettings",
     "WaterSettings",
     "CloudSettings",
+    "CLOUD_PRESETS",
     "HeightAoSettings",
     "ScreenSpaceSettings",
     "SunVisibilitySettings",

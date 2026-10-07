@@ -48,6 +48,7 @@ from .terrain_params import (
     ReflectionSettings,
     WaterSettings,
     CloudSettings,
+    CLOUD_PRESETS,
     HeightAoSettings,
     ScreenSpaceSettings,
     SunVisibilitySettings,

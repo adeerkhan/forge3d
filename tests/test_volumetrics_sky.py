@@ -5,6 +5,8 @@ Tests the volumetrics and sky settings configuration.
 import pytest
 
 from forge3d.terrain_params import (
+    CLOUD_PRESETS,
+    CloudSettings,
     DensityVolumeSettings,
     VolumetricsSettings,
     SkySettings,
@@ -273,6 +275,84 @@ class TestSkySettings:
         assert settings.has_aerial_perspective is True
 
 
+class TestCloudSettings:
+    """Tests for the visible-cloud CloudSettings dataclass."""
+
+    def test_cloud_settings_default(self):
+        """CloudSettings is disabled by default and carries the layer defaults."""
+        settings = CloudSettings()
+        assert settings.enabled is False
+        assert settings.shadows_enabled is False
+        assert settings.coverage == 0.5
+        assert settings.density == 0.5
+        assert settings.shadow_strength == 0.35
+        assert settings.quality == "medium"
+        assert settings.altitude_m == 1500.0
+        assert settings.thickness_m == 800.0
+        assert settings.scatter_strength == 1.0
+        assert settings.phase_g == 0.8
+        assert settings.detail == 0.5
+        assert settings.wind_dir == 0.0
+        assert settings.wind_speed == 0.0
+        assert settings.powder == 1.0
+
+    def test_cloud_settings_enabled(self):
+        """CloudSettings accepts the visible-cloud layer fields."""
+        settings = CloudSettings(
+            enabled=True,
+            coverage=0.7,
+            density=0.6,
+            altitude_m=2000.0,
+            thickness_m=1200.0,
+            phase_g=0.85,
+        )
+        assert settings.enabled is True
+        assert settings.coverage == 0.7
+        assert settings.altitude_m == 2000.0
+        assert settings.thickness_m == 1200.0
+        assert settings.phase_g == 0.85
+
+    @pytest.mark.parametrize(
+        "field",
+        ["coverage", "density", "shadow_strength", "detail", "powder"],
+    )
+    def test_cloud_unit_interval_validation(self, field):
+        """Unit-interval fields reject out-of-range and non-finite values."""
+        CloudSettings(**{field: 0.0})
+        with pytest.raises(ValueError, match=field):
+            CloudSettings(**{field: 1.1})
+        with pytest.raises(ValueError, match=field):
+            CloudSettings(**{field: float("nan")})
+
+    def test_cloud_layer_validation(self):
+        """Layer geometry and scattering fields validate their ranges."""
+        with pytest.raises(ValueError, match="altitude_m"):
+            CloudSettings(altitude_m=-1.0)
+        with pytest.raises(ValueError, match="thickness_m"):
+            CloudSettings(thickness_m=-1.0)
+        with pytest.raises(ValueError, match="scatter_strength"):
+            CloudSettings(scatter_strength=-0.1)
+        with pytest.raises(ValueError, match="phase_g"):
+            CloudSettings(phase_g=1.0)
+        with pytest.raises(ValueError, match="wind_dir"):
+            CloudSettings(wind_dir=400.0)
+        with pytest.raises(ValueError, match="wind_speed"):
+            CloudSettings(wind_speed=-1.0)
+
+    def test_cloud_quality_validation(self):
+        """quality must be one of the four named levels."""
+        CloudSettings(quality="ultra")
+        with pytest.raises(ValueError, match="quality must be one of"):
+            CloudSettings(quality="cinematic")
+
+    def test_cloud_presets_are_valid_settings(self):
+        """Every named preset constructs a valid, enabled CloudSettings."""
+        assert set(CLOUD_PRESETS) == {"fair-weather", "scattered", "storm", "cirrus"}
+        for name, preset in CLOUD_PRESETS.items():
+            settings = CloudSettings(**preset)
+            assert settings.enabled is True, name
+
+
 class TestTerrainRenderParamsWithVolumetricsSky:
     """Tests for TerrainRenderParams with volumetrics and sky settings."""
 
@@ -303,6 +383,20 @@ class TestTerrainRenderParamsWithVolumetricsSky:
         )
         assert params.sky is not None
         assert params.sky.enabled is False
+
+    def test_terrain_params_default_clouds(self):
+        """TerrainRenderParams should have disabled clouds by default."""
+        params = make_terrain_params_config(
+            size_px=(256, 256),
+            render_scale=1.0,
+            terrain_span=1000.0,
+            msaa_samples=1,
+            z_scale=1.0,
+            exposure=1.0,
+            domain=(0.0, 100.0),
+        )
+        assert params.clouds is not None
+        assert params.clouds.enabled is False
 
     def test_terrain_params_with_volumetrics_enabled(self):
         """TerrainRenderParams can have volumetrics enabled."""
