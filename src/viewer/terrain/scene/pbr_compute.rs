@@ -185,62 +185,67 @@ impl ViewerTerrainScene {
                 push_constant_ranges: &[],
             });
 
-        let pbr_pipeline = crate::core::shader_registry::create_render_pipeline_scoped(
-            &self.device,
-            &wgpu::RenderPipelineDescriptor {
-                label: Some("terrain_viewer_pbr.pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: "vs_main",
-                    buffers: &[wgpu::VertexBufferLayout {
-                        array_stride: 16,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 8,
-                                shader_location: 1,
-                            },
-                        ],
-                    }],
+        let build_pipeline = |format: wgpu::TextureFormat| {
+            crate::core::shader_registry::create_render_pipeline_scoped(
+                &self.device,
+                &wgpu::RenderPipelineDescriptor {
+                    label: Some("terrain_viewer_pbr.pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: "vs_main",
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: 16,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 0,
+                                    shader_location: 0,
+                                },
+                                wgpu::VertexAttribute {
+                                    format: wgpu::VertexFormat::Float32x2,
+                                    offset: 8,
+                                    shader_location: 1,
+                                },
+                            ],
+                        }],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: "fs_main",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: Some(wgpu::Face::Back),
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: true,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview: None,
                 },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: "fs_main",
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: target_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-            },
-        );
+            )
+        };
 
-        self.pbr_pipeline = Some(pbr_pipeline);
+        // The linear-HDR variant drives the volumetric-cloud composite path:
+        // it writes linear radiance into an Rgba16Float beauty.
+        self.pbr_pipeline = Some(build_pipeline(target_format));
+        self.pbr_pipeline_hdr = Some(build_pipeline(wgpu::TextureFormat::Rgba16Float));
         self.pbr_bind_group_layout = Some(pbr_bind_group_layout);
         println!("[terrain] PBR pipeline initialized");
         Ok(())

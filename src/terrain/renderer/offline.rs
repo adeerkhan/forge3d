@@ -897,9 +897,24 @@ impl TerrainScene {
                         light.color[2] * light.intensity,
                     ],
                     up_axis,
+                    noise_scale: 1.0 / state.params.terrain_span.max(1.0),
                     sample_index: state.total_samples,
                 };
                 let cloud_scope = ts_begin(timing, &mut encoder, "terrain.clouds");
+                let cloud_settings = super::clouds::CloudRenderSettings {
+                    enabled: state.decoded.clouds.enabled,
+                    coverage: state.decoded.clouds.coverage,
+                    density: state.decoded.clouds.density,
+                    altitude_m: state.decoded.clouds.altitude_m,
+                    thickness_m: state.decoded.clouds.thickness_m,
+                    scatter_strength: state.decoded.clouds.scatter_strength,
+                    phase_g: state.decoded.clouds.phase_g,
+                    detail: state.decoded.clouds.detail,
+                    powder: state.decoded.clouds.powder,
+                    wind_dir_deg: state.decoded.clouds.wind_dir,
+                    wind_speed: state.decoded.clouds.wind_speed,
+                    time_seconds: 0.0,
+                };
                 let cloud_rendered = self.clouds.render(
                     self.device.as_ref(),
                     self.queue.as_ref(),
@@ -909,7 +924,7 @@ impl TerrainScene {
                     &state.render_targets.depth_view,
                     state.render_targets.internal_width,
                     state.render_targets.internal_height,
-                    &state.decoded,
+                    &cloud_settings,
                     cloud_frame,
                 )?;
                 if cloud_rendered {

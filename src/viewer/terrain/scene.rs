@@ -260,8 +260,13 @@ pub struct ViewerTerrainScene {
     pub terrain: Option<ViewerTerrainData>,
     /// PBR+POM rendering configuration (opt-in, default off)
     pub pbr_config: super::pbr_renderer::ViewerTerrainPbrConfig,
+    /// Lazy viewer volumetric-cloud renderer, created on first use.
+    pub(super) cloud_renderer: Option<super::clouds::ViewerCloudRenderer>,
     /// PBR pipeline (created lazily when PBR mode enabled)
     pub pbr_pipeline: Option<wgpu::RenderPipeline>,
+    /// Linear-HDR variant of `pbr_pipeline` (Rgba16Float target) used by the
+    /// volumetric-cloud composite path.
+    pub pbr_pipeline_hdr: Option<wgpu::RenderPipeline>,
     pub(super) pbr_bind_group_layout: Option<wgpu::BindGroupLayout>,
     pub(super) pbr_uniform_buffer: Option<TrackedBuffer>,
     pub(super) pbr_bind_group: Option<wgpu::BindGroup>,

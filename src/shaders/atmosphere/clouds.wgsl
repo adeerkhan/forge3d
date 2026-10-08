@@ -2,6 +2,10 @@
 // Depth-aware volumetric cloud raymarch composited into the linear-HDR beauty
 // buffer after terrain and before accumulation/tonemap.
 //
+// Density is a domain-warped cellular (Worley) field blended with fractal
+// value noise, eroded by a ridged detail volume, so the clouds get billowy
+// cauliflower tops and wispy edges rather than smooth blobs.
+//
 // Deterministic: fixed loop counts, no derivatives, `textureSampleLevel`
 // instead of `textureSample`, integer-hash blue-noise jitter seeded by the
 // per-sample index, and det_* arithmetic from the determinism prelude.
@@ -15,7 +19,7 @@ struct CloudUniforms {
     optics: vec4<f32>,          // x scatter_strength, y phase_g, z detail, w powder
     wind: vec4<f32>,            // x dir_radians, y speed, z time_seconds, w sample_index
     screen: vec4<f32>,          // x width, y height, z far fallback for level rays, w unused
-    up_axis: vec4<f32>,         // xyz world up of the camera frame, w unused
+    up_axis: vec4<f32>,         // xyz world up of the camera frame, w = 1/terrain_span noise scale
 };
 
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
@@ -26,9 +30,10 @@ struct CloudUniforms {
 @group(0) @binding(5) var scene_depth: texture_depth_2d;
 @group(0) @binding(6) var beauty_in: texture_2d<f32>;
 @group(0) @binding(7) var clouds_out: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(8) var worley_noise: texture_3d<f32>;
 
 const PI: f32 = 3.141592653589793;
-const MARCH_STEPS: i32 = 48;
+const MARCH_STEPS: i32 = 56;
 const LIGHT_STEPS: i32 = 5;
 
 // Henyey-Greenstein phase function.
@@ -47,31 +52,48 @@ fn jitter(px: u32, py: u32, sample_index: u32) -> f32 {
     return f32(h) * (1.0 / 4294967296.0);
 }
 
-// Base spheroidal FBM shape in [0,1].
+// Domain-warped, cellular-eroded base shape in [0,1]. Noise is sampled in
+// scene-normalized coordinates (`u.up_axis.w` = 1/terrain_span) so the field
+// looks the same at any world scale.
 fn base_shape(p: vec3<f32>) -> f32 {
-    let s0 = textureSampleLevel(base_noise, base_sampler, p * 0.5, 0.0).r;
-    let s1 = textureSampleLevel(base_noise, base_sampler, p, 0.0).r;
-    let s2 = textureSampleLevel(base_noise, base_sampler, p * 2.0, 0.0).r;
-    let s3 = textureSampleLevel(base_noise, base_sampler, p * 4.0, 0.0).r;
-    return det_barrier(det_barrier(det_barrier(s0 * 0.5) + det_barrier(s1 * 0.25)) + det_barrier(s2 * 0.15)) + det_barrier(s3 * 0.1);
+    let q = det_barrier3(p * u.up_axis.w);
+
+    // Low-frequency domain warp: three offset reads of the base volume give a
+    // smooth 3-vector that shears the field into wispy, wind-torn shapes.
+    let w0 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(13.1, 5.2, 9.7)), 0.0).r;
+    let w1 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(31.7, 17.3, 2.9)), 0.0).r;
+    let w2 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(7.3, 23.9, 41.1)), 0.0).r;
+    let warp = det_barrier3(vec3<f32>(w0, w1, w2) - vec3<f32>(0.5)) * 0.35;
+    let w = det_barrier3(q + warp);
+
+    // Billowy cellular mass (Worley) + fractal fluff (FBM).
+    let wor = det_barrier(textureSampleLevel(worley_noise, base_sampler, det_barrier3(w * 2.0), 0.0).r);
+    let f0 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 4.0), 0.0).r * 0.5);
+    let f1 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 8.0), 0.0).r * 0.25);
+    let f2 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 16.0), 0.0).r * 0.15);
+    let f3 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 32.0), 0.0).r * 0.10);
+    let fbm = det_barrier(det_barrier(det_barrier(f0 + f1) + f2) + f3);
+
+    return det_barrier(det_barrier(wor * 0.55) + det_barrier(fbm * 0.45));
 }
 
 // Erosion detail in [0,1] (1 = no erosion).
 fn detail_erosion(p: vec3<f32>, amount: f32) -> f32 {
-    let d0 = textureSampleLevel(detail_noise, detail_sampler, p * 2.0, 0.0).r;
-    let d1 = textureSampleLevel(detail_noise, detail_sampler, p * 5.0, 0.0).r;
+    let q = det_barrier3(p * u.up_axis.w);
+    let d0 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 16.0), 0.0).r;
+    let d1 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 48.0), 0.0).r;
     return det_mix(1.0, det_barrier(d0 * 0.6) + det_barrier(d1 * 0.4), clamp(amount, 0.0, 1.0));
 }
 
 fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     let shape = det_barrier(base_shape(p));
     let coverage = u.layer.z;
-    let eroded = shape - det_barrier((1.0 - coverage) * det_mix(0.6, 1.0, height_frac));
+    let eroded = shape - (det_barrier(1.0 - coverage));
     if eroded <= 0.0 {
         return 0.0;
     }
     let detail = detail_erosion(p, u.optics.z);
-    let vprofile = det_barrier(det_smoothstep(0.0, 0.18, height_frac) * (1.0 - det_smoothstep(0.72, 1.0, height_frac)));
+    let vprofile = det_barrier(det_smoothstep(0.0, 0.2, height_frac) * (1.0 - det_smoothstep(0.6, 1.0, height_frac)));
     return max(det_barrier(eroded * detail) * vprofile, 0.0) * u.layer.w;
 }
 
@@ -152,7 +174,10 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let jitter_offset = det_barrier(det_barrier(jitter(gid.x, gid.y, u32(u.wind.w))) * dt);
             let wind_offset = det_barrier2(vec2<f32>(det_cos(u.wind.x), det_sin(u.wind.x)) * u.wind.y) * u.wind.z;
             let cos_theta = det_dot3(dir, u.sun_direction.xyz);
-            let phase = det_barrier(hg_phase(cos_theta, u.optics.y) * u.optics.x);
+            // Single scattering forward lobe + a cheap dual-lobe multiple
+            // scattering approximation so dense interiors do not go black.
+            let phase_single = det_barrier(hg_phase(cos_theta, u.optics.y) * u.optics.x);
+            let phase_multi = det_barrier(hg_phase(cos_theta, 0.85) * det_barrier(u.optics.x * 0.35));
 
             var t = det_barrier(t_near + jitter_offset);
             for (var i = 0; i < MARCH_STEPS; i = i + 1) {
@@ -165,7 +190,7 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Beer-Powder: darken the sun-lit edge of dense regions.
                     let powder = 1.0 - det_exp(det_barrier(-density * u.optics.w) * 2.0);
                     let sun = det_barrier(sun_transmittance(p, up) * det_mix(1.0, powder, 0.4));
-                    let lit = det_barrier3(u.sun_radiance.rgb * (det_barrier(sun * phase))) + det_barrier3(vec3<f32>(0.35, 0.42, 0.55) * u.optics.x);
+                    let lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + det_barrier3(vec3<f32>(0.35, 0.42, 0.55) * u.optics.x);
                     inscatter = det_barrier3(inscatter + det_barrier3(det_barrier(transmittance * (1.0 - sample_trans)) * lit));
                     transmittance = det_barrier(transmittance * sample_trans);
                     if transmittance < 0.02 {

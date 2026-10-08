@@ -125,6 +125,16 @@ def with_sky(png: Path) -> np.ndarray:
 
 
 def main() -> None:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--clouds", action="store_true", help="Enable the viewer volumetric cloud layer")
+    parser.add_argument("--cloud-altitude", type=float, default=900.0, help="Cloud base altitude (m above the DEM datum)")
+    parser.add_argument("--cloud-thickness", type=float, default=700.0, help="Cloud slab thickness (m)")
+    parser.add_argument("--cloud-coverage", type=float, default=0.4, help="Cloud coverage [0,1]")
+    parser.add_argument("--cloud-density", type=float, default=0.6, help="Cloud density scale")
+    args = parser.parse_args()
+
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg must be on PATH")
@@ -157,6 +167,17 @@ def main() -> None:
                          "height_ao": {"enabled": True, "strength": 0.8, "max_distance": 150.0},
                          "sun_visibility": {"enabled": True, "mode": "soft", "max_distance": 2000.0}})
         viewer.send_ipc({"cmd": "set_terrain", "ambient": 0.1, "zscale": 1.0})
+        if args.clouds:
+            # A flat blue background keeps `with_sky`'s recolour mask (which
+            # matches the background colour) from swallowing white clouds.
+            viewer.send_ipc({"cmd": "set_terrain", "background": [0.35, 0.50, 0.75]})
+            viewer.send_ipc({
+                "cmd": "set_terrain_clouds", "enabled": True,
+                "coverage": args.cloud_coverage, "density": args.cloud_density,
+                "altitude_m": args.cloud_altitude, "thickness_m": args.cloud_thickness,
+                "scatter_strength": 16.0, "phase_g": 0.75, "detail": 0.6, "powder": 0.8,
+                "wind_dir_deg": 60.0, "wind_speed": 0.0,
+            })
         for f, cam in enumerate(cams):
             viewer.send_ipc(cam)
             viewer.snapshot(snapshot, *SIZE)

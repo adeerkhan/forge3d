@@ -372,7 +372,7 @@ impl ViewerTerrainScene {
     ) -> Result<(), crate::viewer::camera_controller::CameraFrameError> {
         if let Some(ref mut t) = self.terrain {
             let phi = t.cam_phi_deg + dx * 0.3;
-            let theta = (t.cam_theta_deg - dy * 0.3).clamp(5.0, 85.0);
+            let theta = (t.cam_theta_deg - dy * 0.3).clamp(5.0, 120.0);
             t.validate_camera_state(
                 anchor,
                 phi,
@@ -417,7 +417,7 @@ impl ViewerTerrainScene {
     ) -> Result<(), crate::viewer::camera_controller::CameraFrameError> {
         if let Some(ref mut t) = self.terrain {
             let phi = t.cam_phi_deg + right * 2.0;
-            let theta = (t.cam_theta_deg - forward * 2.0).clamp(5.0, 85.0);
+            let theta = (t.cam_theta_deg - forward * 2.0).clamp(5.0, 120.0);
             let radius = (t.cam_radius * (1.0 - up * 0.02)).clamp(100.0, 50000.0);
             t.validate_camera_state(anchor, phi, theta, radius, t.cam_fov_deg, t.cam_target)?;
             t.cam_phi_deg = phi;

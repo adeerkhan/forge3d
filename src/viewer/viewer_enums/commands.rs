@@ -96,6 +96,13 @@ pub enum ViewerCmd {
         sky: Option<ViewerSkyConfig>, debug_mode: Option<u32>,
     },
 
+    SetTerrainClouds {
+        enabled: Option<bool>, coverage: Option<f32>, density: Option<f32>,
+        altitude_m: Option<f32>, thickness_m: Option<f32>, scatter_strength: Option<f32>,
+        phase_g: Option<f32>, detail: Option<f32>, powder: Option<f32>,
+        wind_dir_deg: Option<f32>, wind_speed: Option<f32>,
+    },
+
     LoadOverlay { name: String, path: String, extent: Option<[f32; 4]>, opacity: Option<f32>, z_order: Option<i32> },
     RemoveOverlay { id: u32 }, SetOverlayVisible { id: u32, visible: bool },
     SetOverlayOpacity { id: u32, opacity: f32 }, SetGlobalOverlayOpacity { opacity: f32 },

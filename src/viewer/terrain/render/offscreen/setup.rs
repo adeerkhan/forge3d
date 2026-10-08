@@ -45,6 +45,37 @@ impl ViewerTerrainScene {
         Ok((texture, view))
     }
 
+    /// Linear-HDR beauty used by the volumetric-cloud composite path. Needs
+    /// `COPY_DST` because the cloud pass copies its storage output back in.
+    pub(super) fn create_snapshot_hdr_target(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> RenderResult<(TrackedTexture, wgpu::TextureView)> {
+        let texture = tracked_create_texture(
+            &self.device,
+            &wgpu::TextureDescriptor {
+                label: Some("terrain_viewer.snapshot_hdr"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+        )?;
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Ok((texture, view))
+    }
+
     pub(super) fn create_snapshot_depth_target(
         &self,
         width: u32,
@@ -79,6 +110,7 @@ impl ViewerTerrainScene {
         width: u32,
         height: u32,
         frame: crate::viewer::viewer_types::FrameCamera,
+        linear_hdr: bool,
     ) -> SnapshotRenderState {
         if self.pbr_config.enabled && self.pbr_pipeline.is_none() {
             if let Err(e) = self.init_pbr_pipeline(target_format) {
@@ -263,7 +295,12 @@ impl ViewerTerrainScene {
                     self.pbr_config.lens_effects.vignette_softness,
                     0.0,
                 ],
-                screen_dims: [width as f32, height as f32, 0.0, 0.0],
+                screen_dims: [
+                    width as f32,
+                    height as f32,
+                    if linear_hdr { 1.0 } else { 0.0 },
+                    0.0,
+                ],
                 overlay_params: [
                     if self.pbr_config.overlay.enabled {
                         1.0

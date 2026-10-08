@@ -898,10 +898,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else {
         // Apply exposure and tonemapping
         color = color * exposure;
-        color = aces_tonemap(color);
+        // Linear-HDR path (u.screen_dims.z >= 0.5): leave radiance linear for
+        // the cloud composite; the viewer tonemap pass applies ACES + gamma.
+        if (u.screen_dims.z < 0.5) {
+            color = aces_tonemap(color);
 
-        // Gamma correction (linear to sRGB)
-        color = pow(color, vec3<f32>(1.0 / 2.2));
+            // Gamma correction (linear to sRGB)
+            color = pow(color, vec3<f32>(1.0 / 2.2));
+        }
     }
 
     // === ATMOSPHERIC PERSPECTIVE (depth-based haze) ===

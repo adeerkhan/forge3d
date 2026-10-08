@@ -85,6 +85,7 @@ impl ViewerTerrainScene {
         selected_feature_id: u32,
         state: &SnapshotRenderState,
         has_vector_overlays: bool,
+        linear_hdr: bool,
     ) {
         #[cfg(feature = "enable-gpu-instancing")]
         let mut scatter_batches = std::mem::take(&mut self.scatter_batches);
@@ -121,7 +122,15 @@ impl ViewerTerrainScene {
 
             if state.use_pbr {
                 if let Some(ref pbr_bind_group) = self.pbr_bind_group {
-                    pass.set_pipeline(self.pbr_pipeline.as_ref().unwrap());
+                    let pipeline = if linear_hdr {
+                        self.pbr_pipeline_hdr
+                            .as_ref()
+                            .or(self.pbr_pipeline.as_ref())
+                            .unwrap()
+                    } else {
+                        self.pbr_pipeline.as_ref().unwrap()
+                    };
+                    pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, pbr_bind_group, &[]);
                 } else {
                     pass.set_pipeline(&self.pipeline);

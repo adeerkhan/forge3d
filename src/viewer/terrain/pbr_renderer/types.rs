@@ -1,3 +1,4 @@
+use crate::viewer::terrain::clouds::ViewerCloudConfig;
 use crate::viewer::terrain::overlay::OverlayConfig;
 use std::path::PathBuf;
 
@@ -24,6 +25,7 @@ pub struct ViewerTerrainPbrConfig {
     pub volumetrics: VolumetricsConfig,
     pub denoise: DenoiseConfig,
     pub overlay: OverlayConfig,
+    pub clouds: ViewerCloudConfig,
     pub debug_mode: u32,
 }
 

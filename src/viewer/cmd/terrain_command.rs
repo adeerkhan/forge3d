@@ -170,7 +170,7 @@ pub(crate) fn handle_cmd(viewer: &mut Viewer, cmd: &ViewerCmd) -> bool {
                     let candidate_phi = phi.as_ref().copied().unwrap_or(terrain.cam_phi_deg);
                     let candidate_theta = theta
                         .as_ref()
-                        .map(|value| value.clamp(0.0, 85.0))
+                        .map(|value| value.clamp(0.0, 120.0))
                         .unwrap_or(terrain.cam_theta_deg);
                     let candidate_radius = radius
                         .as_ref()
@@ -406,6 +406,40 @@ pub(crate) fn handle_cmd(viewer: &mut Viewer, cmd: &ViewerCmd) -> bool {
                         cfg.turbidity, cfg.ground_albedo, cfg.sky_exposure
                     );
                 }
+            }
+            true
+        }
+        ViewerCmd::SetTerrainClouds {
+            enabled,
+            coverage,
+            density,
+            altitude_m,
+            thickness_m,
+            scatter_strength,
+            phase_g,
+            detail,
+            powder,
+            wind_dir_deg,
+            wind_speed,
+        } => {
+            if let Some(ref mut terrain_viewer) = viewer.terrain_viewer {
+                terrain_viewer.set_terrain_clouds(
+                    *enabled,
+                    *coverage,
+                    *density,
+                    *altitude_m,
+                    *thickness_m,
+                    *scatter_strength,
+                    *phase_g,
+                    *detail,
+                    *powder,
+                    *wind_dir_deg,
+                    *wind_speed,
+                );
+            } else {
+                viewer.reject_command(
+                    "terrain_clouds_require_terrain: set_terrain_clouds needs a loaded terrain",
+                );
             }
             true
         }

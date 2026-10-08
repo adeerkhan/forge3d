@@ -16,12 +16,15 @@ mod shader_pbr;
 pub mod vector_overlay;
 mod volume_density;
 mod volumetrics;
+mod clouds;
 
 #[allow(unused_imports)]
 pub use overlay::{BlendMode, OverlayConfig, OverlayData, OverlayLayer, OverlayStack};
 #[allow(unused_imports)]
 pub use pbr_renderer::ViewerTerrainPbrConfig;
 pub use scene::ViewerTerrainScene;
+#[allow(unused_imports)]
+pub use clouds::ViewerCloudConfig;
 
 // Option B: Vector overlay geometry exports
 #[allow(unused_imports)]

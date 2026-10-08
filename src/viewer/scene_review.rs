@@ -648,7 +648,7 @@ impl Viewer {
                     terrain.cam_phi_deg = phi;
                 }
                 if let Some(theta) = theta_deg {
-                    terrain.cam_theta_deg = theta.clamp(5.0, 85.0);
+                    terrain.cam_theta_deg = theta.clamp(5.0, 120.0);
                 }
                 if let Some(r) = radius {
                     terrain.cam_radius = r.clamp(100.0, 50_000.0);

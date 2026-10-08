@@ -9,10 +9,10 @@ use super::*;
 use crate::core::resource_tracker::{
     tracked_create_buffer, tracked_create_texture, TrackedBuffer, TrackedTexture,
 };
-use crate::terrain::render_params::DecodedTerrainSettings;
 
-const CLOUD_BASE_NOISE_RESOLUTION: u32 = 128;
-const CLOUD_DETAIL_NOISE_RESOLUTION: u32 = 32;
+pub(crate) const CLOUD_BASE_NOISE_RESOLUTION: u32 = 128;
+pub(crate) const CLOUD_DETAIL_NOISE_RESOLUTION: u32 = 32;
+pub(crate) const CLOUD_WORLEY_NOISE_RESOLUTION: u32 = 64;
 const COPY_ROW_ALIGNMENT: u32 = 256;
 
 #[repr(C, align(16))]
@@ -30,14 +30,34 @@ struct CloudUniforms {
 }
 
 /// Per-frame camera/sun inputs for the cloud raymarch.
-pub(in crate::terrain::renderer) struct CloudFrameParams {
+pub(crate) struct CloudFrameParams {
     pub inv_view_proj: [[f32; 4]; 4],
     pub camera_pos: [f32; 3],
     pub sun_direction: [f32; 3],
     pub sun_radiance: [f32; 3],
     /// World up axis of the camera frame: `Y` for screen/north, `Z` for Z-up mesh.
     pub up_axis: [f32; 3],
+    /// `1 / terrain_span`: normalizes noise sampling to the scene scale.
+    pub noise_scale: f32,
     pub sample_index: u32,
+}
+
+/// Shape/optics inputs for the cloud raymarch, independent of the offline
+/// `DecodedTerrainSettings` so the interactive viewer can drive the same pass.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CloudRenderSettings {
+    pub enabled: bool,
+    pub coverage: f32,
+    pub density: f32,
+    pub altitude_m: f32,
+    pub thickness_m: f32,
+    pub scatter_strength: f32,
+    pub phase_g: f32,
+    pub detail: f32,
+    pub powder: f32,
+    pub wind_dir_deg: f32,
+    pub wind_speed: f32,
+    pub time_seconds: f32,
 }
 
 struct CloudOutput {
@@ -47,14 +67,16 @@ struct CloudOutput {
     height: u32,
 }
 
-pub(in crate::terrain::renderer) struct CloudVolumeResources {
+pub(crate) struct CloudVolumeResources {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
     uniform_buffer: TrackedBuffer,
     _base_noise: TrackedTexture,
     _detail_noise: TrackedTexture,
+    _worley_noise: TrackedTexture,
     base_view: wgpu::TextureView,
     detail_view: wgpu::TextureView,
+    worley_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     output: Mutex<Option<CloudOutput>>,
 }
@@ -105,7 +127,13 @@ fn value_noise(x: f32, y: f32, z: f32, period: i32, seed: u32) -> f32 {
 
 /// Tiling FBM volume in `[0, 1]`. `ridge` selects the wispy erosion shape used
 /// for the detail volume; otherwise it is a plain FBM shape.
-fn build_noise(resolution: u32, octaves: u32, freq0: f32, seed: u32, ridge: bool) -> Vec<u8> {
+pub(crate) fn build_noise(
+    resolution: u32,
+    octaves: u32,
+    freq0: f32,
+    seed: u32,
+    ridge: bool,
+) -> Vec<u8> {
     let res = resolution.max(1);
     let inv_res = 1.0 / res as f32;
     let mut data = vec![0u8; (res * res * res) as usize];
@@ -138,8 +166,51 @@ fn build_noise(resolution: u32, octaves: u32, freq0: f32, seed: u32, ridge: bool
     data
 }
 
+/// Seamlessly tiling Worley (F1 cellular) volume in `[0, 1]`; 1 at cell centres.
+/// The feature lattice is periodic (`cells` per axis) so the volume repeats.
+pub(crate) fn build_worley(resolution: u32, cells: i32, seed: u32) -> Vec<u8> {
+    let res = resolution.max(1);
+    let inv = 1.0 / res as f32;
+    let cells = cells.max(1);
+    let mut data = vec![0u8; (res * res * res) as usize];
+    for z in 0..res {
+        for y in 0..res {
+            for x in 0..res {
+                let p = glam::Vec3::new(x as f32 * inv, y as f32 * inv, z as f32 * inv)
+                    * cells as f32;
+                let ip = p.floor();
+                let mut f1 = f32::MAX;
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            let cx = ip.x as i32 + dx;
+                            let cy = ip.y as i32 + dy;
+                            let cz = ip.z as i32 + dz;
+                            let wx = cx.rem_euclid(cells);
+                            let wy = cy.rem_euclid(cells);
+                            let wz = cz.rem_euclid(cells);
+                            let hx = hash3(wx, wy, wz, seed);
+                            let hy = hash3(wx, wy, wz, seed ^ 0x9e37_79b9);
+                            let hz = hash3(wx, wy, wz, seed ^ 0x85eb_ca6b);
+                            let feature = glam::Vec3::new(
+                                cx as f32 + hx,
+                                cy as f32 + hy,
+                                cz as f32 + hz,
+                            );
+                            f1 = f1.min((feature - p).length());
+                        }
+                    }
+                }
+                let value = (1.0 - f1).clamp(0.0, 1.0);
+                data[(z * res * res + y * res + x) as usize] = (value * 255.0 + 0.5) as u8;
+            }
+        }
+    }
+    data
+}
+
 /// Pad each volumetric row to `COPY_ROW_ALIGNMENT`, returning `(data, bytes_per_row)`.
-fn pad_volume_rows(data: &[u8], resolution: u32) -> (Vec<u8>, u32) {
+pub(crate) fn pad_volume_rows(data: &[u8], resolution: u32) -> (Vec<u8>, u32) {
     let res = resolution.max(1);
     let bytes_per_row = ((res + COPY_ROW_ALIGNMENT - 1) / COPY_ROW_ALIGNMENT) * COPY_ROW_ALIGNMENT;
     let mut padded = vec![0u8; (bytes_per_row * res * res) as usize];
@@ -154,7 +225,7 @@ fn pad_volume_rows(data: &[u8], resolution: u32) -> (Vec<u8>, u32) {
     (padded, bytes_per_row)
 }
 
-fn create_noise_texture(
+pub(crate) fn create_noise_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
@@ -203,12 +274,10 @@ fn create_noise_texture(
 }
 
 impl CloudVolumeResources {
-    pub(in crate::terrain::renderer) fn new(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-    ) -> Result<Self> {
-        let base_data = build_noise(CLOUD_BASE_NOISE_RESOLUTION, 4, 1.0, 0x0, false);
-        let detail_data = build_noise(CLOUD_DETAIL_NOISE_RESOLUTION, 3, 2.0, 0x1234_5678, true);
+    pub(crate) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self> {
+        let base_data = build_noise(CLOUD_BASE_NOISE_RESOLUTION, 4, 4.0, 0x0, false);
+        let detail_data = build_noise(CLOUD_DETAIL_NOISE_RESOLUTION, 3, 6.0, 0x1234_5678, true);
+        let worley_data = build_worley(CLOUD_WORLEY_NOISE_RESOLUTION, 4, 0x51ed_2701);
         let (_base_noise, base_view) = create_noise_texture(
             device,
             queue,
@@ -222,6 +291,13 @@ impl CloudVolumeResources {
             "terrain.clouds.detail_noise",
             CLOUD_DETAIL_NOISE_RESOLUTION,
             &detail_data,
+        )?;
+        let (_worley_noise, worley_view) = create_noise_texture(
+            device,
+            queue,
+            "terrain.clouds.worley_noise",
+            CLOUD_WORLEY_NOISE_RESOLUTION,
+            &worley_data,
         )?;
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -292,6 +368,7 @@ impl CloudVolumeResources {
                     },
                     count: None,
                 },
+                texture_3d_entry(8),
             ],
         });
 
@@ -322,8 +399,10 @@ impl CloudVolumeResources {
             uniform_buffer,
             _base_noise,
             _detail_noise,
+            _worley_noise,
             base_view,
             detail_view,
+            worley_view,
             sampler,
             output: Mutex::new(None),
         })
@@ -332,7 +411,7 @@ impl CloudVolumeResources {
     /// Dispatch the cloud composite into `beauty_texture`. Returns `true` when a
     /// pass ran, so the caller can account shader use and GPU timing.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::terrain::renderer) fn render(
+    pub(crate) fn render(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -342,10 +421,9 @@ impl CloudVolumeResources {
         depth_view: &wgpu::TextureView,
         width: u32,
         height: u32,
-        decoded: &DecodedTerrainSettings,
+        clouds: &CloudRenderSettings,
         frame: CloudFrameParams,
     ) -> Result<bool> {
-        let clouds = &decoded.clouds;
         if !clouds.enabled || width == 0 || height == 0 {
             return Ok(false);
         }
@@ -417,13 +495,18 @@ impl CloudVolumeResources {
                 clouds.powder,
             ],
             wind: [
-                clouds.wind_dir.to_radians(),
+                clouds.wind_dir_deg.to_radians(),
                 clouds.wind_speed,
-                0.0,
+                clouds.time_seconds,
                 frame.sample_index as f32,
             ],
             screen: [width as f32, height as f32, 1.0, 1.0],
-            up_axis: [frame.up_axis[0], frame.up_axis[1], frame.up_axis[2], 0.0],
+            up_axis: [
+                frame.up_axis[0],
+                frame.up_axis[1],
+                frame.up_axis[2],
+                frame.noise_scale,
+            ],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
@@ -462,6 +545,10 @@ impl CloudVolumeResources {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&output.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&self.worley_view),
                 },
             ],
         });

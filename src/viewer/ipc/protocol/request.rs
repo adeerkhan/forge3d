@@ -63,6 +63,12 @@ pub enum IpcRequest {
         #[serde(default)] lens_effects: Option<IpcLensEffectsConfig>, #[serde(default)] denoise: Option<IpcDenoiseConfig>,
         #[serde(default)] volumetrics: Option<IpcVolumetricsConfig>, #[serde(default)] sky: Option<IpcSkyConfig>, #[serde(default)] debug_mode: Option<u32>,
     },
+    SetTerrainClouds {
+        #[serde(default)] enabled: Option<bool>, #[serde(default)] coverage: Option<f32>, #[serde(default)] density: Option<f32>,
+        #[serde(default)] altitude_m: Option<f32>, #[serde(default)] thickness_m: Option<f32>, #[serde(default)] scatter_strength: Option<f32>,
+        #[serde(default)] phase_g: Option<f32>, #[serde(default)] detail: Option<f32>, #[serde(default)] powder: Option<f32>,
+        #[serde(default)] wind_dir_deg: Option<f32>, #[serde(default)] wind_speed: Option<f32>,
+    },
     LoadOverlay { name: String, path: String, #[serde(default)] extent: Option<[f32; 4]>, #[serde(default)] opacity: Option<f32>, #[serde(default)] z_order: Option<i32> },
     RemoveOverlay { id: u32 },
     SetOverlayVisible { id: u32, visible: bool },

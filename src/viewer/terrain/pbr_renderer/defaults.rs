@@ -3,6 +3,7 @@ use super::types::{
     MaterialLayerConfig, MotionBlurConfig, SunVisConfig, TonemapConfig, VectorOverlayConfig,
     ViewerTerrainPbrConfig, VolumetricsConfig,
 };
+use crate::viewer::terrain::clouds::ViewerCloudConfig;
 use crate::viewer::terrain::overlay::OverlayConfig;
 
 impl Default for HeightAoConfig {
@@ -167,6 +168,7 @@ impl Default for ViewerTerrainPbrConfig {
             volumetrics: VolumetricsConfig::default(),
             denoise: DenoiseConfig::default(),
             overlay: OverlayConfig::new(),
+            clouds: ViewerCloudConfig::default(),
             debug_mode: 0,
         }
     }
