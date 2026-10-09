@@ -89,8 +89,9 @@ pub(crate) struct ViewerCloudRenderer {
     _scratch: TrackedBuffer,
     /// Cached tonemap bind group keyed by the identity of the HDR view it
     /// binds; rebuilt only when the render target changes (resize), so
-    /// routine frames allocate nothing.
-    tonemap_bind_group: Mutex<Option<(usize, wgpu::BindGroup)>>,
+    /// routine frames allocate nothing. The view is held in the entry so its
+    /// address cannot be recycled while the key is live.
+    tonemap_bind_group: Mutex<Option<(wgpu::Id<wgpu::TextureView>, wgpu::BindGroup)>>,
 }
 
 impl ViewerCloudRenderer {
@@ -261,7 +262,7 @@ impl ViewerCloudRenderer {
         // Tonemap the composited linear-HDR beauty into the display target.
         // The bind group's only varying input is the (stable, stored) HDR view,
         // so it is cached by that view's identity and rebuilt on resize.
-        let hdr_view_key = std::ptr::from_ref(hdr_view) as usize;
+        let hdr_view_key = hdr_view.global_id();
         let mut tonemap_guard = self
             .tonemap_bind_group
             .lock()

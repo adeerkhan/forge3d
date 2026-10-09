@@ -87,7 +87,13 @@ fn base_shape(p: vec3<f32>) -> f32 {
     let f3 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 32.0), 0.0).r * 0.10);
     let fbm = det_barrier(det_barrier(det_barrier(f0 + f1) + f2) + f3);
 
-    return det_barrier(det_barrier(wor * 0.55) + det_barrier(fbm * 0.45));
+    // Frostbite/HZD composite: the shape is the PRODUCT of the fractal field and
+    // the cellular field (each softly biased toward 1), not their average. The
+    // multiply keeps high-contrast puffy interiors with hard zeros between
+    // puffs; an average washes the whole deck into a flat grey sheet.
+    let fluffy = det_barrier(det_barrier(0.1) + det_barrier(0.9 * fbm));
+    let billowy = det_barrier(det_barrier(0.3) + det_barrier(0.7 * wor));
+    return det_barrier(fluffy * billowy);
 }
 
 // Erosion detail in [0,1] (1 = no erosion).
@@ -95,13 +101,25 @@ fn detail_erosion(p: vec3<f32>, amount: f32) -> f32 {
     let q = det_barrier3(det_barrier3(p * u.up_axis.w) * u.feature.x);
     let d0 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 16.0), 0.0).r;
     let d1 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 48.0), 0.0).r;
-    return det_mix(1.0, det_barrier(d0 * 0.6) + det_barrier(d1 * 0.4), clamp(amount, 0.0, 1.0));
+    // Two Worley scales added to the ridged detail (Frostbite's `r + g/2 + b/4`
+    // detail mix) so edges break up at fine AND coarse scales.
+    let w0 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 12.0), 0.0).r;
+    let w1 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 30.0), 0.0).r;
+    let erosion = det_barrier(
+        det_barrier(det_barrier(d0 * 0.45) + det_barrier(d1 * 0.25))
+            + det_barrier(det_barrier(w0 * 0.20) + det_barrier(w1 * 0.10)),
+    );
+    return det_mix(1.0, erosion, clamp(amount, 0.0, 1.0));
 }
 
 // Cumulus vertical profile: a flat base near the bottom of the deck, a high
-// body, and a rounded puff toward the top — reads as volume, not a sheet.
+// body, and a sharply rounded top — reads as volume, not a sheet. The
+// `pow(1 - height_frac, 16)` top is the Frostbite/HZD shape: the body stays
+// dense until close to the top, then rounds off fast, so puffs keep flat
+// bases and domed cauliflower tops instead of a soft cone.
 fn cumulus_profile(height_frac: f32) -> f32 {
-    return det_smoothstep(0.0, 0.10, height_frac) * (1.0 - det_smoothstep(0.72, 1.0, height_frac));
+    let h = clamp(height_frac, 0.0, 1.0);
+    return det_barrier(det_smoothstep(0.0, 0.06, h) * det_barrier(1.0 - det_pow(1.0 - h, 16.0)));
 }
 
 fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
@@ -127,9 +145,10 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     let coverage = clamp(u.layer.z + det_barrier((weather - 0.5) * u.weather.x), 0.0, 1.0);
 
     let shape = base_shape(p);
-    // Narrow the cloud toward the top so tops are smaller than bases.
-    let taper = det_barrier(det_barrier(height_frac * height_frac) * 0.35);
-    let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - taper;
+    // Subtract the vertical erosion budget: thin toward the top (rounded dome)
+    // so tops erode more than bases (HZD height-varying coverage).
+    let profile = det_barrier(cumulus_profile(height_frac));
+    let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - det_barrier(det_barrier(1.0 - profile) * 0.55);
     // Soft coverage cut instead of a hard threshold.
     let cut = det_smoothstep(0.0, 0.10, eroded);
     if cut <= 0.0 {
@@ -137,7 +156,7 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     }
     // Erode thin regions more (height-gradient erosion).
     let detail = detail_erosion(p, u.optics.z * (1.0 - cut));
-    return det_barrier(det_barrier(det_barrier(cut * detail) * det_barrier(cumulus_profile(height_frac))) * edge) * u.layer.w;
+    return det_barrier(det_barrier(det_barrier(cut * detail) * profile) * edge) * u.layer.w;
 }
 
 fn intersect_slab(origin: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> vec2<f32> {

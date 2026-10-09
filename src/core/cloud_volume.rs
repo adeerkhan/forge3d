@@ -114,10 +114,18 @@ pub(crate) struct CloudVolumeResources {
 }
 
 /// Key + bind group for [`CloudVolumeResources::bind_group`].
+///
+/// The render targets (and therefore the beauty/depth views the bind group
+/// binds) are recreated per render call, so the cached bind group holds its
+/// own clones of those views: keeping them alive is what makes pointer
+/// identity a safe key (a dropped view's address cannot be reused while this
+/// entry holds it), and a fresh view always rebuilds the group.
 struct CloudBindGroup {
     width: u32,
     height: u32,
     weather_path: Option<String>,
+    beauty_view: wgpu::Id<wgpu::TextureView>,
+    depth_view: wgpu::Id<wgpu::TextureView>,
     bind_group: wgpu::BindGroup,
 }
 
@@ -669,6 +677,12 @@ impl CloudVolumeResources {
         // Bind group: static geometry/resources change only when the output is
         // resized or the weather map is swapped, so it is cached (see
         // `CloudBindGroup`) instead of rebuilt per frame.
+        // Bind group: static geometry/resources change only when the output is
+        // resized or the weather map is swapped, so it is cached (see
+        // `CloudBindGroup`) instead of rebuilt per frame. The render targets
+        // are recreated per render call, so the beauty/depth views' wgpu ids
+        // (never reused) also key the cache: a fresh view rebuilds the group,
+        // which is what keeps each frame's own beauty texture in the pass.
         let mut bind_group_guard = self
             .bind_group
             .lock()
@@ -679,6 +693,8 @@ impl CloudVolumeResources {
                 cache.width != width
                     || cache.height != height
                     || cache.weather_path != clouds.weather_map
+                    || cache.beauty_view != beauty_view.global_id()
+                    || cache.depth_view != depth_view.global_id()
             })
             .unwrap_or(true);
         if bind_group_stale {
@@ -686,6 +702,8 @@ impl CloudVolumeResources {
                 width,
                 height,
                 weather_path: clouds.weather_map.clone(),
+                beauty_view: beauty_view.global_id(),
+                depth_view: depth_view.global_id(),
                 bind_group: device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("terrain.clouds.bg"),
                     layout: &self.bind_group_layout,

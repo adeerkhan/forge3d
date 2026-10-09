@@ -907,7 +907,10 @@ impl TerrainScene {
                     up_axis,
                     noise_scale: 1.0 / state.params.terrain_span.max(1.0),
                     bounds_center: state.params.cam_target,
-                    extent_radius: (state.params.terrain_span * 0.6).max(1.0),
+                    // The deck reaches well past the terrain footprint so it
+                    // fills the sky above the horizon instead of ending as a
+                    // hard disc around the camera target.
+                    extent_radius: (state.params.terrain_span * 2.5).max(1.0),
                     sample_index: state.total_samples,
                 };
                 let cloud_scope = ts_begin(timing, &mut encoder, "terrain.clouds");
