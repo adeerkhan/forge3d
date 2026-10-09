@@ -278,6 +278,14 @@ class CloudSettings:
     quality: str = "medium"
 
     # Visible cloud layer geometry and shading.
+    #
+    # NOTE on units: the interactive geospatial viewer is metre-based, so these
+    # `_m` defaults (1500 / 800) are metres there. The offline / procedural
+    # `TerrainRenderer` path, however, interprets them in the SAME world units as
+    # the terrain (a 0..1 heightmap * z_scale), where peaks sit around 1.35 — so
+    # these metre defaults float the deck far off-screen and render no clouds.
+    # Pass small world-space values on that path (see examples/
+    # terrain_volumetric_clouds.py and docs/volumetric-clouds.md "Units").
     altitude_m: float = 1500.0      # cloud layer base altitude above the terrain datum
     thickness_m: float = 800.0      # vertical extent of the cloud slab
     scatter_strength: float = 1.0   # in-scatter multiplier
@@ -286,6 +294,9 @@ class CloudSettings:
     wind_dir: float = 0.0           # horizontal advection direction in degrees [0, 360]
     wind_speed: float = 0.0         # horizontal advection speed
     powder: float = 1.0             # powder / dark-edge term strength [0, 1]
+    size: float = 2.0               # cloud size multiplier (bigger = larger puffs)
+    weather_strength: float = 0.6   # how much the weather map varies coverage [0, 1]
+    weather_map: Optional[str] = None  # path to a custom greyscale weather map (None = default)
 
     def __post_init__(self) -> None:
         for name in ("coverage", "density", "shadow_strength", "detail", "powder"):
@@ -306,6 +317,12 @@ class CloudSettings:
             raise ValueError("wind_dir must be finite and in [0, 360] degrees")
         if not math.isfinite(float(self.wind_speed)) or float(self.wind_speed) < 0.0:
             raise ValueError("wind_speed must be finite and >= 0")
+        if not math.isfinite(float(self.size)) or float(self.size) <= 0.0:
+            raise ValueError("size must be finite and > 0")
+        if not math.isfinite(float(self.weather_strength)) or not 0.0 <= float(self.weather_strength) <= 1.0:
+            raise ValueError("weather_strength must be finite and in [0, 1]")
+        if self.weather_map is not None and not isinstance(self.weather_map, str):
+            raise ValueError("weather_map must be a path string or None")
 
 
 # Named visible-cloud presets. Each value is a plain mapping of ``CloudSettings``

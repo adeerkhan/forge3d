@@ -806,6 +806,14 @@ impl TerrainScene {
                 &pass_bind_groups.material_layer,
             )?;
 
+            // HDRI skybox as the scene background.
+            self.skybox.render(
+                self.queue.as_ref(),
+                &mut encoder,
+                &render_targets.internal_view,
+                (jittered_proj * view).inverse().to_cols_array_2d(),
+            )?;
+
             if let Some(sky) = sky_texture.as_ref() {
                 if sky.linear_hdr {
                     // Both textures are exact-resolution RGBA16F. A direct
@@ -887,7 +895,7 @@ impl TerrainScene {
                 } else {
                     [0.0, 1.0, 0.0]
                 };
-                let cloud_frame = super::clouds::CloudFrameParams {
+                let cloud_frame = crate::core::cloud_volume::CloudFrameParams {
                     inv_view_proj,
                     camera_pos: [eye.x, eye.y, eye.z],
                     sun_direction: light.direction,
@@ -898,10 +906,12 @@ impl TerrainScene {
                     ],
                     up_axis,
                     noise_scale: 1.0 / state.params.terrain_span.max(1.0),
+                    bounds_center: state.params.cam_target,
+                    extent_radius: (state.params.terrain_span * 0.6).max(1.0),
                     sample_index: state.total_samples,
                 };
                 let cloud_scope = ts_begin(timing, &mut encoder, "terrain.clouds");
-                let cloud_settings = super::clouds::CloudRenderSettings {
+                let cloud_settings = crate::core::cloud_volume::CloudRenderSettings {
                     enabled: state.decoded.clouds.enabled,
                     coverage: state.decoded.clouds.coverage,
                     density: state.decoded.clouds.density,
@@ -914,6 +924,14 @@ impl TerrainScene {
                     wind_dir_deg: state.decoded.clouds.wind_dir,
                     wind_speed: state.decoded.clouds.wind_speed,
                     time_seconds: 0.0,
+                    shadow_strength: if state.decoded.clouds.shadows_enabled {
+                        state.decoded.clouds.shadow_strength
+                    } else {
+                        0.0
+                    },
+                    size: state.decoded.clouds.size,
+                    weather_strength: state.decoded.clouds.weather_strength,
+                    weather_map: state.decoded.clouds.weather_map.clone(),
                 };
                 let cloud_rendered = self.clouds.render(
                     self.device.as_ref(),

@@ -415,6 +415,20 @@ pub(crate) fn atmosphere_clouds() -> String {
     assemble_parts(atmosphere_clouds_parts())
 }
 
+/// Fullscreen HDRI skybox background. Sampled via `textureSampleLevel` (no
+/// derivatives), so the determinism prelude is not required.
+pub(crate) fn skybox_parts() -> &'static [SourcePart] {
+    &[SourcePart {
+        path: "src/shaders/skybox.wgsl",
+        text: include_str!("shaders/skybox.wgsl"),
+        strip: false,
+    }]
+}
+
+pub(crate) fn skybox() -> String {
+    assemble_parts(skybox_parts())
+}
+
 /// Standalone PROMETHEUS aerial post. Keeping this source out of
 /// `hybrid_kernel()` is the contract that the established traversal and
 /// accumulation bind-group layouts remain byte-for-byte untouched.
@@ -1153,6 +1167,7 @@ mod tests {
             ("aether_sky", aether_sky()),
             ("aether_blit", aether_blit()),
             ("atmosphere_clouds", atmosphere_clouds()),
+            ("skybox", skybox()),
             ("prometheus_aerial", prometheus_aerial()),
             ("terrain", terrain()),
             ("terrain_bindless", terrain_bindless()),

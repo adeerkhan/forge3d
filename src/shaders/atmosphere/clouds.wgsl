@@ -20,6 +20,9 @@ struct CloudUniforms {
     wind: vec4<f32>,            // x dir_radians, y speed, z time_seconds, w sample_index
     screen: vec4<f32>,          // x width, y height, z far fallback for level rays, w unused
     up_axis: vec4<f32>,         // xyz world up of the camera frame, w = 1/terrain_span noise scale
+    bounds: vec4<f32>,          // xyz cloud-field centre (world), w = horizontal extent radius
+    feature: vec4<f32>,         // x cell-frequency multiplier (cloud size), y = shadow strength
+    weather: vec4<f32>,         // x weather-map strength (coverage variation), yzw unused
 };
 
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
@@ -31,16 +34,26 @@ struct CloudUniforms {
 @group(0) @binding(6) var beauty_in: texture_2d<f32>;
 @group(0) @binding(7) var clouds_out: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(8) var worley_noise: texture_3d<f32>;
+@group(0) @binding(9) var weather_map: texture_2d<f32>;
+@group(0) @binding(10) var weather_sampler: sampler;
 
 const PI: f32 = 3.141592653589793;
 const MARCH_STEPS: i32 = 56;
 const LIGHT_STEPS: i32 = 5;
 
 // Henyey-Greenstein phase function.
+//
+// The anisotropy is clamped and the denominator floored so the forward-scatter
+// peak stays bounded: the single lobe accepts `phase_g` up to 0.99 and the
+// multi-scatter approximation below uses g = 0.85, both of which otherwise
+// drive `1 + g^2 - 2 g cos(theta)` toward zero at cos(theta) -> 1 and blow the
+// phase term (and the clouds) out to white around the sun.
 fn hg_phase(cos_theta: f32, g: f32) -> f32 {
-    let g2 = det_barrier(g * g);
-    let denom = det_barrier(1.0 + g2) - det_barrier(det_barrier(2.0 * g) * cos_theta);
-    return det_div(1.0 - g2, det_barrier(4.0 * PI * max(denom, 1.0e-4)) * det_sqrt(max(denom, 1.0e-4)));
+    let gc = clamp(g, -0.85, 0.85);
+    let g2 = det_barrier(gc * gc);
+    let d1 = det_barrier(1.0 + g2) - det_barrier(det_barrier(2.0 * gc) * cos_theta);
+    let denom = max(d1, 0.07);
+    return det_div(1.0 - g2, det_barrier(4.0 * PI * denom) * det_sqrt(denom));
 }
 
 // Blue-noise-ish jitter in [0,1) from an integer hash of pixel + sample.
@@ -56,14 +69,14 @@ fn jitter(px: u32, py: u32, sample_index: u32) -> f32 {
 // scene-normalized coordinates (`u.up_axis.w` = 1/terrain_span) so the field
 // looks the same at any world scale.
 fn base_shape(p: vec3<f32>) -> f32 {
-    let q = det_barrier3(p * u.up_axis.w);
+    let q = det_barrier3(det_barrier3(p * u.up_axis.w) * u.feature.x);
 
     // Low-frequency domain warp: three offset reads of the base volume give a
     // smooth 3-vector that shears the field into wispy, wind-torn shapes.
-    let w0 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(13.1, 5.2, 9.7)), 0.0).r;
-    let w1 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(31.7, 17.3, 2.9)), 0.0).r;
-    let w2 = textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 3.0 + vec3<f32>(7.3, 23.9, 41.1)), 0.0).r;
-    let warp = det_barrier3(vec3<f32>(w0, w1, w2) - vec3<f32>(0.5)) * 0.35;
+    let w0 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(13.1, 5.2, 9.7)), 0.0).r;
+    let w1 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(31.7, 17.3, 2.9)), 0.0).r;
+    let w2 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(7.3, 23.9, 41.1)), 0.0).r;
+    let warp = det_barrier3(det_barrier3(vec3<f32>(w0, w1, w2) - vec3<f32>(0.5)) * 0.22);
     let w = det_barrier3(q + warp);
 
     // Billowy cellular mass (Worley) + fractal fluff (FBM).
@@ -79,22 +92,52 @@ fn base_shape(p: vec3<f32>) -> f32 {
 
 // Erosion detail in [0,1] (1 = no erosion).
 fn detail_erosion(p: vec3<f32>, amount: f32) -> f32 {
-    let q = det_barrier3(p * u.up_axis.w);
+    let q = det_barrier3(det_barrier3(p * u.up_axis.w) * u.feature.x);
     let d0 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 16.0), 0.0).r;
     let d1 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 48.0), 0.0).r;
     return det_mix(1.0, det_barrier(d0 * 0.6) + det_barrier(d1 * 0.4), clamp(amount, 0.0, 1.0));
 }
 
+// Cumulus vertical profile: a flat base near the bottom of the deck, a high
+// body, and a rounded puff toward the top — reads as volume, not a sheet.
+fn cumulus_profile(height_frac: f32) -> f32 {
+    return det_smoothstep(0.0, 0.10, height_frac) * (1.0 - det_smoothstep(0.72, 1.0, height_frac));
+}
+
 fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
-    let shape = det_barrier(base_shape(p));
-    let coverage = u.layer.z;
-    let eroded = shape - (det_barrier(1.0 - coverage));
-    if eroded <= 0.0 {
+    let up = det_normalize3(u.up_axis.xyz);
+    // Clip the field to a bounded horizontal extent around the cloud centre,
+    // with a soft edge so the cloud deck fades out instead of ending in a hard
+    // disc — clouds stay a finite volume over the terrain, not an infinite slab.
+    let rel = det_barrier3(p - u.bounds.xyz);
+    let h_off = rel - det_barrier3(up * det_dot3(rel, up));
+    let extent = det_div(det_dot3(h_off, h_off), max(u.bounds.w * u.bounds.w, 1.0e-6));
+    if extent >= 1.0 {
         return 0.0;
     }
-    let detail = detail_erosion(p, u.optics.z);
-    let vprofile = det_barrier(det_smoothstep(0.0, 0.2, height_frac) * (1.0 - det_smoothstep(0.6, 1.0, height_frac)));
-    return max(det_barrier(eroded * detail) * vprofile, 0.0) * u.layer.w;
+    let edge = 1.0 - det_smoothstep(0.6, 1.0, extent);
+
+    // Weather map: a 2D field over the cloud patch that varies coverage (and
+    // thus cloud type) from place to place.
+    let helper = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(up.y) < 0.9);
+    let right = det_normalize3(det_cross3(up, helper));
+    let forward = det_cross3(up, right);
+    let wuv = det_barrier2(det_barrier2(det_div2(vec2<f32>(det_dot3(h_off, right), det_dot3(h_off, forward)), vec2<f32>(max(u.bounds.w, 1.0e-3)))) * 0.5) + vec2<f32>(0.5);
+    let weather = textureSampleLevel(weather_map, weather_sampler, wuv, 0.0).r;
+    let coverage = clamp(u.layer.z + det_barrier((weather - 0.5) * u.weather.x), 0.0, 1.0);
+
+    let shape = base_shape(p);
+    // Narrow the cloud toward the top so tops are smaller than bases.
+    let taper = det_barrier(det_barrier(height_frac * height_frac) * 0.35);
+    let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - taper;
+    // Soft coverage cut instead of a hard threshold.
+    let cut = det_smoothstep(0.0, 0.10, eroded);
+    if cut <= 0.0 {
+        return 0.0;
+    }
+    // Erode thin regions more (height-gradient erosion).
+    let detail = detail_erosion(p, u.optics.z * (1.0 - cut));
+    return det_barrier(det_barrier(det_barrier(cut * detail) * det_barrier(cumulus_profile(height_frac))) * edge) * u.layer.w;
 }
 
 fn intersect_slab(origin: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> vec2<f32> {
@@ -155,6 +198,9 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // and the copy-back would clobber the beauty).
     var transmittance = 1.0;
     var inscatter = vec3<f32>(0.0);
+    // Terrain cloud shadow: how much sun the cloud deck blocks above each
+    // terrain point (1 = full sun, 0 = fully shadowed).
+    var terrain_shadow = 1.0;
 
     let slab = intersect_slab(origin, dir, up);
     if slab.y > slab.x && slab.y > 0.0 {
@@ -166,13 +212,29 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let scene_h = det_mat4_mul_vec4(u.inv_view_proj, vec4<f32>(ndc, depth, 1.0));
             let scene_p = det_div3(scene_h.xyz, vec3<f32>(scene_h.w));
             t_far = min(t_far, det_dot3(scene_p - origin, dir));
+            // Cloud shadow: sample the deck offset along the sun's horizontal
+            // direction (so the shadow is cast away from the sun) and soften it.
+            let sun = u.sun_direction.xyz;
+            let sun_up = max(det_dot3(sun, up), 0.25);
+            let sun_h_raw = sun - det_barrier3(up * det_dot3(sun, up));
+            let sun_h = det_div3(sun_h_raw, vec3<f32>(max(det_length3(sun_h_raw), 1.0e-3)));
+            let deck_h = det_barrier(u.layer.x + det_barrier(u.layer.y * 0.5)) - det_barrier(det_dot3(scene_p, up));
+            let above = det_barrier3(det_barrier3(scene_p + det_barrier3(up * deck_h)) - det_barrier3(sun_h * (det_div(deck_h, sun_up))));
+            let deck = cloud_density(above, 0.5);
+            let s = 1.0 - det_smoothstep(0.0, 1.1, deck);
+            terrain_shadow = det_mix(1.0, s, clamp(u.feature.y, 0.0, 1.0) * 0.55);
         }
         let t_near = max(slab.x, 0.0);
         if t_far > t_near {
             let steps = f32(MARCH_STEPS);
             let dt = det_div(t_far - t_near, steps);
             let jitter_offset = det_barrier(det_barrier(jitter(gid.x, gid.y, u32(u.wind.w))) * dt);
-            let wind_offset = det_barrier2(vec2<f32>(det_cos(u.wind.x), det_sin(u.wind.x)) * u.wind.y) * u.wind.z;
+            // Advect the field with wind in the plane perpendicular to the up
+            // axis (Y-up: XZ plane; Z-up: XY plane), scaled by speed * time.
+            let helper = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(up.y) < 0.9);
+            let right = det_normalize3(det_cross3(up, helper));
+            let forward = det_cross3(up, right);
+            let wind_vec = det_barrier3(det_barrier3((det_barrier3(right * det_cos(u.wind.x)) + det_barrier3(forward * det_sin(u.wind.x))) * u.wind.y) * u.wind.z);
             let cos_theta = det_dot3(dir, u.sun_direction.xyz);
             // Single scattering forward lobe + a cheap dual-lobe multiple
             // scattering approximation so dense interiors do not go black.
@@ -183,14 +245,17 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             for (var i = 0; i < MARCH_STEPS; i = i + 1) {
                 let p = det_barrier3(origin + det_barrier3(dir * t));
                 let hf = slab_height_frac(p, up);
-                let density = det_barrier(cloud_density(p + det_barrier3(vec3<f32>(wind_offset.x, 0.0, wind_offset.y)), hf));
+                let density = det_barrier(cloud_density(det_barrier3(p - wind_vec), hf));
                 if density > 0.0 {
                     let extinction = density * dt;
                     let sample_trans = det_exp(-extinction);
                     // Beer-Powder: darken the sun-lit edge of dense regions.
                     let powder = 1.0 - det_exp(det_barrier(-density * u.optics.w) * 2.0);
                     let sun = det_barrier(sun_transmittance(p, up) * det_mix(1.0, powder, 0.4));
-                    let lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + det_barrier3(vec3<f32>(0.35, 0.42, 0.55) * u.optics.x);
+                    // Ambient multiple-scatter: neutral grey, darker under the
+                    // cloud, brighter toward its sunlit top.
+                    let ambient = det_barrier3(det_mix3(vec3<f32>(0.26, 0.27, 0.30), vec3<f32>(0.74, 0.76, 0.80), hf) * u.optics.x);
+                    let lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + ambient;
                     inscatter = det_barrier3(inscatter + det_barrier3(det_barrier(transmittance * (1.0 - sample_trans)) * lit));
                     transmittance = det_barrier(transmittance * sample_trans);
                     if transmittance < 0.02 {
@@ -199,10 +264,21 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 }
                 t = det_barrier(t + dt);
             }
+
+            // Aerial perspective: fade the cloud contribution toward the sky
+            // colour with distance so the deck sits in the atmosphere rather
+            // than on a flat backdrop. `u.up_axis.w` = 1/terrain_span, so
+            // `t_far * u.up_axis.w` is the distance measured in scene-widths —
+            // the fog then engages at the offline renderer's world units
+            // instead of implicitly assuming metre-scale distances.
+            let up_amt = clamp(det_dot3(dir, up), 0.0, 1.0);
+            let sky = det_barrier3(det_barrier3(vec3<f32>(0.30, 0.46, 0.72) + det_barrier3(vec3<f32>(0.5, 0.32, 0.0) * det_pow(1.0 - up_amt, 4.0))) + det_barrier3(u.sun_radiance.rgb * det_barrier(0.12 * det_pow(clamp(det_dot3(dir, u.sun_direction.xyz), 0.0, 1.0), 8.0))));
+            let fog = det_barrier(0.7 * (1.0 - det_exp(-0.4 * det_barrier(t_far * u.up_axis.w))));
+            inscatter = det_barrier3(det_mix3(inscatter, det_barrier3(sky * (1.0 - transmittance)), fog));
         }
     }
 
     let previous = textureLoad(beauty_in, pixel, 0);
-    let composited = det_barrier3(previous.rgb * transmittance) + inscatter;
+    let composited = det_barrier3(det_barrier3(previous.rgb * transmittance) * terrain_shadow) + inscatter;
     textureStore(clouds_out, pixel, vec4<f32>(composited, previous.a));
 }

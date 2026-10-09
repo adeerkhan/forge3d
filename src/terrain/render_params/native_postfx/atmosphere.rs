@@ -70,6 +70,12 @@ pub struct CloudsSettingsNative {
     pub wind_speed: f32,
     /// Powder / dark-edge term strength in `[0, 1]`.
     pub powder: f32,
+    /// Cloud size multiplier (bigger = larger puffs).
+    pub size: f32,
+    /// How strongly the weather map varies coverage across the sky, in `[0, 1]`.
+    pub weather_strength: f32,
+    /// Optional path to a custom greyscale weather map; `None` uses the default.
+    pub weather_map: Option<String>,
 }
 
 #[cfg(feature = "extension-module")]
@@ -90,6 +96,9 @@ impl Default for CloudsSettingsNative {
             wind_dir: 0.0,
             wind_speed: 0.0,
             powder: 1.0,
+            size: 2.0,
+            weather_strength: 0.6,
+            weather_map: None,
         }
     }
 }

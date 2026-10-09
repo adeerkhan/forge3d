@@ -52,11 +52,42 @@ pub fn load_hdr<P: AsRef<Path>>(path: P) -> RenderResult<HdrImage> {
 
     let mut reader = BufReader::new(file);
 
-    // Parse header
-    let (width, height) = parse_header(&mut reader)?;
+    // Parse header (dimensions + scanline orientation).
+    let (width, height, flip_x, flip_y) = parse_header(&mut reader)?;
 
-    // Read scanlines
-    let rgbe_data = read_scanlines(&mut reader, width, height)?;
+    // Read scanlines in file order.
+    let mut rgbe_data = read_scanlines(&mut reader, width, height)?;
+
+    // Radiance orientation: the resolution line's sign on each axis says whether
+    // the first scanline/pixel in the file starts at the TOP (-Y) / LEFT (+X) or
+    // the BOTTOM (+Y) / RIGHT (-X) of the image. The conventional marker `-Y +X`
+    // is already top-down (it is the "common orientation" for reference
+    // decoders such as the `image` crate, and both shipped HDRI assets — a
+    // sunrise sky with a bright zenith in the first scanline and a dark ground
+    // in the last — only read correctly that way), so only `+Y` and `-X` need a
+    // flip to land on row 0 = top. Flipping `-Y` instead inverted every
+    // conventional environment, lighting scenes from the ground up.
+    if flip_y {
+        let w = width as usize;
+        let h = height as usize;
+        for row in 0..h / 2 {
+            let top = row * w;
+            let bottom = (h - 1 - row) * w;
+            for i in 0..w {
+                rgbe_data.swap(top + i, bottom + i);
+            }
+        }
+    }
+    if flip_x {
+        let w = width as usize;
+        let h = height as usize;
+        for row in 0..h {
+            let base = row * w;
+            for i in 0..w / 2 {
+                rgbe_data.swap(base + i, base + (w - 1 - i));
+            }
+        }
+    }
 
     // Convert RGBe to linear RGB
     let rgb_data = convert_rgbe_to_rgb(&rgbe_data);
@@ -69,7 +100,7 @@ pub fn load_hdr<P: AsRef<Path>>(path: P) -> RenderResult<HdrImage> {
 }
 
 /// Parse HDR file header
-fn parse_header<R: BufRead>(reader: &mut R) -> RenderResult<(u32, u32)> {
+fn parse_header<R: BufRead>(reader: &mut R) -> RenderResult<(u32, u32, bool, bool)> {
     let mut line = String::new();
 
     // Read magic line
@@ -126,7 +157,12 @@ fn parse_header<R: BufRead>(reader: &mut R) -> RenderResult<(u32, u32)> {
 
     let resolution_line = line.trim();
 
-    // Parse resolution (format: "-Y height +X width" or "+Y height +X width")
+    // Parse the resolution line as (axis, count) pairs, e.g. "-Y 1024 +X 2048".
+    // Axis order is not guaranteed by the format, so read each pair rather than
+    // fixed offsets. The sign records the scan direction relative to the
+    // row-0-at-top, left-to-right raster order this loader normalises to:
+    // `-Y` runs top->bottom (the conventional default) and `+X` left->right,
+    // so only `+Y` (bottom->top) and `-X` (right->left) need a flip.
     let parts: Vec<&str> = resolution_line.split_whitespace().collect();
     if parts.len() != 4 {
         return Err(RenderError::upload(format!(
@@ -135,12 +171,41 @@ fn parse_header<R: BufRead>(reader: &mut R) -> RenderResult<(u32, u32)> {
         )));
     }
 
-    let height = parts[1]
-        .parse::<u32>()
-        .map_err(|_| RenderError::upload(format!("Invalid HDR height: {}", parts[1])))?;
-    let width = parts[3]
-        .parse::<u32>()
-        .map_err(|_| RenderError::upload(format!("Invalid HDR width: {}", parts[3])))?;
+    let mut width: Option<u32> = None;
+    let mut height: Option<u32> = None;
+    let mut flip_x = false;
+    let mut flip_y = false;
+    let mut index = 0;
+    while index + 1 < parts.len() {
+        let axis = parts[index].to_ascii_uppercase();
+        let count = parts[index + 1]
+            .parse::<u32>()
+            .map_err(|_| RenderError::upload(format!("Invalid HDR resolution value: {}", parts[index + 1])))?;
+        match axis.as_str() {
+            "+X" => width = Some(count),
+            "-X" => {
+                width = Some(count);
+                flip_x = true;
+            }
+            "-Y" => height = Some(count),
+            "+Y" => {
+                height = Some(count);
+                flip_y = true;
+            }
+            other => {
+                return Err(RenderError::upload(format!(
+                    "Invalid HDR resolution axis: {}",
+                    other
+                )));
+            }
+        }
+        index += 2;
+    }
+
+    let width = width
+        .ok_or_else(|| RenderError::upload("HDR resolution line missing X axis".to_string()))?;
+    let height = height
+        .ok_or_else(|| RenderError::upload("HDR resolution line missing Y axis".to_string()))?;
 
     if width == 0 || height == 0 {
         return Err(RenderError::upload(
@@ -148,7 +213,7 @@ fn parse_header<R: BufRead>(reader: &mut R) -> RenderResult<(u32, u32)> {
         ));
     }
 
-    Ok((width, height))
+    Ok((width, height, flip_x, flip_y))
 }
 
 /// Read HDR scanlines with RLE decompression
@@ -375,6 +440,125 @@ mod tests {
             assert!((img.data[i * 3] - 128.0 * exp).abs() < 1e-6);
             assert!((img.data[i * 3 + 1] - 64.0 * exp).abs() < 1e-6);
             assert!((img.data[i * 3 + 2] - 32.0 * exp).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn hdr_minus_y_keeps_file_order_top_down() {
+        use std::io::Write;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("forge3d_hdr_minus_y_{}.hdr", std::process::id()));
+        {
+            let mut f = File::create(&path).expect("create radiance fixture");
+            // -Y +X is the COMMON orientation for the format: the first
+            // scanline in the file is the TOP row (see
+            // `hdr_minus_y_matches_image_crate_reference_orientation`). Two
+            // distinct scanlines prove the loader keeps that order.
+            f.write_all(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n").unwrap();
+            let first = [200u8, 200, 200, 128];
+            let second = [10u8, 10, 10, 128];
+            for _ in 0..4 {
+                f.write_all(&first).unwrap();
+            }
+            for _ in 0..4 {
+                f.write_all(&second).unwrap();
+            }
+        }
+        let img = load_hdr(&path).expect("decode radiance fixture");
+        std::fs::remove_file(&path).ok();
+
+        let exp = 2.0f32.powi(128 - 128 - 8);
+        // Row 0 (top) must be the FIRST file scanline (200).
+        assert!(
+            (img.data[0] - 200.0 * exp).abs() < 1e-6,
+            "top row should be the file's first (top) scanline"
+        );
+        let second_row = (4 * 3) as usize; // width 4 -> second decoded row starts here
+        assert!(
+            (img.data[second_row] - 10.0 * exp).abs() < 1e-6,
+            "bottom row should be the file's second (bottom) scanline"
+        );
+    }
+
+    /// `+Y` stores the scanlines bottom-up (the opposite of the conventional
+    /// `-Y`), so the first file scanline must land in the LAST decoded row.
+    #[test]
+    fn hdr_plus_y_scanlines_are_flipped_to_top_down() {
+        use std::io::Write;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("forge3d_hdr_plus_y_{}.hdr", std::process::id()));
+        {
+            let mut f = File::create(&path).expect("create radiance fixture");
+            f.write_all(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n+Y 2 +X 4\n").unwrap();
+            let first = [10u8, 10, 10, 128];
+            let second = [200u8, 200, 200, 128];
+            for _ in 0..4 {
+                f.write_all(&first).unwrap();
+            }
+            for _ in 0..4 {
+                f.write_all(&second).unwrap();
+            }
+        }
+        let img = load_hdr(&path).expect("decode radiance fixture");
+        std::fs::remove_file(&path).ok();
+
+        let exp = 2.0f32.powi(128 - 128 - 8);
+        // Row 0 (top) must be the SECOND file scanline (200).
+        assert!(
+            (img.data[0] - 200.0 * exp).abs() < 1e-6,
+            "top row should be the file's last scanline for +Y"
+        );
+        assert!(
+            (img.data[4 * 3] - 10.0 * exp).abs() < 1e-6,
+            "bottom row should be the file's first scanline for +Y"
+        );
+    }
+
+    /// Cross-check our orientation against the `image` crate's Radiance
+    /// decoder, the reference implementation for `-Y +X`: its
+    /// `parse_dimensions_line` documents that combination as the COMMON
+    /// orientation (left-right, top-down) and reads scanlines in file order
+    /// without flipping. If our loader and the reference disagree on which
+    /// file row is "up", exactly one of us is vertically inverted — and an
+    /// inverted environment lights the scene from the ground up. (The shipped
+    /// `qwantani_sunrise_puresky_2k.hdr` and `assets/hdri/sky.hdr` are both
+    /// `-Y` with a bright zenith in the first scanline, which agrees with the
+    /// reference rather than with the flip.)
+    #[test]
+    fn hdr_minus_y_matches_image_crate_reference_orientation() {
+        use std::io::Write;
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("forge3d_hdr_ref_{}.hdr", std::process::id()));
+        {
+            let mut f = File::create(&path).expect("create radiance fixture");
+            f.write_all(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n").unwrap();
+            for pixel in [[10u8, 10, 10, 128], [200, 200, 200, 128]] {
+                for _ in 0..4 {
+                    f.write_all(&pixel).unwrap();
+                }
+            }
+        }
+
+        let img = load_hdr(&path).expect("decode radiance fixture");
+        let reference = image::open(&path).expect("image crate decode fixture").to_rgb32f();
+        std::fs::remove_file(&path).ok();
+
+        assert_eq!((img.width, img.height), reference.dimensions());
+        let stride = img.width as usize * 3;
+        for y in 0..img.height as usize {
+            let px = reference.get_pixel(0, y as u32).0;
+            let ours = &img.data[y * stride..y * stride + 3];
+            for channel in 0..3 {
+                assert!(
+                    (ours[channel] - px[channel]).abs() < 1e-6,
+                    "row {y} channel {channel}: ours={} reference={}",
+                    ours[channel],
+                    px[channel]
+                );
+            }
         }
     }
 }

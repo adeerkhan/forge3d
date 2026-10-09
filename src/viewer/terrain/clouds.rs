@@ -2,7 +2,7 @@
 //! Viewer-side volumetric clouds (linear-HDR).
 //!
 //! Reuses the offline deterministic cloud raymarch
-//! (`terrain::renderer::clouds::CloudVolumeResources`), which composites
+//! (`core::cloud_volume::CloudVolumeResources`), which composites
 //! `beauty * transmittance + inscatter` in linear HDR. The interactive viewer
 //! therefore renders its terrain into an `Rgba16Float` beauty when clouds are
 //! enabled, runs the shared cloud pass, then tonemaps once into the display
@@ -11,10 +11,9 @@
 use crate::core::resource_tracker::{
     tracked_create_buffer, TrackedBuffer,
 };
-use crate::terrain::renderer::clouds::{
-    CloudFrameParams, CloudRenderSettings, CloudVolumeResources,
-};
+use crate::core::cloud_volume::{CloudFrameParams, CloudRenderSettings, CloudVolumeResources};
 use super::ViewerTerrainScene;
+use std::sync::Mutex;
 use wgpu::{
     BindGroupLayout, BindGroupLayoutEntry, BindingType, BufferDescriptor,
     BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, MultisampleState,
@@ -37,6 +36,10 @@ pub struct ViewerCloudConfig {
     pub powder: f32,
     pub wind_dir_deg: f32,
     pub wind_speed: f32,
+    pub shadow_strength: f32,
+    pub size: f32,
+    pub weather_strength: f32,
+    pub weather_map: Option<String>,
 }
 
 impl Default for ViewerCloudConfig {
@@ -53,6 +56,10 @@ impl Default for ViewerCloudConfig {
             powder: 0.5,
             wind_dir_deg: 30.0,
             wind_speed: 0.0,
+            shadow_strength: 0.5,
+            size: 2.0,
+            weather_strength: 0.6,
+            weather_map: None,
         }
     }
 }
@@ -66,6 +73,10 @@ pub(crate) struct ViewerCloudCamera {
     pub up_axis: [f32; 3],
     /// `1 / terrain_span` — normalizes noise sampling to the scene scale.
     pub noise_scale: f32,
+    /// Cloud-field centre in world space (ground projection of the eye).
+    pub bounds_center: [f32; 3],
+    /// Horizontal extent radius of the cloud field, in world units.
+    pub extent_radius: f32,
     pub time: f32,
 }
 
@@ -76,6 +87,10 @@ pub(crate) struct ViewerCloudRenderer {
     tonemap_bind_group_layout: BindGroupLayout,
     tonemap_sampler: Sampler,
     _scratch: TrackedBuffer,
+    /// Cached tonemap bind group keyed by the identity of the HDR view it
+    /// binds; rebuilt only when the render target changes (resize), so
+    /// routine frames allocate nothing.
+    tonemap_bind_group: Mutex<Option<(usize, wgpu::BindGroup)>>,
 }
 
 impl ViewerCloudRenderer {
@@ -170,6 +185,7 @@ impl ViewerCloudRenderer {
             tonemap_bind_group_layout,
             tonemap_sampler,
             _scratch,
+            tonemap_bind_group: Mutex::new(None),
         })
     }
 
@@ -207,6 +223,10 @@ impl ViewerCloudRenderer {
             wind_dir_deg: config.wind_dir_deg,
             wind_speed: config.wind_speed,
             time_seconds: camera.time,
+            shadow_strength: config.shadow_strength,
+            size: config.size,
+            weather_strength: config.weather_strength,
+            weather_map: config.weather_map.clone(),
         };
         let frame = CloudFrameParams {
             inv_view_proj: camera.inv_view_proj,
@@ -215,6 +235,8 @@ impl ViewerCloudRenderer {
             sun_radiance: camera.sun_radiance,
             up_axis: camera.up_axis,
             noise_scale: camera.noise_scale,
+            bounds_center: camera.bounds_center,
+            extent_radius: camera.extent_radius,
             sample_index: 0,
         };
         let rendered = self
@@ -237,20 +259,40 @@ impl ViewerCloudRenderer {
         }
 
         // Tonemap the composited linear-HDR beauty into the display target.
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewer.clouds.tonemap.bg"),
-            layout: &self.tonemap_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(hdr_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.tonemap_sampler),
-                },
-            ],
-        });
+        // The bind group's only varying input is the (stable, stored) HDR view,
+        // so it is cached by that view's identity and rebuilt on resize.
+        let hdr_view_key = std::ptr::from_ref(hdr_view) as usize;
+        let mut tonemap_guard = self
+            .tonemap_bind_group
+            .lock()
+            .map_err(|_| "viewer cloud tonemap bind group mutex poisoned".to_string())?;
+        let tonemap_stale = tonemap_guard
+            .as_ref()
+            .map(|(key, _)| *key != hdr_view_key)
+            .unwrap_or(true);
+        if tonemap_stale {
+            *tonemap_guard = Some((
+                hdr_view_key,
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("viewer.clouds.tonemap.bg"),
+                    layout: &self.tonemap_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(hdr_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.tonemap_sampler),
+                        },
+                    ],
+                }),
+            ));
+        }
+        let tonemap_bind_group = &tonemap_guard
+            .as_ref()
+            .expect("viewer cloud tonemap bind group present after cache fill")
+            .1;
         {
             let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("viewer.clouds.tonemap.pass"),
@@ -268,7 +310,7 @@ impl ViewerCloudRenderer {
             });
             crate::core::shader_registry::record_shader_use("viewer.clouds.tonemap.shader");
             pass.set_pipeline(&self.tonemap_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(0, tonemap_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         Ok(true)
@@ -374,17 +416,22 @@ impl ViewerTerrainScene {
         let Some(renderer) = self.cloud_renderer.as_ref() else {
             return false;
         };
+        let up = glam::Vec3::Z;
         let camera = ViewerCloudCamera {
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             eye: eye.to_array(),
             sun_direction: sun_dir.to_array(),
             sun_radiance,
-            up_axis: [0.0, 1.0, 0.0],
+            // The viewer terrain is geographic with +Z up, so the cloud slab is
+            // measured along +Z (matching the offline `mesh:zup` path).
+            up_axis: up.to_array(),
             noise_scale: if terrain_span > 1.0 {
                 1.0 / terrain_span
             } else {
                 1.0
             },
+            bounds_center: (eye - up * eye.dot(up)).to_array(),
+            extent_radius: terrain_span.max(1.0),
             time,
         };
         match renderer.render(

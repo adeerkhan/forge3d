@@ -136,6 +136,9 @@ pub mod cloud_shadows;
 // B8: Realtime Clouds
 pub mod clouds;
 
+// Depth-aware volumetric cloud volume (shared by the offline path and the viewer).
+pub mod cloud_volume;
+
 // B10: Ground Plane (Raster)
 pub mod ground_plane;
 

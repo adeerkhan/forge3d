@@ -124,6 +124,13 @@ pub(super) fn parse_clouds_settings(params: &Bound<'_, PyAny>) -> PyResult<Cloud
         wind_dir: extract_optional(&clouds, "wind_dir")?.unwrap_or(base.wind_dir),
         wind_speed: extract_optional(&clouds, "wind_speed")?.unwrap_or(base.wind_speed),
         powder: extract_optional(&clouds, "powder")?.unwrap_or(base.powder),
+        size: extract_optional(&clouds, "size")?.unwrap_or(base.size),
+        weather_strength: extract_optional(&clouds, "weather_strength")?
+            .unwrap_or(base.weather_strength),
+        weather_map: match optional_attr(&clouds, "weather_map")? {
+            Some(value) if !value.is_none() => Some(value.extract::<String>()?),
+            _ => None,
+        },
     })
 }
 

@@ -113,14 +113,19 @@ def test_enabled_clouds_change_output(tmp_path):
 
 
 def _in_view_clouds():
+    # Mirror the example so the test exercises the same look (deck above the
+    # ~1.35 peaks, moderate scatter). A deck based below the peaks, or an
+    # extreme scatter_strength, hides the very quality the tests guard.
     return CloudSettings(
         enabled=True,
-        coverage=0.7,
-        density=0.9,
-        altitude_m=0.5,
-        thickness_m=3.0,
-        scatter_strength=3.0,
-        phase_g=0.8,
+        coverage=0.42,
+        density=0.7,
+        altitude_m=1.5,
+        thickness_m=1.7,
+        scatter_strength=2.5,
+        phase_g=0.85,
+        detail=0.5,
+        powder=0.5,
     )
 
 
@@ -155,6 +160,14 @@ def test_cloud_field_tracks_camera_pose(tmp_path):
     low = _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, 4.6)
     high = _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, 7.0)
 
-    assert np.abs(low).mean() > 0.25
-    assert np.abs(high).mean() > 0.25
-    assert np.abs(low - high).mean() > 0.25
+    # `render_offline(...).frame.to_numpy()` is uint8 (0..255). Assert a visible
+    # (not one-trivial-code) cloud contribution and a real pose-dependence, so a
+    # near-empty or washed-out deck fails rather than passing on noise.
+    near_mean = float(np.abs(low).mean())
+    far_mean = float(np.abs(high).mean())
+    parallax_mean = float(np.abs(low - high).mean())
+    assert near_mean > 1.0, f"clouds barely changed the still (mean |delta| = {near_mean})"
+    assert far_mean > 1.0, f"clouds barely changed the farther still (mean |delta| = {far_mean})"
+    assert parallax_mean > 1.0, (
+        f"cloud field did not track camera pose (mean |pose delta| = {parallax_mean})"
+    )

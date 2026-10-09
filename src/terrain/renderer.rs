@@ -31,7 +31,6 @@ mod anamnesis;
 mod aov;
 mod atmosphere;
 mod bind_groups;
-pub(crate) mod clouds;
 mod constructor;
 mod core;
 mod draw;
@@ -52,6 +51,7 @@ mod runtime_contract;
 #[cfg(feature = "enable-gpu-instancing")]
 mod scatter;
 mod shadows;
+mod skybox;
 mod streaming;
 mod uniforms;
 mod upload;
