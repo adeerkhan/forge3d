@@ -73,19 +73,27 @@ fn base_shape(p: vec3<f32>) -> f32 {
 
     // Low-frequency domain warp: three offset reads of the base volume give a
     // smooth 3-vector that shears the field into wispy, wind-torn shapes.
-    let w0 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(13.1, 5.2, 9.7)), 0.0).r;
-    let w1 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(31.7, 17.3, 2.9)), 0.0).r;
-    let w2 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 3.0) + vec3<f32>(7.3, 23.9, 41.1)), 0.0).r;
+    let w0 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 2.5) + vec3<f32>(13.1, 5.2, 9.7)), 0.0).r;
+    let w1 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 2.5) + vec3<f32>(31.7, 17.3, 2.9)), 0.0).r;
+    let w2 = textureSampleLevel(base_noise, base_sampler, det_barrier3(det_barrier3(q * 2.5) + vec3<f32>(7.3, 23.9, 41.1)), 0.0).r;
     let warp = det_barrier3(det_barrier3(vec3<f32>(w0, w1, w2) - vec3<f32>(0.5)) * 0.22);
     let w = det_barrier3(q + warp);
 
     // Billowy cellular mass (Worley) + fractal fluff (FBM).
-    let wor = det_barrier(textureSampleLevel(worley_noise, base_sampler, det_barrier3(w * 2.0), 0.0).r);
-    let f0 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 4.0), 0.0).r * 0.5);
-    let f1 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 8.0), 0.0).r * 0.25);
-    let f2 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 16.0), 0.0).r * 0.15);
-    let f3 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 32.0), 0.0).r * 0.10);
-    let fbm = det_barrier(det_barrier(det_barrier(f0 + f1) + f2) + f3);
+    let wor = det_barrier(textureSampleLevel(worley_noise, base_sampler, det_barrier3(w * 1.5), 0.0).r);
+    // Octave frequencies are capped by LATTICE CELL SIZE, not by taste: the
+    // baked 128^3 volume's cells are ~3-10 m at scene scale, and at the
+    // 5-12 km cloud distance of a DEM flyover that is sub-pixel. Frequencies
+    // that put cells below the pixel footprint alias into the salt-and-pepper
+    // halo no accumulation average can remove, so the fractal is limited to
+    // feature sizes the frame can actually resolve (the worley/detail volumes
+    // carry the remaining structure at their own coarser scale). Real cumulus
+    // at 8 km are 100-600 m across, so this is also the physically right
+    // scale for the look.
+    let f0 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 2.0), 0.0).r * 0.5);
+    let f1 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 4.0), 0.0).r * 0.3);
+    let f2 = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(w * 9.0), 0.0).r * 0.2);
+    let fbm = det_barrier(det_barrier(f0 + f1) + f2);
 
     // Frostbite/HZD composite: the shape is the PRODUCT of the fractal field and
     // the cellular field (each softly biased toward 1), not their average. The
@@ -96,30 +104,33 @@ fn base_shape(p: vec3<f32>) -> f32 {
     return det_barrier(fluffy * billowy);
 }
 
-// Erosion detail in [0,1] (1 = no erosion).
+// Height-gradient detail erosion in [0,1] (1 = no erosion). Two Worley scales
+// plus the ridged detail volume (Frostbite's `r + g/2 + b/4` detail mix) so
+// edges break up at fine AND coarse scales instead of one uniform mush.
+// Frequencies stay well inside each volume's Nyquist limit — sampling a baked
+// volume near its texel frequency aliases into the salt-and-pepper scatter of
+// isolated pixels around cloud edges that per-sample jitter cannot average.
 fn detail_erosion(p: vec3<f32>, amount: f32) -> f32 {
     let q = det_barrier3(det_barrier3(p * u.up_axis.w) * u.feature.x);
-    let d0 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 16.0), 0.0).r;
-    let d1 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 48.0), 0.0).r;
-    // Two Worley scales added to the ridged detail (Frostbite's `r + g/2 + b/4`
-    // detail mix) so edges break up at fine AND coarse scales.
-    let w0 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 12.0), 0.0).r;
-    let w1 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 30.0), 0.0).r;
+    let d0 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 5.0), 0.0).r;
+    let d1 = textureSampleLevel(detail_noise, detail_sampler, det_barrier3(q * 11.0), 0.0).r;
+    let w0 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 2.5), 0.0).r;
+    let w1 = textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 6.0), 0.0).r;
     let erosion = det_barrier(
-        det_barrier(det_barrier(d0 * 0.45) + det_barrier(d1 * 0.25))
-            + det_barrier(det_barrier(w0 * 0.20) + det_barrier(w1 * 0.10)),
+        det_barrier(det_barrier(d0 * 0.45) + det_barrier(d1 * 0.15))
+            + det_barrier(det_barrier(w0 * 0.30) + det_barrier(w1 * 0.10)),
     );
     return det_mix(1.0, erosion, clamp(amount, 0.0, 1.0));
 }
 
 // Cumulus vertical profile: a flat base near the bottom of the deck, a high
 // body, and a sharply rounded top — reads as volume, not a sheet. The
-// `pow(1 - height_frac, 16)` top is the Frostbite/HZD shape: the body stays
+// `pow(1 - height_frac, 10)` top is the Frostbite/HZD shape: the body stays
 // dense until close to the top, then rounds off fast, so puffs keep flat
 // bases and domed cauliflower tops instead of a soft cone.
 fn cumulus_profile(height_frac: f32) -> f32 {
     let h = clamp(height_frac, 0.0, 1.0);
-    return det_barrier(det_smoothstep(0.0, 0.06, h) * det_barrier(1.0 - det_pow(1.0 - h, 16.0)));
+    return det_barrier(det_smoothstep(0.0, 0.06, h) * det_barrier(1.0 - det_pow(1.0 - h, 10.0)));
 }
 
 fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
@@ -149,13 +160,23 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     // so tops erode more than bases (HZD height-varying coverage).
     let profile = det_barrier(cumulus_profile(height_frac));
     let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - det_barrier(det_barrier(1.0 - profile) * 0.55);
-    // Soft coverage cut instead of a hard threshold.
-    let cut = det_smoothstep(0.0, 0.10, eroded);
+    // Soft coverage cut instead of a hard threshold. The ramp is wide (0.30)
+    // because the cloud boundary is sub-pixel sharp at world scale: a narrow
+    // ramp leaves per-sample jitter as the only boundary signal, and the
+    // accumulation average then carries that scatter as a halo of isolated
+    // pixels at the silhouette. A wide ramp trades a marginally softer edge
+    // for a clean one.
+    let cut = det_smoothstep(0.0, 0.30, eroded);
     if cut <= 0.0 {
         return 0.0;
     }
-    // Erode thin regions more (height-gradient erosion).
-    let detail = detail_erosion(p, u.optics.z * (1.0 - cut));
+    // Erode thin regions more (height-gradient erosion), but fade the erosion
+    // out AT the boundary: the finest erosion noise there is sub-pixel at
+    // cloud distance and per-sample jitter turns it into a scattered halo of
+    // isolated pixels (the bevy reference gates its detail the same way, by
+    // thickness, so detail only shapes interiors).
+    let erosion_amount = det_barrier(u.optics.z * (1.0 - cut) * det_smoothstep(0.05, 0.30, cut));
+    let detail = detail_erosion(p, erosion_amount);
     return det_barrier(det_barrier(det_barrier(cut * detail) * profile) * edge) * u.layer.w;
 }
 
@@ -257,8 +278,14 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let cos_theta = det_dot3(dir, u.sun_direction.xyz);
             // Single scattering forward lobe + a cheap dual-lobe multiple
             // scattering approximation so dense interiors do not go black.
+            // Frostbite dual lobe: a FORWARD lobe for the sunlit silver lining
+            // plus a BACKWARD lobe (g < 0) that rounds the shaded side, so the
+            // cloud reads as a lit volume instead of a bright rim on black.
             let phase_single = det_barrier(hg_phase(cos_theta, u.optics.y) * u.optics.x);
-            let phase_multi = det_barrier(hg_phase(cos_theta, 0.85) * det_barrier(u.optics.x * 0.35));
+            let phase_multi = det_barrier(
+                det_barrier(hg_phase(cos_theta, 0.85) * det_barrier(u.optics.x * 0.25))
+                    + det_barrier(hg_phase(cos_theta, -0.2) * det_barrier(u.optics.x * 0.20)),
+            );
 
             var t = det_barrier(t_near + jitter_offset);
             for (var i = 0; i < MARCH_STEPS; i = i + 1) {
@@ -271,9 +298,15 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     // Beer-Powder: darken the sun-lit edge of dense regions.
                     let powder = 1.0 - det_exp(det_barrier(-density * u.optics.w) * 2.0);
                     let sun = det_barrier(sun_transmittance(p, up) * det_mix(1.0, powder, 0.4));
-                    // Ambient multiple-scatter: neutral grey, darker under the
-                    // cloud, brighter toward its sunlit top.
-                    let ambient = det_barrier3(det_mix3(vec3<f32>(0.26, 0.27, 0.30), vec3<f32>(0.74, 0.76, 0.80), hf) * u.optics.x);
+                    // Ambient multiple-scatter follows the SKY's own colour
+                    // gradient (Frostbite/HZD): dark blue near the deck base
+                    // where the ground blocks the sky, bright sky blue toward
+                    // the top. Neutral grey here is what makes clouds look like
+                    // painted cardboard instead of sky-lit volumes.
+                    let ambient = det_barrier3(det_mix3(
+                        vec3<f32>(0.16, 0.22, 0.34),
+                        vec3<f32>(0.62, 0.74, 0.98),
+                        hf) * u.optics.x);
                     let lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + ambient;
                     inscatter = det_barrier3(inscatter + det_barrier3(det_barrier(transmittance * (1.0 - sample_trans)) * lit));
                     transmittance = det_barrier(transmittance * sample_trans);

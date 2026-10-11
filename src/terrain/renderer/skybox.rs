@@ -150,7 +150,7 @@ impl SkyboxResources {
             device,
             &wgpu::BufferDescriptor {
                 label: Some("terrain.skybox.uniform_buffer"),
-                size: std::mem::size_of::<[[f32; 4]; 4]>() as wgpu::BufferAddress,
+                size: std::mem::size_of::<[[f32; 4]; 5]>() as wgpu::BufferAddress,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             },
@@ -275,23 +275,39 @@ impl SkyboxResources {
         }
     }
 
+    /// True when an HDRI environment is loaded and the pass rasterizes a
+    /// background — callers must then preserve (not clear) the beauty target
+    /// in their subsequent passes.
+    pub(crate) fn is_active(&self) -> bool {
+        self.environment.is_some()
+    }
+
     /// Draw the skybox into `color_view` (a fullscreen pass) as the scene
-    /// background. No-op (and no recorded degradation here) when the HDRI
-    /// failed to load — that was recorded at construction.
+    /// background. `world_up` is the camera frame's up axis (`+Y` for mesh,
+    /// `+Z` for `mesh:zup`): the equirectangular lookup basis is built from
+    /// it, so the HDRI's vertical axis matches the scene's. No-op (and no
+    /// recorded degradation here) when the HDRI failed to load — that was
+    /// recorded at construction.
     pub(crate) fn render(
         &self,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         color_view: &wgpu::TextureView,
         inv_view_proj: [[f32; 4]; 4],
+        world_up: [f32; 3],
     ) -> Result<()> {
         let Some(environment) = self.environment.as_ref() else {
             return Ok(());
         };
+        let mut uniforms = [0.0f32; 20];
+        for (row, col) in inv_view_proj.iter().enumerate() {
+            uniforms[row * 4..row * 4 + 4].copy_from_slice(col);
+        }
+        uniforms[16..19].copy_from_slice(&world_up);
         queue.write_buffer(
             &environment.uniform_buffer,
             0,
-            bytemuck::cast_slice(&inv_view_proj),
+            bytemuck::cast_slice(&uniforms),
         );
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

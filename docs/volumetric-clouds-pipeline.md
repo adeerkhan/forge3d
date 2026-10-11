@@ -93,8 +93,8 @@ weather map      →  coverage += (weather − 0.5) · weather_strength
 base_shape(p)    →  (0.1 + 0.9·FBM) × (0.3 + 0.7·Worley)      ← multiply!
 profile          →  smoothstep(0,0.06,h) · (1 − (1−h)^16)     ← pow-16 top
 budget           →  shape − (1 − coverage) − 0.55·(1 − profile)
-coverage cut     →  smoothstep(0, 0.10, budget)
-erosion          →  detail = mix(1, d0·0.45 + d1·0.25 + w0·0.20 + w1·0.10, detail·(1−cut))
+coverage cut     →  smoothstep(0, 0.18, budget)
+erosion          →  detail = mix(1, d0·0.45 + d1·0.15 + w0·0.28 + w1·0.12, detail·(1−cut))
 density          →  cut · detail · profile · edge · u.layer.w
 ```
 
@@ -112,7 +112,12 @@ Horizon Zero Dawn method (see §7):
 
 The coverage budget thins the cloud toward the top (`0.55·(1−profile)`), and
 erosion is scaled by `1−cut` so thin edges break up more than thick cores
-(height-gradient erosion).
+(height-gradient erosion). Two anti-speckle rules are load-bearing: the
+coverage ramp is **wide** (0.18 — a narrow one puts the whole boundary inside
+a few texels and the jittered samples flicker coverage pixel by pixel), and
+the erosion frequencies stay **inside each baked volume's Nyquist limit**
+(sampling near the texel frequency aliases into a halo of isolated pixels that
+no amount of averaging removes).
 
 ### 3.3 Lighting
 
@@ -261,7 +266,7 @@ is the same look on a real DEM.
 | `src/terrain/render_params/decode_atmosphere.rs` | Python → native decode |
 | `src/terrain/render_params/native_postfx/atmosphere.rs` | `CloudsSettingsNative` + defaults |
 | `python/forge3d/terrain_params.py` | `CloudSettings` + presets |
-| `src/terrain/renderer/skybox.rs`, `src/shaders/skybox.wgsl` | the HDRI background behind the deck |
+| `src/terrain/renderer/skybox.rs`, `src/shaders/skybox.wgsl` | the HDRI background behind the deck (equirect basis follows the camera's up axis: +Y for `mesh`, +Z for `mesh:zup`) |
 | `docs/volumetric-clouds.md` | the plain-language guide |
 
 ## 10. Known limits

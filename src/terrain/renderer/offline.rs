@@ -806,12 +806,19 @@ impl TerrainScene {
                 &pass_bind_groups.material_layer,
             )?;
 
-            // HDRI skybox as the scene background.
+            // HDRI skybox as the scene background. The skybox's equirect basis
+            // follows the camera frame's up axis (mesh = +Y, zup = +Z).
+            let sky_up = if is_zup_camera_mode(&state.params.camera_mode) {
+                [0.0, 0.0, 1.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
             self.skybox.render(
                 self.queue.as_ref(),
                 &mut encoder,
                 &render_targets.internal_view,
                 (jittered_proj * view).inverse().to_cols_array_2d(),
+                sky_up,
             )?;
 
             if let Some(sky) = sky_texture.as_ref() {
@@ -848,6 +855,11 @@ impl TerrainScene {
                 }
             }
 
+            // The HDRI skybox rasterizes into the beauty target before the
+            // sky blit above, so the main pass must preserve it exactly like a
+            // procedural sky background — otherwise its LoadOp::Clear wipes
+            // the skybox and the only background left is the clear colour.
+            let preserve_background = sky_texture.is_some() || self.skybox.is_active();
             self.run_main_pass_with_aov_pipeline(
                 &mut encoder,
                 &state.params,
@@ -860,7 +872,7 @@ impl TerrainScene {
                 &pass_bind_groups.fog,
                 &water_reflection_bind_group,
                 &pass_bind_groups.material_layer,
-                sky_texture.is_some(),
+                preserve_background,
             )?;
 
             if state.total_samples == 0 {
