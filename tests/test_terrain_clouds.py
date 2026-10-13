@@ -43,9 +43,14 @@ def _render_offline(renderer, material_set, heightmap, env_maps, clouds, cam_rad
             sun_intensity=2.4,
             cam_radius=cam_radius,
             cam_phi_deg=138.0,
-            cam_theta_deg=58.0,
+            cam_theta_deg=30.0,
             fov_y_deg=54.0,
-            camera_mode="mesh",
+            # Z-up orbit: the offline terrain plane is Z-up, so the deck sits
+            # above the peaks and the camera looks down at it. The legacy Y-up
+            # 'mesh' orbit puts the camera in the terrain's own plane and the
+            # deck across it, which only produced a visible cloud via grazing
+            # rays through the slab — an artefact, not a look.
+            camera_mode="mesh:zup",
             overlays=[_build_overlay()],
             pom=PomSettings(False, "Occlusion", 0.0, 1, 1, 0, False, False),
             clouds=clouds,
@@ -113,15 +118,16 @@ def test_enabled_clouds_change_output(tmp_path):
 
 
 def _in_view_clouds():
-    # Mirror the example so the test exercises the same look (deck above the
-    # ~1.35 peaks, moderate scatter). A deck based below the peaks, or an
-    # extreme scatter_strength, hides the very quality the tests guard.
+    # Mirror the example so the test exercises the same look: a deck above the
+    # ~1.35 peaks, moderate scatter, filled enough to change the still
+    # unambiguously (a deck based below the peaks, or an extreme
+    # scatter_strength, hides the very quality the tests guard).
     return CloudSettings(
         enabled=True,
         coverage=0.42,
         density=0.7,
-        altitude_m=1.5,
-        thickness_m=1.7,
+        altitude_m=1.7,
+        thickness_m=2.0,
         scatter_strength=2.5,
         phase_g=0.85,
         detail=0.5,
@@ -157,7 +163,7 @@ def test_cloud_field_tracks_camera_pose(tmp_path):
     """The cloud contribution is view-dependent (parallax), not a flat overlay."""
     renderer, material_set, heightmap, env_maps = _setup(tmp_path)
     clouds = _in_view_clouds()
-    low = _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, 4.6)
+    low = _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, 5.5)
     high = _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, 7.0)
 
     # `render_offline(...).frame.to_numpy()` is uint8 (0..255). Assert a visible

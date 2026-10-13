@@ -21,7 +21,7 @@ struct CloudUniforms {
     screen: vec4<f32>,          // x width, y height, z far fallback for level rays, w unused
     up_axis: vec4<f32>,         // xyz world up of the camera frame, w = 1/terrain_span noise scale
     bounds: vec4<f32>,          // xyz cloud-field centre (world), w = horizontal extent radius
-    feature: vec4<f32>,         // x cell-frequency multiplier (cloud size), y = shadow strength
+    feature: vec4<f32>,         // x cell-frequency multiplier (cloud size), y = shadow strength, z = raymarch step count, w unused
     weather: vec4<f32>,         // x weather-map strength (coverage variation), yzw unused
 };
 
@@ -38,6 +38,12 @@ struct CloudUniforms {
 @group(0) @binding(10) var weather_sampler: sampler;
 
 const PI: f32 = 3.141592653589793;
+// Upper bound of the raymarch loop, and the step count used when the caller
+// does not choose one. The loop runs this many iterations at most and breaks at
+// the caller's step count (`u.feature.z`), so `dt` stays
+// `(t_far - t_near) / steps` and the optical-depth integral is unchanged by the
+// quality setting -- only the sampling density changes.
+const MARCH_STEPS_MAX: i32 = 192;
 const MARCH_STEPS: i32 = 56;
 const LIGHT_STEPS: i32 = 5;
 
@@ -160,13 +166,13 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     // so tops erode more than bases (HZD height-varying coverage).
     let profile = det_barrier(cumulus_profile(height_frac));
     let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - det_barrier(det_barrier(1.0 - profile) * 0.55);
-    // Soft coverage cut instead of a hard threshold. The ramp is wide (0.30)
-    // because the cloud boundary is sub-pixel sharp at world scale: a narrow
-    // ramp leaves per-sample jitter as the only boundary signal, and the
-    // accumulation average then carries that scatter as a halo of isolated
-    // pixels at the silhouette. A wide ramp trades a marginally softer edge
-    // for a clean one.
-    let cut = det_smoothstep(0.0, 0.30, eroded);
+    // Soft coverage cut instead of a hard threshold. The ramp is deliberately
+    // narrow (0.16): the wide ramp that first cured the edge sparkle is no
+    // longer needed, because the aliasing source was the sub-pixel octave
+    // content, which the frequency caps in `base_shape`/`detail_erosion` now
+    // remove. A narrow ramp is what gives puffs a defined silhouette instead of
+    // smearing the deck into an even haze.
+    let cut = det_smoothstep(0.0, 0.16, eroded);
     if cut <= 0.0 {
         return 0.0;
     }
@@ -175,7 +181,7 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     // cloud distance and per-sample jitter turns it into a scattered halo of
     // isolated pixels (the bevy reference gates its detail the same way, by
     // thickness, so detail only shapes interiors).
-    let erosion_amount = det_barrier(u.optics.z * (1.0 - cut) * det_smoothstep(0.05, 0.30, cut));
+    let erosion_amount = det_barrier(det_barrier(u.optics.z * (1.0 - cut)) * det_smoothstep(0.05, 0.30, cut));
     let detail = detail_erosion(p, erosion_amount);
     return det_barrier(det_barrier(det_barrier(cut * detail) * profile) * edge) * u.layer.w;
 }
@@ -189,11 +195,53 @@ fn intersect_slab(origin: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> vec2<f32>
         if ob < base || ob > top {
             return vec2<f32>(0.0, -1.0);
         }
+        // The ray runs parallel to the slab and inside it, so the slab alone
+        // does not bound the range. Return a placeholder and let the cloud
+        // volume's cylinder (see `intersect_cylinder`) supply the far hit.
         return vec2<f32>(0.0, u.screen.z);
     }
     let t0 = det_div(base - ob, db);
     let t1 = det_div(top - ob, db);
     return vec2<f32>(min(t0, t1), max(t0, t1));
+}
+
+/// Nearest/farthest intersection of the ray with the cloud field's horizontal
+/// cylinder — centre `u.bounds.xyz`, radius `u.bounds.w`, axis `up`. Returns
+/// `(0, -1)` when the ray misses it.
+///
+/// This is what keeps the fixed step budget inside the clouds. `intersect_slab`
+/// alone is unbounded horizontally: a near-horizontal ray crosses the infinite
+/// slab over thousands of world units, so `dt = (t_far - t_near) / MARCH_STEPS`
+/// balloons past the deck thickness and the deck is effectively skipped at
+/// grazing angles. `cloud_density` already returns 0 beyond `u.bounds.w`, so
+/// intersecting with the cylinder only removes steps that would have sampled
+/// empty space.
+fn intersect_cylinder(origin: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> vec2<f32> {
+    let radius = u.bounds.w;
+    if radius <= 0.0 {
+        return vec2<f32>(0.0, -1.0);
+    }
+    let rel = det_barrier3(origin - u.bounds.xyz);
+    let o = det_barrier3(rel - det_barrier3(up * det_dot3(rel, up)));
+    let d = det_barrier3(dir - det_barrier3(up * det_dot3(dir, up)));
+    let a = det_dot3(d, d);
+    let c = det_barrier(det_dot3(o, o)) - det_barrier(radius * radius);
+    if a < 1.0e-8 {
+        // Ray parallel to the cylinder axis: inside or outside for its whole
+        // length, never crossing the wall. Bound an inside ray by the field's
+        // diameter, which is the farthest useful draw distance for it.
+        if c > 0.0 {
+            return vec2<f32>(0.0, -1.0);
+        }
+        return vec2<f32>(0.0, det_barrier(2.0 * radius));
+    }
+    let b = det_dot3(o, d);
+    let disc = det_barrier(det_barrier(b * b) - det_barrier(a * c));
+    if disc < 0.0 {
+        return vec2<f32>(0.0, -1.0);
+    }
+    let sq = det_sqrt(disc);
+    return vec2<f32>(det_div(det_barrier(-b) - sq, a), det_div(det_barrier(-b) + sq, a));
 }
 
 /// Height of `p` within the cloud slab, measured along the world up axis.
@@ -243,11 +291,16 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var terrain_shadow = 1.0;
 
     let slab = intersect_slab(origin, dir, up);
-    if slab.y > slab.x && slab.y > 0.0 {
+    // Bound the march to the intersection of the flat slab and the cloud
+    // field's cylinder, so the fixed step budget is spent inside the clouds.
+    let cylinder = intersect_cylinder(origin, dir, up);
+    let t_lo = max(slab.x, cylinder.x);
+    let t_hi = min(slab.y, cylinder.y);
+    if t_hi > t_lo && t_hi > 0.0 {
         // Depth-aware early-out: unproject the terrain depth to world space and
         // truncate the slab at the surface distance along the ray.
         let depth = textureLoad(scene_depth, pixel, 0);
-        var t_far = slab.y;
+        var t_far = t_hi;
         if depth < 1.0 {
             let scene_h = det_mat4_mul_vec4(u.inv_view_proj, vec4<f32>(ndc, depth, 1.0));
             let scene_p = det_div3(scene_h.xyz, vec3<f32>(scene_h.w));
@@ -264,9 +317,13 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let s = 1.0 - det_smoothstep(0.0, 1.1, deck);
             terrain_shadow = det_mix(1.0, s, clamp(u.feature.y, 0.0, 1.0) * 0.55);
         }
-        let t_near = max(slab.x, 0.0);
+        let t_near = max(t_lo, 0.0);
         if t_far > t_near {
-            let steps = f32(MARCH_STEPS);
+            // March step count from the caller (0 = use the historical default),
+            // clamped into the loop's static bound so the trip count is always
+            // decidable without breaking the fixed-iteration contract.
+            let wanted = i32(det_barrier(u.feature.z));
+            let steps = f32(clamp(wanted, 1, MARCH_STEPS_MAX));
             let dt = det_div(t_far - t_near, steps);
             let jitter_offset = det_barrier(det_barrier(jitter(gid.x, gid.y, u32(u.wind.w))) * dt);
             // Advect the field with wind in the plane perpendicular to the up
@@ -288,7 +345,10 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             );
 
             var t = det_barrier(t_near + jitter_offset);
-            for (var i = 0; i < MARCH_STEPS; i = i + 1) {
+            for (var i = 0; i < MARCH_STEPS_MAX; i = i + 1) {
+                if i >= i32(steps) {
+                    break;
+                }
                 let p = det_barrier3(origin + det_barrier3(dir * t));
                 let hf = slab_height_frac(p, up);
                 let density = det_barrier(cloud_density(det_barrier3(p - wind_vec), hf));

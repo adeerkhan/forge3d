@@ -922,7 +922,9 @@ impl TerrainScene {
                     // The deck reaches well past the terrain footprint so it
                     // fills the sky above the horizon instead of ending as a
                     // hard disc around the camera target.
-                    extent_radius: (state.params.terrain_span * 2.5).max(1.0),
+                    extent_radius: crate::core::cloud_volume::cloud_field_extent(
+                        state.params.terrain_span,
+                    ),
                     sample_index: state.total_samples,
                 };
                 let cloud_scope = ts_begin(timing, &mut encoder, "terrain.clouds");
@@ -945,6 +947,9 @@ impl TerrainScene {
                         0.0
                     },
                     size: state.decoded.clouds.size,
+                    march_steps: crate::core::cloud_volume::cloud_march_steps(
+                        state.decoded.clouds.quality.as_str(),
+                    ),
                     weather_strength: state.decoded.clouds.weather_strength,
                     weather_map: state.decoded.clouds.weather_map.clone(),
                 };

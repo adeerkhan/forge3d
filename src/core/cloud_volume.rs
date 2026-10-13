@@ -21,6 +21,38 @@ pub(crate) const CLOUD_WORLEY_NOISE_RESOLUTION: u32 = 64;
 const CLOUD_WEATHER_RESOLUTION: u32 = 128;
 const COPY_ROW_ALIGNMENT: u32 = 256;
 
+/// How many terrain spans wide the cloud field is. The deck reaches well past
+/// the terrain footprint so it fills the sky above the horizon instead of
+/// ending as a hard disc around the camera target.
+const CLOUD_FIELD_EXTENT_SPAN_FACTOR: f32 = 2.5;
+
+/// Horizontal radius of the cloud field for a terrain of `terrain_span`.
+///
+/// Shared by the offline and viewer paths on purpose: they used to disagree
+/// (offline `span * 2.5`, viewer `span`), so identical `CloudSettings` produced
+/// a deck that filled the sky offline and a small disc in the view. One
+/// function, one answer.
+pub(crate) fn cloud_field_extent(terrain_span: f32) -> f32 {
+    (terrain_span * CLOUD_FIELD_EXTENT_SPAN_FACTOR).max(1.0)
+}
+
+/// Resolve the documented `CloudSettings.quality` levels to a raymarch step
+/// count.
+///
+/// This used to be a knob that was validated in Python, carried into
+/// `CloudsSettingsNative` and then dropped: the shader hard-coded 56 steps, so
+/// `ultra` and `low` produced byte-identical output. `medium` stays at the
+/// historical 56 so existing renders are unchanged by default.
+pub(crate) fn cloud_march_steps(quality: &str) -> u32 {
+    match quality.trim().to_ascii_lowercase().as_str() {
+        "low" => 24,
+        "medium" | "" => 56,
+        "high" => 96,
+        "ultra" => 160,
+        _ => 56,
+    }
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CloudUniforms {
@@ -75,6 +107,9 @@ pub(crate) struct CloudRenderSettings {
     pub shadow_strength: f32,
     /// Cloud size multiplier: bigger = larger puffs (divides the noise frequency).
     pub size: f32,
+    /// Raymarch step count for this frame. Resolved from `CloudSettings.quality`;
+    /// 0 means "callee default".
+    pub march_steps: u32,
     /// How strongly the weather map varies coverage across the sky, in `[0, 1]`.
     pub weather_strength: f32,
     /// Optional path to a custom greyscale weather map; `None` uses the default.
@@ -780,7 +815,11 @@ impl CloudVolumeResources {
                 clouds.time_seconds,
                 frame.sample_index as f32,
             ],
-            screen: [width as f32, height as f32, 1.0, 1.0],
+            // z is the far placeholder `intersect_slab`/`intersect_cylinder`
+            // return for a ray that runs parallel to a boundary and therefore
+            // has no bounded crossing of its own; the other volume's finite
+            // hit then bounds it. Large but finite so the range stays numeric.
+            screen: [width as f32, height as f32, 1.0e6, 1.0],
             up_axis: [
                 frame.up_axis[0],
                 frame.up_axis[1],
@@ -793,7 +832,12 @@ impl CloudVolumeResources {
                 frame.bounds_center[2],
                 frame.extent_radius,
             ],
-            feature: [1.0 / clouds.size.max(0.1), clouds.shadow_strength, 0.0, 0.0],
+            feature: [
+                1.0 / clouds.size.max(0.1),
+                clouds.shadow_strength,
+                clouds.march_steps as f32,
+                0.0,
+            ],
             weather: [clouds.weather_strength, 0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

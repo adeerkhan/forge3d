@@ -22,9 +22,34 @@ class TestDenoiseSettings:
         assert settings.method == "atrous"
         assert settings.iterations == 3
         assert settings.sigma_color == 0.1
-        assert settings.sigma_normal == 0.1
-        assert settings.sigma_depth == 0.1
+        assert settings.sigma_normal == 0.3
+        assert settings.sigma_depth == 0.5
         assert settings.edge_stopping == 1.0
+
+    def test_denoise_sigmas_match_the_denoiser_tuned_defaults(self):
+        """The forwarded sigmas must not disagree with the denoiser's own.
+
+        `render_offline` passes these straight through, so a smaller value
+        silently overrides the denoiser's tuning: at sigma_normal=0.1 the
+        normal-guidance weights underflow to zero across any real angular step,
+        `wsum` collapses and the normalised output divides into an all-black
+        frame. They therefore have to stay equal to `atrous_denoise`'s.
+        """
+        import inspect
+
+        from forge3d.denoise import atrous_denoise
+
+        tuned = {
+            name: parameter.default
+            for name, parameter in inspect.signature(atrous_denoise).parameters.items()
+            if name in {"sigma_color", "sigma_normal", "sigma_depth"}
+        }
+        settings = DenoiseSettings()
+        for name, value in tuned.items():
+            assert getattr(settings, name) == value, (
+                f"DenoiseSettings.{name}={getattr(settings, name)} disagrees with "
+                f"atrous_denoise's tuned default {value}"
+            )
 
     def test_denoise_settings_enabled(self):
         """DenoiseSettings can be enabled with custom parameters."""

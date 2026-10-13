@@ -80,10 +80,24 @@ March: 56 steps along the view ray, 5 steps toward the sun per sample.
    `terrain_clouds_require_world_camera` and renders no clouds).
 2. Intersect the slab `[altitude, altitude+thickness]` around `bounds_center`
    with radius `extent_radius` (a flat disc in the plane ⟂ `up_axis`).
+   Also intersect the vertical cylinder of that disc
+   (`intersect_cylinder`), and march the **intersection** of the two
+   (`t_lo = max(slab.x, cyl.x)`, `t_hi = min(slab.y, cyl.y)`).
 3. **Depth-aware early-out**: unproject the terrain depth; `t_far` is clamped
    to the first opaque surface, so clouds behind terrain never march.
    Requires a single-sample bindable depth (MSAA > 1 degrades with
    `terrain_clouds_require_single_sample_depth`).
+
+> **Why the cylinder bound is load-bearing.** The slab is infinite
+> horizontally, so a near-horizontal ray crosses it over thousands of world
+> units. With a fixed step count, `dt = (t_far − t_near) / MARCH_STEPS` then
+> balloons far past the deck thickness and the deck is skipped entirely — the
+> clouds vanish exactly when the camera sits level with the deck, which is
+> precisely a flythrough shot. Bounding by the cylinder keeps `dt` inside the
+> deck: at a 0.25° grazing ray it goes from `dt ≈ 6.5` (≈4× the deck) to
+> `dt ≈ 1.1`, while rays ≥ 5° to the slab are bit-identical (the slab already
+> governed). `cloud_density` returns 0 beyond `extent_radius`, so the bound
+> only removes steps that would have sampled empty space.
 
 ### 3.2 Density at a point `p`
 
@@ -91,10 +105,10 @@ March: 56 steps along the view ray, 5 steps toward the sun per sample.
 extent clip      →  0 outside the disc, soft edge 0.6..1.0 of it
 weather map      →  coverage += (weather − 0.5) · weather_strength
 base_shape(p)    →  (0.1 + 0.9·FBM) × (0.3 + 0.7·Worley)      ← multiply!
-profile          →  smoothstep(0,0.06,h) · (1 − (1−h)^16)     ← pow-16 top
+profile          →  smoothstep(0,0.06,h) · (1 − (1−h)^10)     ← pow-10 top
 budget           →  shape − (1 − coverage) − 0.55·(1 − profile)
-coverage cut     →  smoothstep(0, 0.18, budget)
-erosion          →  detail = mix(1, d0·0.45 + d1·0.15 + w0·0.28 + w1·0.12, detail·(1−cut))
+coverage cut     →  smoothstep(0, 0.16, eroded)
+erosion          →  detail = mix(1, d0·0.45 + d1·0.15 + w0·0.30 + w1·0.10, amount)
 density          →  cut · detail · profile · edge · u.layer.w
 ```
 
@@ -105,19 +119,27 @@ Horizon Zero Dawn method (see §7):
   (0.3+0.7·Worley)` keeps high-contrast puffy interiors with hard zeros
   between puffs. Averaging the fields (our original form) washes the deck
   into a flat grey sheet.
-- **The top rounds off with `pow(1−h, 16)`.** The body stays dense until near
+- **The top rounds off with `pow(1−h, 10)`.** The body stays dense until near
   the top, then rounds off fast — flat bases, domed cauliflower tops. A
   `smoothstep(0.72, 1.0)` fade starts thinning the body too early and reads
   as a soft cone.
 
 The coverage budget thins the cloud toward the top (`0.55·(1−profile)`), and
 erosion is scaled by `1−cut` so thin edges break up more than thick cores
-(height-gradient erosion). Two anti-speckle rules are load-bearing: the
-coverage ramp is **wide** (0.18 — a narrow one puts the whole boundary inside
-a few texels and the jittered samples flicker coverage pixel by pixel), and
-the erosion frequencies stay **inside each baked volume's Nyquist limit**
-(sampling near the texel frequency aliases into a halo of isolated pixels that
-no amount of averaging removes).
+(height-gradient erosion).
+
+**The coverage ramp is the chunkiest single knob.** It must be *narrow* enough
+to give puffs a defined silhouette — a wide ramp (0.30) smears the deck into an
+even haze that reads as fog, not cloud. An earlier build needed 0.30 only
+because the fractal octaves were putting sub-pixel detail on the boundary, and
+the aliased boundary then depended on jitter to look smooth. Capping the octaves
+to resolvable feature sizes (below) removed that cause, so the ramp went back to
+0.16 and the puffs regained their edges without bringing the sparkle back.
+
+The other load-bearing rule is that the erosion frequencies stay **inside each
+baked volume's Nyquist limit**. Sampling near a volume's texel frequency aliases
+into a halo of isolated pixels that no amount of averaging removes — that was
+the original "dispersal pixels" at the cloud edge.
 
 ### 3.3 Lighting
 
@@ -197,12 +219,83 @@ forces the scaling.
 Noise is scaled by `1/terrain_span` so puff *sizes* are a property of the
 scene, not the units.
 
+### 5.1 Two caller-side traps that fail silently
+
+Both of these render *something*, so neither shows up as an error — the clouds
+are just wrong or absent. Two shipped cloud examples hit both.
+
+**Camera mode.** The offline terrain mesh lives in the world **XY plane with
+heights along +Z**, so the matching orbit is `camera_mode="mesh:zup"`
+(`cam_theta_deg` = polar angle from +Z: 0 is top-down, 90 is the horizon).
+Plain `"mesh"` is the legacy **Y-up** orbit, whose up vector is a grid axis:
+the terrain then renders rolled and, at azimuths where the orbit crosses the
+grid plane, collapses to an edge-on sliver. Measured on the Bryce DEM, span 12,
+radius 16, theta 32 — terrain columns covered out of 400:
+
+| `cam_phi_deg` | `mesh` | `mesh:zup` |
+|---|---|---|
+| 108 | 215 | 205 |
+| 150 | 109 | 221 |
+| 180 | **13** | 197 |
+| 210 | 76 | 201 |
+| 252 | 187 | 201 |
+
+Use `mesh:zup` unless you specifically want the legacy frame.
+
+**Sample count.** `render_offline` picks the sample budget by mode:
+
+- `adaptive=False` → exactly `params.aa_samples`; `OfflineQualitySettings`
+  `min_samples`/`max_samples` are **ignored**.
+- `adaptive=True` → up to `settings.max_samples`, stopping at
+  `settings.min_samples` once the frame converges.
+
+A caller that passes only `--samples 64` into `min_samples`/`max_samples` with
+`adaptive=False` therefore renders **one** sample and the flag reads as dead.
+Set `aa_samples=N` in the render params. `result.metadata["samples_used"]` (not
+`total_samples`) reports what actually ran — check it.
+
+**DEM source.** `assets/tif/*.tif` are Git-LFS pointers; an unpulled checkout
+has 134-byte text files, not rasters. A loader that only tests `path.exists()`
+silently falls back to a procedural terrain. Test the TIFF magic (`II`/`MM`)
+and try every candidate path before falling back.
+
+### 5.2 Framing the deck
+
+The deck is a bounded slab, so where the camera sits relative to
+`[altitude, altitude+thickness]` decides what the clouds even look like. The
+camera's height along `up_axis` is `cam_target.z + cam_radius · cos(cam_theta)`:
+
+- **Above the deck top** → you see cloud *tops* through to the terrain. This is
+  the "clouds over the landscape" shot, and it is the only framing where a
+  thick deck reads as thick clouds rather than as a ceiling.
+- **Between the two planes** → the camera is *inside* the deck. Every ray
+  accumulates almost immediately and the frame turns into uniform fog. Easy to
+  hit by accident: raise `--thickness` or lower `--radius` and the camera
+  silently ends up inside.
+- **Below the deck base** → you see the underside: a dramatic ceiling, and the
+  view that makes the deck read as *above* you.
+
+Getting the third shot automatically needs the camera and the aim point to be
+different heights, because the orbit always looks *at* `cam_target`. Setting
+`cam_theta > 90°` puts the eye *below* the target, so the view tilts upward.
+Both cloud examples implement this as `--view canyon`: it takes the lowest cell
+of the heightmap as the floor, stands the eye just above it, and aims at a
+point up in (or below) the deck and across the canyon, then converts that
+eye/aim pair back into `cam_target` + `radius` + `theta` + `phi`. The
+`--canyon-look-up` angle (degrees above horizontal) is the knob for how much
+terrain stays in the bottom of the frame: ~10° keeps a wall visible, ~25° is
+sky almost to the corners.
+
 ## 6. Determinism, provenance, degradation
 
 - **Determinism**: the shader runs the `det_*` prelude (`includes/determinism.wgsl`;
-  `det_div`, `det_barrier`, `det_pow`, `det_mix` …) and `clouds.wgsl` is part
-  of `terrain_parts()`, so `FORGE3D_DET_REWRITE=1 cargo test det_instrument_rewrite --lib`
-  must stay green after any shader edit (it gates `PINNED_TERRAIN_SOURCE_HASH`).
+  `det_div`, `det_barrier`, `det_pow`, `det_mix` …). `clouds.wgsl` is its own
+  assembled module (`atmosphere_clouds()`), *not* part of `terrain_parts()`, so
+  editing it does not move `PINNED_TERRAIN_SOURCE_HASH` — verified: the pinned
+  hash test stays green across a clouds-only edit. It is still covered by the
+  determinism IR lint, so `FORGE3D_DET_REWRITE=1 cargo test det_instrument_rewrite --lib`
+  must stay green after any shader edit (it auto-instruments new arithmetic; a
+  dry run with 0 edits is the pass condition).
   Offline, the per-sample jitter (`sample_index` seeded by `aa_seed`) is
   averaged by accumulation, which denoises the march for free. The viewer has
   no accumulation yet.
@@ -223,7 +316,7 @@ actually matter for the look:
 | bevy reference | forge3d before | forge3d now |
 | --- | --- | --- |
 | `(0.1+0.9·perlin_fbm×7) · (0.3+0.7·voronoi×8)` | `wor·0.55 + fbm·0.45` (average) | same multiply composite |
-| top = `1 − pow(1−h, 16)` | `1 − smoothstep(0.72, 1.0, h)` | `1 − pow(1−h, 16)` |
+| top = `1 − pow(1−h, 16)` | `1 − smoothstep(0.72, 1.0, h)` | `1 − pow(1−h, 10)` |
 | coverage floor baked in a noise channel | separate weather map | weather map (equally expressive) |
 | 3-scale worley detail (`r + g/2 + b/4`) | single ridged detail volume | detail + 2 worley scales |
 | `S·(1−ΔT)/ρ` energy-conserving integration | same | same |

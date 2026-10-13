@@ -73,6 +73,18 @@ def atrous_denoise(
     k = np.array([1, 4, 6, 4, 1], dtype=np.float32)
     k /= k.sum()
 
+    # The bilateral weights must be scale-invariant. They are documented as
+    # operating in linear space, and the input here is linear HDR, where a
+    # bright sky differs from terrain by tens of units: a display-referred
+    # sigma (0.1) then makes `exp(-dc^2 / 2 sigma^2)` underflow to zero wherever
+    # the luminance steps, `wsum` collapses, and `accum / max(wsum, 1e-8)`
+    # turns that region black. Normalising the guidance keeps the sigmas
+    # meaningful and leaves an already-normalised input unchanged.
+    guidance_scale = float(np.max(np.abs(a))) if a.size else 1.0
+    if not np.isfinite(guidance_scale) or guidance_scale <= 1.0e-6:
+        guidance_scale = 1.0
+    a_n = (a / guidance_scale).astype(np.float32)
+
     step = 1
     out = c.copy()
     for _ in range(int(max(1, iterations))):
@@ -93,15 +105,11 @@ def atrous_denoise(
                 src = _shift(out, oy, ox)
                 w_ij = np.full((h, w, 1), base_w, dtype=np.float32)
 
-                # Guidance difference (albedo preferred)
-                ga = _shift(a, oy, ox)
-                dc = ga - a
+                # Guidance difference (albedo preferred), on the normalised
+                # signal so the sigmas above stay scale-invariant.
+                ga = _shift(a_n, oy, ox)
+                dc = ga - a_n
                 w_ij *= np.exp(- (np.sum(dc * dc, axis=-1, keepdims=True)) / (2.0 * (sigma_color ** 2) + 1e-8))
-
-                # Optional extra albedo term (disabled if same as guidance)
-                if albedo is not None and sigma_albedo > 0:
-                    da = ga - a
-                    w_ij *= np.exp(- (np.sum(da * da, axis=-1, keepdims=True)) / (2.0 * (sigma_albedo ** 2) + 1e-8))
 
                 # Normal angular difference
                 if n is not None:
@@ -118,34 +126,49 @@ def atrous_denoise(
                 accum += src * w_ij
                 wsum += w_ij
 
-        out = accum / np.maximum(wsum, 1e-8)
+        # A fully-collapsed weight sum must never divide into black: `accum` and
+        # `wsum` underflow together, so guard with the unweighted B3-spline
+        # kernel and fall back to it everywhere the bilateral weights died. The
+        # epsilon floor alone silently turns those pixels black.
+        plain = np.zeros_like(out)
+        plain_sum = np.zeros((h, w, 1), dtype=np.float32)
+        for dy in (-2, -1, 0, 1, 2):
+            for dx in (-2, -1, 0, 1, 2):
+                weight = float(k[dy + 2] * k[dx + 2])
+                if weight == 0.0:
+                    continue
+                oy, ox = dy * step, dx * step
+                plain += _shift(out, oy, ox) * weight
+                plain_sum += weight
+        collapsed = wsum < 1.0e-6
+        if bool(np.any(collapsed)):
+            out = np.where(collapsed, plain / np.maximum(plain_sum, 1e-8), accum / np.maximum(wsum, 1e-8))
+        else:
+            out = accum / np.maximum(wsum, 1e-8)
         step *= 2
 
     return out.astype(np.float32, copy=False)
 
 
 def _shift(x: np.ndarray, oy: int, ox: int) -> np.ndarray:
-    """Shift array with zero padding.
+    """Shift array, replicating the border instead of zero-filling it.
+
+    Zero padding is fatal for a bilateral/a-trous filter over *value* data: a
+    bright border (an HDR sky, for instance) is compared against black
+    neighbours, every guidance weight collapses toward 0, and the normalised
+    result `accum / max(wsum, 1e-8)` divides by the epsilon and turns the whole
+    border black. Replicating the edge keeps the filter's own values, which is
+    the standard choice.
 
     Works for 2D (H,W) or 3D (H,W,C) arrays.
     """
-    if x.ndim == 2:
-        h, w = x.shape
-        out = np.zeros_like(x)
-        ys = slice(max(0, oy), min(h, h + oy))
-        xs = slice(max(0, ox), min(w, w + ox))
-        yd = slice(max(0, -oy), max(0, -oy) + (ys.stop - ys.start))
-        xd = slice(max(0, -ox), max(0, -ox) + (xs.stop - xs.start))
-        out[yd, xd] = x[ys, xs]
-        return out
-    elif x.ndim == 3:
-        h, w, c = x.shape
-        out = np.zeros_like(x)
-        ys = slice(max(0, oy), min(h, h + oy))
-        xs = slice(max(0, ox), min(w, w + ox))
-        yd = slice(max(0, -oy), max(0, -oy) + (ys.stop - ys.start))
-        xd = slice(max(0, -ox), max(0, -ox) + (xs.stop - xs.start))
-        out[yd, xd, :] = x[ys, xs, :]
-        return out
-    else:
+    if x.ndim not in (2, 3):
         raise ValueError("_shift expects 2D or 3D array")
+    h, w = x.shape[0], x.shape[1]
+    py, px = abs(oy), abs(ox)
+    pads = ((py, py), (px, px)) + (() if x.ndim == 2 else ((0, 0),))
+    xp = np.pad(x, pads, mode="edge")
+    start_y, start_x = py + oy, px + ox
+    if x.ndim == 2:
+        return xp[start_y:start_y + h, start_x:start_x + w]
+    return xp[start_y:start_y + h, start_x:start_x + w, :]

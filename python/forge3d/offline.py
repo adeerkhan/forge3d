@@ -143,6 +143,14 @@ def _render_offline_impl(
     if not settings.enabled:
         raise ValueError("render_offline requires OfflineQualitySettings(enabled=True)")
 
+    # Which knob chooses the sample count depends on the mode, and mixing them up
+    # fails silently (the render just uses one sample):
+    #   adaptive=False -> exactly `params.aa_samples` samples; `min_samples` and
+    #                     `max_samples` are ignored.
+    #   adaptive=True  -> up to `settings.max_samples`, stopping at
+    #                     `settings.min_samples` once the frame converges.
+    # A caller that wants "N samples" with adaptive=False must therefore set
+    # `aa_samples=N` in the render params, not just `OfflineQualitySettings`.
     target_samples = int(settings.max_samples if settings.adaptive else params.aa_samples)
     target_samples = max(target_samples, 1)
     renderer.begin_offline_accumulation(

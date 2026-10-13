@@ -50,7 +50,7 @@ impl Default for ViewerCloudConfig {
             density: 0.6,
             altitude_m: 900.0,
             thickness_m: 1200.0,
-            scatter_strength: 8.0,
+            scatter_strength: 1.0,
             phase_g: 0.6,
             detail: 0.5,
             powder: 0.5,
@@ -226,6 +226,9 @@ impl ViewerCloudRenderer {
             time_seconds: camera.time,
             shadow_strength: config.shadow_strength,
             size: config.size,
+            // The IPC seam does not carry `quality` yet, so the view keeps the
+            // default step count (identical to the offline `medium`).
+            march_steps: 56,
             weather_strength: config.weather_strength,
             weather_map: config.weather_map.clone(),
         };
@@ -432,7 +435,9 @@ impl ViewerTerrainScene {
                 1.0
             },
             bounds_center: (eye - up * eye.dot(up)).to_array(),
-            extent_radius: terrain_span.max(1.0),
+            // Same deck radius the offline path uses, so the view and the
+            // offline render agree for identical settings.
+            extent_radius: crate::core::cloud_volume::cloud_field_extent(terrain_span),
             time,
         };
         match renderer.render(

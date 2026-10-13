@@ -1101,9 +1101,17 @@ class DenoiseSettings:
     iterations: int = 3     # Number of filter passes (1-10)
     
     # A-trous parameters
+    #
+    # These must stay in step with the denoiser's own tuned defaults
+    # (`forge3d/denoise.py`: sigma_color=0.1, sigma_normal=0.3, sigma_depth=0.5).
+    # `render_offline` forwards whatever is set here verbatim, so an untuned
+    # small value silently overrides the denoiser's: sigma_normal=0.1 makes the
+    # normal-guidance weight underflow to zero across any real angular step,
+    # `wsum` then collapses to 0 and `accum / max(wsum, 1e-8)` divides into an
+    # all-black frame.
     sigma_color: float = 0.1   # Color similarity weight
-    sigma_normal: float = 0.1  # Normal similarity weight (if guidance available)
-    sigma_depth: float = 0.1   # Depth similarity weight (if guidance available)
+    sigma_normal: float = 0.3  # Normal similarity weight (if guidance available)
+    sigma_depth: float = 0.5   # Depth similarity weight (if guidance available)
     
     # Edge preservation
     edge_stopping: float = 1.0  # Edge-stopping strength (0 = none, 1 = strong)
