@@ -8,6 +8,24 @@ where to look when they look wrong. No deep math — just the recipe.
 We paint clouds by **marching a ray through a box of 3D noise** on the GPU, one
 ray per pixel, and blending the result over the terrain picture.
 
+## Two looks: realistic and cartoon
+
+The same cloud pass can draw either of two looks, chosen with
+`CloudSettings(style=...)`:
+
+- **`"realistic"`** (default) — the physically-based deck: domain-warped noise
+  built into fractal, eroded shapes, lit with a Henyey–Greenstein phase lobe,
+  powder shading and distance fog. Photographic, soft, atmospheric.
+- **`"cartoon"`** — a stylized deck: clean rounded puffs, no fine erosion, and
+  flat cel shading (the sun term is quantized into three hard tones, with a
+  brighter crown and a darker drawn underside). Crisp, high-contrast, no haze.
+
+Both styles raymarch the **same** slab, the same noise volumes and the same
+composite — only the density shaping and the per-sample lighting differ, so
+switching style never moves the deck or changes the pass topology. The knobs
+below apply to both; the presets (`--preset cartoon`) pick sensible values for
+the cartoon look.
+
 ## Quick start
 
 The easiest way to get good clouds is the HDRI example — it lights the cloud
@@ -123,6 +141,8 @@ Both paths run the **same shader** and the same GPU resources.
 | Field | Effect |
 | --- | --- |
 | `enabled` | Off = the pass never runs (picture is byte-identical to no clouds). |
+| `style` | `"realistic"` (default) or `"cartoon"`. See [Two looks](#two-looks-realistic-and-cartoon). |
+| `quality` | `low` / `medium` / `high` / `ultra` — the raymarch step count. |
 | `coverage` | How much sky is filled. **Low = separate puffs, high = solid sheet.** |
 | `density` | How opaque each cloud is. |
 | `altitude_m`, `thickness_m` | Where the deck sits and how tall it is. **Must sit above the terrain peaks or you won't see it.** Interpreted as world-space height on the offline path, *not* metres — see [Units](#units-read-this-before-tweaking-altitude_m--thickness_m). |

@@ -100,7 +100,7 @@ pub enum ViewerCmd {
         enabled: Option<bool>, coverage: Option<f32>, density: Option<f32>,
         altitude_m: Option<f32>, thickness_m: Option<f32>, scatter_strength: Option<f32>,
         phase_g: Option<f32>, detail: Option<f32>, powder: Option<f32>,
-        wind_dir_deg: Option<f32>, wind_speed: Option<f32>,
+        wind_dir_deg: Option<f32>, wind_speed: Option<f32>, style: Option<String>,
     },
 
     LoadOverlay { name: String, path: String, extent: Option<[f32; 4]>, opacity: Option<f32>, z_order: Option<i32> },

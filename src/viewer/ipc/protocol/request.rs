@@ -68,6 +68,7 @@ pub enum IpcRequest {
         #[serde(default)] altitude_m: Option<f32>, #[serde(default)] thickness_m: Option<f32>, #[serde(default)] scatter_strength: Option<f32>,
         #[serde(default)] phase_g: Option<f32>, #[serde(default)] detail: Option<f32>, #[serde(default)] powder: Option<f32>,
         #[serde(default)] wind_dir_deg: Option<f32>, #[serde(default)] wind_speed: Option<f32>,
+        #[serde(default)] style: Option<String>,
     },
     LoadOverlay { name: String, path: String, #[serde(default)] extent: Option<[f32; 4]>, #[serde(default)] opacity: Option<f32>, #[serde(default)] z_order: Option<i32> },
     RemoveOverlay { id: u32 },

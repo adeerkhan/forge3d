@@ -287,6 +287,7 @@ class TestCloudSettings:
         assert settings.density == 0.5
         assert settings.shadow_strength == 0.35
         assert settings.quality == "medium"
+        assert settings.style == "realistic"
         assert settings.altitude_m == 1500.0
         assert settings.thickness_m == 800.0
         assert settings.scatter_strength == 1.0
@@ -345,12 +346,25 @@ class TestCloudSettings:
         with pytest.raises(ValueError, match="quality must be one of"):
             CloudSettings(quality="cinematic")
 
+    def test_cloud_style_validation(self):
+        """style selects the realistic or cartoon look, and rejects anything else."""
+        assert CloudSettings(style="realistic").style == "realistic"
+        assert CloudSettings(style="cartoon").style == "cartoon"
+        with pytest.raises(ValueError, match="style must be one of"):
+            CloudSettings(style="photoreal")
+
     def test_cloud_presets_are_valid_settings(self):
         """Every named preset constructs a valid, enabled CloudSettings."""
-        assert set(CLOUD_PRESETS) == {"fair-weather", "scattered", "storm", "cirrus"}
+        assert set(CLOUD_PRESETS) == {"fair-weather", "scattered", "storm", "cirrus", "cartoon"}
         for name, preset in CLOUD_PRESETS.items():
             settings = CloudSettings(**preset)
             assert settings.enabled is True, name
+        # The cartoon preset is the only one that selects the stylized style.
+        assert CloudSettings(**CLOUD_PRESETS["cartoon"]).style == "cartoon"
+        assert all(
+            CloudSettings(**CLOUD_PRESETS[name]).style == "realistic"
+            for name in ("fair-weather", "scattered", "storm", "cirrus")
+        )
 
 
 class TestTerrainRenderParamsWithVolumetricsSky:

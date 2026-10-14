@@ -153,6 +153,7 @@ pub(super) fn to_viewer_cmd(req: &IpcRequest) -> Result<Option<ViewerCmd>, Strin
             powder,
             wind_dir_deg,
             wind_speed,
+            style,
         } => Ok(Some(ViewerCmd::SetTerrainClouds {
             enabled: *enabled,
             coverage: *coverage,
@@ -165,6 +166,7 @@ pub(super) fn to_viewer_cmd(req: &IpcRequest) -> Result<Option<ViewerCmd>, Strin
             powder: *powder,
             wind_dir_deg: *wind_dir_deg,
             wind_speed: *wind_speed,
+            style: style.clone(),
         })),
         _ => Ok(None),
     }

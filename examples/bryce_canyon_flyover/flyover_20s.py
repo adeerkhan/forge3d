@@ -133,6 +133,14 @@ def main() -> None:
     parser.add_argument("--cloud-thickness", type=float, default=700.0, help="Cloud slab thickness (m)")
     parser.add_argument("--cloud-coverage", type=float, default=0.4, help="Cloud coverage [0,1]")
     parser.add_argument("--cloud-density", type=float, default=0.6, help="Cloud density scale")
+    parser.add_argument("--cloud-scatter", type=float, default=2.2,
+                        help="in-scatter + ambient multiplier; keep <= ~4 or the deck blows out white")
+    parser.add_argument("--cloud-style", choices=("realistic", "cartoon"), default="realistic",
+                        help="cloud look: photographic haze, or flat cel-shaded puffs")
+    parser.add_argument("--seconds", type=float, default=float(SECONDS),
+                        help="how many seconds of the flight to render (preview short clips cheaply)")
+    parser.add_argument("--out", type=Path, default=None,
+                        help="output MP4 path (default: the committed name, or a <n>s-suffixed name for previews)")
     args = parser.parse_args()
 
     ffmpeg = shutil.which("ffmpeg")
@@ -145,10 +153,17 @@ def main() -> None:
         ctx_left, ctx_top = src.transform.c, src.transform.f
         min_h = float(src.read(1).min())
     cams = camera_commands(dem, min_h)
+    n_frames = max(1, min(N, int(round(FPS * args.seconds))))
+    cams = cams[:n_frames]
+    output = OUTPUT
+    if args.out is not None:
+        output = Path(args.out)
+    elif args.seconds not in (SECONDS, float(SECONDS)):
+        output = OUTPUT.with_name(f"{OUTPUT.stem}_{args.seconds:g}s{OUTPUT.suffix}")
     u0, v0 = (TILE_LEFT - ctx_left) / CTX, (ctx_top - TILE_TOP) / CTX
     sun = f3d.sun_position_utc(LAT, LON, *SUN_UTC)
 
-    partial, snapshot = OUTPUT.with_suffix(".part.mp4"), HERE / "_frame.png"
+    partial, snapshot = output.with_suffix(".part.mp4"), HERE / "_frame.png"
     encoder = subprocess.Popen(
         [ffmpeg, "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{SIZE[0]}x{SIZE[1]}",
          "-framerate", str(FPS), "-i", "-", "-c:v", "libx264", "-preset", "slow", "-crf", "17", "-pix_fmt", "yuv420p",
@@ -175,8 +190,9 @@ def main() -> None:
                 "cmd": "set_terrain_clouds", "enabled": True,
                 "coverage": args.cloud_coverage, "density": args.cloud_density,
                 "altitude_m": args.cloud_altitude, "thickness_m": args.cloud_thickness,
-                "scatter_strength": 16.0, "phase_g": 0.75, "detail": 0.6, "powder": 0.8,
-                "wind_dir_deg": 60.0, "wind_speed": 0.0,
+                "scatter_strength": args.cloud_scatter, "phase_g": 0.75, "detail": 0.6,
+                "powder": 0.8, "wind_dir_deg": 60.0, "wind_speed": 0.0,
+                "style": args.cloud_style,
             })
         for f, cam in enumerate(cams):
             viewer.send_ipc(cam)
@@ -190,8 +206,8 @@ def main() -> None:
         snapshot.unlink(missing_ok=True)
     if encoder.wait() != 0:
         raise RuntimeError("ffmpeg failed")
-    partial.replace(OUTPUT)
-    print(f"wrote {OUTPUT.name} ({OUTPUT.stat().st_size / 1e6:.1f} MB) in {time.perf_counter() - start:.0f}s")
+    partial.replace(output)
+    print(f"wrote {output.name} ({output.stat().st_size / 1e6:.1f} MB) in {time.perf_counter() - start:.0f}s")
 
 
 if __name__ == "__main__":

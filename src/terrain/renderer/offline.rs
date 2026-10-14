@@ -952,6 +952,9 @@ impl TerrainScene {
                     ),
                     weather_strength: state.decoded.clouds.weather_strength,
                     weather_map: state.decoded.clouds.weather_map.clone(),
+                    style: crate::core::cloud_volume::CloudStyle::from_setting(
+                        state.decoded.clouds.style.as_str(),
+                    ),
                 };
                 let cloud_rendered = self.clouds.render(
                     self.device.as_ref(),

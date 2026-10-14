@@ -40,6 +40,7 @@ pub struct ViewerCloudConfig {
     pub size: f32,
     pub weather_strength: f32,
     pub weather_map: Option<String>,
+    pub style: crate::core::cloud_volume::CloudStyle,
 }
 
 impl Default for ViewerCloudConfig {
@@ -60,6 +61,7 @@ impl Default for ViewerCloudConfig {
             size: 2.0,
             weather_strength: 0.6,
             weather_map: None,
+            style: crate::core::cloud_volume::CloudStyle::Realistic,
         }
     }
 }
@@ -231,6 +233,7 @@ impl ViewerCloudRenderer {
             march_steps: 56,
             weather_strength: config.weather_strength,
             weather_map: config.weather_map.clone(),
+            style: config.style,
         };
         let frame = CloudFrameParams {
             inv_view_proj: camera.inv_view_proj,
@@ -337,6 +340,7 @@ impl ViewerTerrainScene {
         powder: Option<f32>,
         wind_dir_deg: Option<f32>,
         wind_speed: Option<f32>,
+        style: Option<String>,
     ) {
         let clouds = &mut self.pbr_config.clouds;
         if let Some(value) = enabled {
@@ -371,6 +375,9 @@ impl ViewerTerrainScene {
         }
         if let Some(value) = wind_speed {
             clouds.wind_speed = value.max(0.0);
+        }
+        if let Some(value) = style {
+            clouds.style = crate::core::cloud_volume::CloudStyle::from_setting(&value);
         }
     }
 
@@ -420,7 +427,13 @@ impl ViewerTerrainScene {
         let Some(renderer) = self.cloud_renderer.as_ref() else {
             return false;
         };
-        let up = glam::Vec3::Z;
+        // The viewer terrain's world basis is `(map X, display height, -map Y)`
+        // (see terrain_load.rs), so the world UP axis is Y -- the same basis
+        // orbit_camera uses. This was hardcoded to Z, which stood the deck on
+        // its side: the slab and its vertical profile were measured along the
+        // Z (south) axis, so the "flat cloud base" ran east-west vertically and
+        // the deck read as an inverted sheet.
+        let up = glam::Vec3::Y;
         let camera = ViewerCloudCamera {
             inv_view_proj: view_proj.inverse().to_cols_array_2d(),
             eye: eye.to_array(),
@@ -429,11 +442,7 @@ impl ViewerTerrainScene {
             // The viewer terrain is geographic with +Z up, so the cloud slab is
             // measured along +Z (matching the offline `mesh:zup` path).
             up_axis: up.to_array(),
-            noise_scale: if terrain_span > 1.0 {
-                1.0 / terrain_span
-            } else {
-                1.0
-            },
+            noise_scale: crate::core::cloud_volume::cloud_noise_scale(terrain_span),
             bounds_center: (eye - up * eye.dot(up)).to_array(),
             // Same deck radius the offline path uses, so the view and the
             // offline render agree for identical settings.

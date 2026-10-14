@@ -421,6 +421,7 @@ pub(crate) fn handle_cmd(viewer: &mut Viewer, cmd: &ViewerCmd) -> bool {
             powder,
             wind_dir_deg,
             wind_speed,
+            style,
         } => {
             if let Some(ref mut terrain_viewer) = viewer.terrain_viewer {
                 terrain_viewer.set_terrain_clouds(
@@ -435,6 +436,7 @@ pub(crate) fn handle_cmd(viewer: &mut Viewer, cmd: &ViewerCmd) -> bool {
                     *powder,
                     *wind_dir_deg,
                     *wind_speed,
+                    style.clone(),
                 );
             } else {
                 viewer.reject_command(

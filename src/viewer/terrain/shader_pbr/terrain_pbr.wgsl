@@ -737,7 +737,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample overlay texture for solid check and blending
     let overlay = textureSample(overlay_tex, overlay_sampler, in.uv);
     let overlay_alpha = overlay.a * overlay_opacity;
-    let solid_background = overlay_enabled && solid_surface && overlay_alpha <= 0.01;
+    // "Solid surface" mode means "show the base terrain where the overlay has no
+    // coverage". It used to fire on ANY low-alpha fragment, but a camera that
+    // frames SKY has low overlay alpha there too, so every sky pixel took
+    // `u.background` and the sky collapsed to a single flat field -- which is
+    // what made the clouds render as an off-white smear with no depth. Probes
+    // with a black and a blue background rendered byte-identically, pinning the
+    // sky to this stamp rather than to any sky shader.
+    //
+    // The overlay's own UV is the discriminator: the imagery spans the DEM, and
+    // `in.uv` outside [0,1] is sky (the mesh did not draw there). Discarding the
+    // stamp outside the image keeps the flat fill over uncovered *terrain*
+    // while leaving the sky to the depth-clear background.
+    let overlay_covers = in.uv.x >= 0.0 && in.uv.x <= 1.0 && in.uv.y >= 0.0 && in.uv.y <= 1.0;
+    let solid_background = overlay_enabled && solid_surface && overlay_alpha <= 0.01 && overlay_covers;
     
     // When solid=false and overlay is enabled, discard fragments where overlay alpha is low
     // This hides the base surface outside the region of interest (like rayshader solid=FALSE)

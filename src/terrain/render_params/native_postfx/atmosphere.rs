@@ -54,6 +54,10 @@ pub struct CloudsSettingsNative {
     pub density: f32,
     pub shadow_strength: f32,
     pub quality: String,
+    /// Visible-cloud look: `"realistic"` (physically-based volumetric haze) or
+    /// `"cartoon"` (flat cel-shaded stylized deck). Unknown values fall back to
+    /// `"realistic"`.
+    pub style: String,
     /// Cloud layer base altitude above the terrain datum, in metres.
     pub altitude_m: f32,
     /// Vertical extent of the cloud slab, in metres.
@@ -88,6 +92,7 @@ impl Default for CloudsSettingsNative {
             density: 0.5,
             shadow_strength: 0.35,
             quality: "medium".to_string(),
+            style: "realistic".to_string(),
             altitude_m: 1500.0,
             thickness_m: 800.0,
             scatter_strength: 1.0,

@@ -970,6 +970,7 @@ def _mapscene_cloud_settings(recipe: "SceneRecipe") -> Any | None:
             data.get("shadow_strength", data.get("shadow_intensity", defaults.shadow_strength))
         ),
         quality=str(data.get("quality", defaults.quality)),
+        style=str(data.get("style", defaults.style)),
         altitude_m=float(data.get("altitude_m", defaults.altitude_m)),
         thickness_m=float(data.get("thickness_m", defaults.thickness_m)),
         scatter_strength=float(data.get("scatter_strength", defaults.scatter_strength)),

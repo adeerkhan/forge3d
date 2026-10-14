@@ -13,16 +13,16 @@ ffmpeg command instead of failing.
 
 Outputs (under ``--output-dir``, default ``out/clouds``)::
 
-    <preset>.png                     # the four 2K hero stills
+    <preset>.png                     # the 2K hero stills (one per preset)
     video_frames/frame_0000.png ...  # orbit animation frames
     clouds_orbit_<preset>.mp4        # the video (if ffmpeg present)
 
 Examples::
 
-    # The four 2K stills only:
+    # The 2K stills only:
     python tools/render_cloud_showcase.py --stills
 
-    # The four stills AND a ~5 s orbit video of the cumulus preset:
+    # The stills AND a ~5 s orbit video of the cumulus preset:
     python tools/render_cloud_showcase.py --stills --video
 
     # Just a storm orbit at full 2K, 30 frames:
@@ -44,7 +44,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = REPO_ROOT / "examples"
 EXAMPLE_MODULE = EXAMPLES_DIR / "terrain_volumetric_clouds_hdri.py"
 
-DEFAULT_PRESETS = ("cumulus", "scattered", "storm", "cirrus")
+DEFAULT_PRESETS = ("cumulus", "scattered", "storm", "cirrus", "cartoon")
 
 
 def _load_example():
@@ -102,7 +102,7 @@ def _parse_args() -> argparse.Namespace:
 
     args = p.parse_args()
     if not args.stills and not args.video:
-        # Default to doing both so a bare run gives you the four images + video.
+        # Default to doing both so a bare run gives you the images + video.
         args.stills = True
         args.video = True
     if args.frames < 2:

@@ -115,6 +115,7 @@ pub(super) fn parse_clouds_settings(params: &Bound<'_, PyAny>) -> PyResult<Cloud
         shadow_strength: extract_optional(&clouds, "shadow_strength")?
             .unwrap_or(base.shadow_strength),
         quality: extract_optional(&clouds, "quality")?.unwrap_or(base.quality),
+        style: extract_optional(&clouds, "style")?.unwrap_or(base.style),
         altitude_m: extract_optional(&clouds, "altitude_m")?.unwrap_or(base.altitude_m),
         thickness_m: extract_optional(&clouds, "thickness_m")?.unwrap_or(base.thickness_m),
         scatter_strength: extract_optional(&clouds, "scatter_strength")?

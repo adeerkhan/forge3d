@@ -136,7 +136,14 @@ pub async fn create_device_and_surface(
         .unwrap_or(surface_caps.formats[0]);
 
     let config = SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        // COPY_DST lets the interactive window present the offscreen cloud
+        // composite (see render_secondary_paths): the cloud pass writes a
+        // linear-HDR beauty, so the terrain has to be rendered offscreen and
+        // copied onto the swapchain. RENDER_ATTACHMENT alone rejects that
+        // blit (`Copy error`).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
         format: surface_format,
         width: size.width,
         height: size.height,

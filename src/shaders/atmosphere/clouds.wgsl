@@ -23,6 +23,7 @@ struct CloudUniforms {
     bounds: vec4<f32>,          // xyz cloud-field centre (world), w = horizontal extent radius
     feature: vec4<f32>,         // x cell-frequency multiplier (cloud size), y = shadow strength, z = raymarch step count, w unused
     weather: vec4<f32>,         // x weather-map strength (coverage variation), yzw unused
+    style: vec4<f32>,           // x style flag (0 realistic, 1 cartoon), y = toon band count, z = edge darkening, w unused
 };
 
 @group(0) @binding(0) var<uniform> u: CloudUniforms;
@@ -102,12 +103,25 @@ fn base_shape(p: vec3<f32>) -> f32 {
     let fbm = det_barrier(det_barrier(f0 + f1) + f2);
 
     // Frostbite/HZD composite: the shape is the PRODUCT of the fractal field and
-    // the cellular field (each softly biased toward 1), not their average. The
-    // multiply keeps high-contrast puffy interiors with hard zeros between
-    // puffs; an average washes the whole deck into a flat grey sheet.
-    let fluffy = det_barrier(det_barrier(0.1) + det_barrier(0.9 * fbm));
-    let billowy = det_barrier(det_barrier(0.3) + det_barrier(0.7 * wor));
-    return det_barrier(fluffy * billowy);
+    // the cellular field, not their average. The multiply keeps high-contrast
+    // puffy interiors with hard zeros between puffs; an average washes the whole
+    // deck into a flat grey sheet.
+    //
+    // The product is then re-centred on 0.5. `coverage` is a fraction of sky
+    // filled, so its cut is `1 - coverage` and the field has to straddle that at
+    // its MEAN for the knob to mean anything. The raw product averages ~0.35
+    // (0.55 x 0.65), so the 0.42 preset cut at 0.58 sat far above the mean and
+    // left the deck as one stray cell instead of a field of puffs. Re-centring
+    // puts ~(1 - coverage) of the sky above threshold, which is exactly what
+    // "coverage" promises.
+    let fluffy = det_barrier(fbm);
+    let billowy = det_barrier(wor);
+    let product = det_barrier(fluffy * billowy);
+    // Stretch around the mean: product averages ~0.25, so 2*product averages
+    // ~0.5, which is what `1 - coverage` is measured against. The stretch also
+    // widens the histogram, so the coverage cut is a real discriminator rather
+    // than a threshold sitting above everything.
+    return det_barrier(2.0 * product);
 }
 
 // Height-gradient detail erosion in [0,1] (1 = no erosion). Two Worley scales
@@ -139,7 +153,83 @@ fn cumulus_profile(height_frac: f32) -> f32 {
     return det_barrier(det_smoothstep(0.0, 0.06, h) * det_barrier(1.0 - det_pow(1.0 - h, 10.0)));
 }
 
-fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
+// Extinction coefficient, in inverse world units.
+//
+// `u.layer.w` (`CloudSettings.density`) is the DIMENSIONLESS optical depth a ray
+// accumulates traversing the whole deck vertically, so it means the same thing
+// on every path. It used to be a per-world-unit coefficient, which made the very
+// same number near-invisible on a 2-unit demo deck and optically infinite on a
+// 900 m geospheric one -- the deck then saturated to opaque white over the whole
+// sky (measured: 73% of sky pixels blown out). Dividing by the deck thickness
+// bounds tau at the setting itself, so the composite stays a *veil* you can see
+// structure through at 0.5-0.8 and only goes solid well past 1.0.
+fn deck_extinction() -> f32 {
+    return det_div(u.layer.w, max(u.layer.y, 1.0e-4));
+}
+
+// ---------------------------------------------------------------------------
+// Cartoon (cel-shaded) density
+//
+// The stylized deck deliberately throws away the two things that make the
+// realistic path read as "photographic": the low-frequency domain warp (which
+// shears puffs into wispy wind-torn shapes) and the fine erosion (which breaks
+// the silhouette into feathered filaments). What is left is a chunky rounded
+// mass with a clean, readable outline that the flat cel lighting can fill.
+// ---------------------------------------------------------------------------
+
+// Clean rounded mass in [0,1]: a coarse cellular field with a touch of the
+// low-octave fractal so the puffs are not identical, then a wide S-curve that
+// pushes the midrange toward the extremes. That S-curve is what separates the
+// field into distinct rounded blobs with clear sky between them -- without it
+// the cellular field is a gentle gradient and the deque fills in as one wash.
+fn cartoon_shape(p: vec3<f32>) -> f32 {
+    let q = det_barrier3(det_barrier3(p * u.up_axis.w) * u.feature.x);
+    let wor = det_barrier(textureSampleLevel(worley_noise, base_sampler, det_barrier3(q * 1.2), 0.0).r);
+    let fbm = det_barrier(textureSampleLevel(base_noise, base_sampler, det_barrier3(q * 2.2), 0.0).r);
+    let mass = det_barrier(det_mix(wor, fbm, 0.50));
+    return det_barrier(det_smoothstep(0.34, 0.72, mass));
+}
+
+// Domed vertical profile: a flat, hard base and a fully rounded crown, so a
+// puff reads as a tidy hemisphere rather than a cone. Thicker than the
+// realistic profile because the cartoon deck is meant to look solid.
+fn cartoon_profile(height_frac: f32) -> f32 {
+    let h = clamp(height_frac, 0.0, 1.0);
+    return det_barrier(det_smoothstep(0.0, 0.12, h) * det_barrier(1.0 - det_pow(1.0 - h, 4.0)));
+}
+
+fn cartoon_density(p: vec3<f32>, height_frac: f32) -> f32 {
+    let up = det_normalize3(u.up_axis.xyz);
+    // Bounded to the same finite deck as the realistic path, so switching style
+    // never changes where the clouds live -- only how they look.
+    let rel = det_barrier3(p - u.bounds.xyz);
+    let h_off = rel - det_barrier3(up * det_dot3(rel, up));
+    let extent = det_div(det_dot3(h_off, h_off), max(u.bounds.w * u.bounds.w, 1.0e-6));
+    if extent >= 1.0 {
+        return 0.0;
+    }
+    let edge = 1.0 - det_smoothstep(0.6, 1.0, extent);
+
+    let helper = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), abs(up.y) < 0.9);
+    let right = det_normalize3(det_cross3(up, helper));
+    let forward = det_cross3(up, right);
+    let wuv = det_barrier2(det_barrier2(det_div2(vec2<f32>(det_dot3(h_off, right), det_dot3(h_off, forward)), vec2<f32>(max(u.bounds.w, 1.0e-3)))) * 0.5) + vec2<f32>(0.5);
+    let weather = textureSampleLevel(weather_map, weather_sampler, wuv, 0.0).r;
+    let coverage = clamp(u.layer.z + det_barrier((weather - 0.5) * u.weather.x), 0.0, 1.0);
+
+    let shape = cartoon_shape(p);
+    let profile = cartoon_profile(height_frac);
+    let eroded = det_barrier(shape - det_barrier(1.0 - coverage));
+    // A tight ramp is what gives the drawn outline. No detail term multiplies
+    // this, so the boundary is the shape's own contour: a single hard edge the
+    // cel lighting can key off.
+    let cut = det_smoothstep(0.0, 0.05, eroded);
+    return det_barrier(det_barrier(cut * profile) * edge) * deck_extinction();
+}
+
+/// Physically-based Frostbite / HZD density field: the product of a fractal
+/// and a cellular field, eroded by fine detail, cut by coverage.
+fn realistic_density(p: vec3<f32>, height_frac: f32) -> f32 {
     let up = det_normalize3(u.up_axis.xyz);
     // Clip the field to a bounded horizontal extent around the cloud centre,
     // with a soft edge so the cloud deck fades out instead of ending in a hard
@@ -166,24 +256,37 @@ fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
     // so tops erode more than bases (HZD height-varying coverage).
     let profile = det_barrier(cumulus_profile(height_frac));
     let eroded = det_barrier(shape - (det_barrier(1.0 - coverage))) - det_barrier(det_barrier(1.0 - profile) * 0.55);
-    // Soft coverage cut instead of a hard threshold. The ramp is deliberately
-    // narrow (0.16): the wide ramp that first cured the edge sparkle is no
-    // longer needed, because the aliasing source was the sub-pixel octave
-    // content, which the frequency caps in `base_shape`/`detail_erosion` now
-    // remove. A narrow ramp is what gives puffs a defined silhouette instead of
-    // smearing the deck into an even haze.
-    let cut = det_smoothstep(0.0, 0.16, eroded);
+    // Coverage cut. The ramp has to reach ZERO between puffs, not merely get
+    // small: a wide leave-a-bit-everywhere ramp (0.16) turns the whole deck into
+    // a uniform thin veil, and the sky loses every clear gap (measured: 0.7% of
+    // sky pixels were open sky). It is now a hard-ish threshold, which is also
+    // what gives cumulus their defined silhouettes. Offline accumulation
+    // antialiases the edge.
+    let cut = det_smoothstep(0.0, 0.07, eroded);
     if cut <= 0.0 {
         return 0.0;
     }
-    // Erode thin regions more (height-gradient erosion), but fade the erosion
-    // out AT the boundary: the finest erosion noise there is sub-pixel at
-    // cloud distance and per-sample jitter turns it into a scattered halo of
-    // isolated pixels (the bevy reference gates its detail the same way, by
-    // thickness, so detail only shapes interiors).
-    let erosion_amount = det_barrier(det_barrier(u.optics.z * (1.0 - cut)) * det_smoothstep(0.05, 0.30, cut));
+    // Height-gradient erosion, but let it reach the SILHOUETTE. The earlier
+    // build faded erosion to zero at the boundary to kill a sparse-pixel halo;
+    // that also removed the fine nibble that turns a smooth contour into
+    // cauliflower lobes, and the deck read as one soft smear (the "blur").
+    // Offline accumulation averages the per-sample jitter, so the boundary
+    // detail resolves instead of sparkling; the erosion still tapers toward the
+    // thick core so interiors stay smooth. `0.30` is the floor at the edge.
+    let edge_keep = det_smoothstep(0.0, 0.45, cut);
+    let erosion_amount = det_barrier(u.optics.z * det_mix(0.30, 1.0, edge_keep));
     let detail = detail_erosion(p, erosion_amount);
-    return det_barrier(det_barrier(det_barrier(cut * detail) * profile) * edge) * u.layer.w;
+    return det_barrier(det_barrier(det_barrier(cut * detail) * profile) * edge) * deck_extinction();
+}
+
+/// Density dispatcher: selects the stylized or the physically-based field from
+/// the uniform. Every caller (march, light march, ground shadow) goes through
+/// here, so the two styles stay consistent across the whole pass.
+fn cloud_density(p: vec3<f32>, height_frac: f32) -> f32 {
+    if u.style.x > 0.5 {
+        return cartoon_density(p, height_frac);
+    }
+    return realistic_density(p, height_frac);
 }
 
 fn intersect_slab(origin: vec3<f32>, dir: vec3<f32>, up: vec3<f32>) -> vec2<f32> {
@@ -261,6 +364,38 @@ fn sun_transmittance(p: vec3<f32>, up: vec3<f32>) -> f32 {
     return det_exp(-optical);
 }
 
+// Flat cel-shaded colour for one cartoon sample. The sun transmittance is
+// quantized into `u.style.y` hard bands (a fully shaded, a mid, and a fully lit
+// tone) so a surface of constant illumination fills with one flat colour and
+// the light/shadow boundary is a hard step -- the defining read of a toon fill.
+// `height_frac` adds a crown highlight on the sunlit top and a darkened,
+// outline-like underside.
+fn cartoon_lit(height_frac: f32, sun: f32) -> vec3<f32> {
+    let bands = max(u.style.y, 2.0);
+    // Combined illumination: the sunlit fraction plus how high the sample sits
+    // in the deck, so a puff's crown is the brightest tone and its base the
+    // darkest. Quantizing this into flat bands is the cel fill -- keying on the
+    // sun term alone lands most of a sunlit top in the brightest band and the
+    // puff reads as one flat white shape.
+    let illum = clamp((det_barrier(sun * 0.65)) + (det_barrier(height_frac * 0.55)), 0.0, 1.0);
+    let q = det_div(floor(illum * bands), max(bands - 1.0, 1.0));
+    // Explicit three-tone ramp (shadow / mid / lit) rather than a two-colour
+    // mix, so the mid band is a real colour and the fill reads as drawn rather
+    // than gradient-shaded. The lit tone carries the sun colour.
+    let shade = vec3<f32>(0.42, 0.48, 0.68);
+    let mid = vec3<f32>(0.72, 0.77, 0.90);
+    let light = vec3<f32>(0.97, 0.97, 1.0) + (det_barrier3(u.sun_radiance.rgb * 0.10));
+    let col = det_mix3(
+        det_mix3(shade, mid, clamp(q * 2.0, 0.0, 1.0)),
+        light,
+        clamp((det_barrier(q * 2.0)) - 1.0, 0.0, 1.0),
+    );
+    // Drawn underside: a darker outline tone under each puff, strength from
+    // `style.z`.
+    let under = (1.0 - det_smoothstep(0.10, 0.42, height_frac)) * clamp(u.style.z, 0.0, 1.0);
+    return det_mix3(col, vec3<f32>(0.30, 0.36, 0.58), under);
+}
+
 @compute @workgroup_size(8, 8)
 fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     det_seed(f32(gid.x));
@@ -313,8 +448,11 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sun_h = det_div3(sun_h_raw, vec3<f32>(max(det_length3(sun_h_raw), 1.0e-3)));
             let deck_h = det_barrier(u.layer.x + det_barrier(u.layer.y * 0.5)) - det_barrier(det_dot3(scene_p, up));
             let above = det_barrier3(det_barrier3(scene_p + det_barrier3(up * deck_h)) - det_barrier3(sun_h * (det_div(deck_h, sun_up))));
-            let deck = cloud_density(above, 0.5);
-            let s = 1.0 - det_smoothstep(0.0, 1.1, deck);
+            let deck = det_barrier(cloud_density(above, 0.5)) * u.layer.y;
+            // `deck` is now the optical depth along the sun path (bounded by the
+            // density setting), so the shadow threshold moves down with it: 1.1
+            // was tuned for the old raw-density scale and cast nothing.
+            let s = 1.0 - det_smoothstep(0.0, 0.30, deck);
             terrain_shadow = det_mix(1.0, s, clamp(u.feature.y, 0.0, 1.0) * 0.55);
         }
         let t_near = max(t_lo, 0.0);
@@ -359,15 +497,21 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let powder = 1.0 - det_exp(det_barrier(-density * u.optics.w) * 2.0);
                     let sun = det_barrier(sun_transmittance(p, up) * det_mix(1.0, powder, 0.4));
                     // Ambient multiple-scatter follows the SKY's own colour
-                    // gradient (Frostbite/HZD): dark blue near the deck base
-                    // where the ground blocks the sky, bright sky blue toward
+                    // gradient (Frostbite/HZD): darker blue near the deck base
+                    // where the ground blocks the sky, brighter sky blue toward
                     // the top. Neutral grey here is what makes clouds look like
                     // painted cardboard instead of sky-lit volumes.
                     let ambient = det_barrier3(det_mix3(
-                        vec3<f32>(0.16, 0.22, 0.34),
-                        vec3<f32>(0.62, 0.74, 0.98),
+                        vec3<f32>(0.26, 0.31, 0.42),
+                        vec3<f32>(0.74, 0.82, 1.02),
                         hf) * u.optics.x);
-                    let lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + ambient;
+                    // Realistic: the sun scatters through the dual lobe. Cartoon:
+                    // flat cel bands keyed off the sun term, with the phase lobe
+                    // dropped (a stylized deck has no single-scatter rim).
+                    var lit = det_barrier3(u.sun_radiance.rgb * det_barrier(sun * det_barrier(phase_single + phase_multi))) + ambient;
+                    if u.style.x > 0.5 {
+                        lit = cartoon_lit(hf, sun);
+                    }
                     inscatter = det_barrier3(inscatter + det_barrier3(det_barrier(transmittance * (1.0 - sample_trans)) * lit));
                     transmittance = det_barrier(transmittance * sample_trans);
                     if transmittance < 0.02 {
@@ -383,9 +527,29 @@ fn clouds_main(@builtin(global_invocation_id) gid: vec3<u32>) {
             // `t_far * u.up_axis.w` is the distance measured in scene-widths —
             // the fog then engages at the offline renderer's world units
             // instead of implicitly assuming metre-scale distances.
+            //
+            // The mix is deliberately weak (0.45 cap, slow 0.22 rate): the
+            // earlier 0.7/0.4 pulled the majority of every distant cloud's
+            // colour toward a flat analytic sky, which is what greyed the deck
+            // out into haze. The cartoon style skips the fog entirely so the
+            // flat fills stay pure.
+            // Aerial perspective: fade the cloud contribution toward the sky
+            // colour with distance so the deck sits in the atmosphere rather
+            // than on a flat backdrop. `u.up_axis.w` = 1/terrain_span, so
+            // `t_far * u.up_axis.w` is the distance measured in scene-widths —
+            // the fog then engages at the offline renderer's world units
+            // instead of implicitly assuming metre-scale distances.
+            //
+            // The sky colour is the real environment, not a bright generic one:
+            // a pale analytic sky used to pull EVERY distant puff toward mid
+            // grey, collapsing the deck's dynamic range (measured sky-luminance
+            // std 13 of 255 — flat, low-contrast mush). Darkening it to the
+            // scene's own blue means distance desaturates the cloud toward the
+            // sky instead of averaging it out, which is what gives the deck
+            // depth. The warm horizon term and the forward-scatter sun glow stay.
             let up_amt = clamp(det_dot3(dir, up), 0.0, 1.0);
-            let sky = det_barrier3(det_barrier3(vec3<f32>(0.30, 0.46, 0.72) + det_barrier3(vec3<f32>(0.5, 0.32, 0.0) * det_pow(1.0 - up_amt, 4.0))) + det_barrier3(u.sun_radiance.rgb * det_barrier(0.12 * det_pow(clamp(det_dot3(dir, u.sun_direction.xyz), 0.0, 1.0), 8.0))));
-            let fog = det_barrier(0.7 * (1.0 - det_exp(-0.4 * det_barrier(t_far * u.up_axis.w))));
+            let sky = det_barrier3(det_barrier3(vec3<f32>(0.10, 0.17, 0.30) + det_barrier3(vec3<f32>(0.22, 0.16, 0.08) * det_pow(1.0 - up_amt, 4.0))) + det_barrier3(u.sun_radiance.rgb * det_barrier(0.12 * det_pow(clamp(det_dot3(dir, u.sun_direction.xyz), 0.0, 1.0), 8.0))));
+            let fog = det_barrier(det_barrier(0.55 * (1.0 - det_exp(-0.26 * det_barrier(t_far * u.up_axis.w)))) * det_barrier(1.0 - u.style.x));
             inscatter = det_barrier3(det_mix3(inscatter, det_barrier3(sky * (1.0 - transmittance)), fog));
         }
     }

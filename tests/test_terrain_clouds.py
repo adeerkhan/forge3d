@@ -1,5 +1,7 @@
 # tests/test_terrain_clouds.py
 # Phase 1: the offline cloud composite, and its disabled no-op guarantee.
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -91,6 +93,8 @@ def test_disabled_clouds_render_is_noop(tmp_path):
             coverage=0.99,
             density=0.99,
             shadow_strength=0.99,
+            quality="ultra",
+            style="cartoon",
             altitude_m=2.0,
             thickness_m=4.0,
             scatter_strength=3.0,
@@ -143,6 +147,32 @@ def _cloud_delta(renderer, material_set, heightmap, env_maps, clouds, cam_radius
         renderer, material_set, heightmap, env_maps, clouds, cam_radius=cam_radius
     )
     return enabled.astype(np.float32) - baseline.astype(np.float32)
+
+
+def test_cartoon_style_changes_output(tmp_path):
+    """The cartoon style draws a visibly different deck from the realistic one.
+
+    Both styles share the raymarch and the density dispatcher, so this is the
+    end-to-end proof that the `style` knob reaches the shader and that the two
+    branches actually differ -- not just that the field exists in Python.
+    """
+    renderer, material_set, heightmap, env_maps = _setup(tmp_path)
+
+    realistic = _render_offline(
+        renderer, material_set, heightmap, env_maps, _in_view_clouds()
+    )
+    cartoon = _render_offline(
+        renderer,
+        material_set,
+        heightmap,
+        env_maps,
+        replace(_in_view_clouds(), style="cartoon"),
+    )
+
+    assert cartoon.shape == realistic.shape
+    assert cartoon.tobytes() != realistic.tobytes()
+    delta = float(np.abs(cartoon.astype(np.float32) - realistic.astype(np.float32)).mean())
+    assert delta > 1.0, f"cartoon and realistic decks are nearly identical (mean |delta| = {delta})"
 
 
 def test_degenerate_slab_is_noop(tmp_path):

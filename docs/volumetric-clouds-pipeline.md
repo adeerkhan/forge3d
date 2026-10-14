@@ -176,6 +176,100 @@ Far cloud inscatter is blended toward an analytic sky color by
 `0.7 · (1 − exp(−0.4 · t_far / terrain_span))` — the distance is measured in
 scene-widths, so the fog engages at every world scale, not just metres.
 
+### 3.6 Two styles, one pass
+
+`CloudSettings.style` selects `"realistic"` (the recipe above) or `"cartoon"`.
+The style flag rides in the uniform (`style.x`); `cloud_density` is a dispatcher
+that routes to `realistic_density` or `cartoon_density`, and the march swaps the
+per-sample `lit` term. Everything else — slab intersection, the cylinder bound,
+the depth early-out, the ground shadow, the composite — is shared, so a scene
+does not move or change cost when it switches style.
+
+- **`cartoon_density`** drops the domain warp and the fine erosion and instead
+  takes a coarse cellular field mixed with the low octave of the fractal,
+  pushed through a wide S-curve into distinct rounded puffs, then cut by
+  coverage. No detail term multiplies the cut, so the boundary is the shape's
+  own contour: a single hard edge.
+- **`cartoon_lit`** quantizes a combined sun + height illumination into
+  `style.y` (3) flat bands on an explicit shadow/mid/lit ramp, brightens the
+  crown and darkens the underside (`style.z`) — the cel fill.
+
+Aerial perspective is skipped for the cartoon style (`1 - style.x`) so the flat
+fills stay pure.
+
+### 3.7 Realism notes (what fixed the "soft smear")
+
+Two changes to the realistic path came out of the same review:
+
+- **Erosion now reaches the silhouette.** The boundary had been exempted from
+  detail erosion to cure a sparse-pixel halo, which also removed the fine
+  nibble that breaks a smooth contour into cauliflower lobes — the deck read as
+  one soft smear. The erosion floor at the edge is now `0.40` (offline
+  accumulation averages the resulting per-sample jitter).
+- **Weaker aerial fog.** The far-fade cap dropped from `0.7` to `0.45` at a
+  slower `0.22` rate (was `0.4`), and the analytic sky base was warmed. At
+  flyover distances the old values replaced most of a distant cloud's colour
+  with a flat blue wash, which is what greyed the deck out.
+- **Brighter, warmer ambient** top tone so the deck stops reading as painted
+  cardboard.
+
+The remaining sharpness gap is the baked-noise resolution (see §7): the deck's
+finest structure is fixed by the 128³ / 32³ / 64³ volumes, not by the shading.
+
+### 3.8 Viewer-specific fixes (Bryce Canyon flyover)
+
+Three viewer-only defects surfaced when the deck was first driven from the
+interactive IPC path; the offline path was unaffected.
+
+- **Noise scale.** The viewer scaled cloud noise by `1 / terrain_span`. On the
+  world-unit offline demos (span ≈ 3) that is fine, but on a geospatial scene
+  (Bryce's context DEM is 12,288 m) it stretches one noise period across the
+  whole map, so the whole deck samples one point of the field and flattens into
+  a uniform (often fully-off) sheet. `cloud_noise_scale` now caps the reference
+  span at `CLOUD_NOISE_REFERENCE_SPAN_M` (1200 m) so puffs stay ~1 km — the
+  physical cumulus size — regardless of how large the scene is.
+- **Snapshot sky erased the deck.** The viewer's snapshot path calls
+  `present_snapshot_sky` *after* `render_to_texture`, repainting the sky
+  wherever depth == far. That pass owns the background, so it erased every
+  cloud in front of it — the deck reached the beauty and the tonemap, then lost
+  the sky pixels to the sky pass. It is now skipped when
+  `pbr_config.clouds.enabled`; the caller sets `background` for the clear
+  colour, exactly as the offline path does.
+- **`scatter_strength` blowout.** Both Bryce scripts hard-coded
+  `scatter_strength: 16.0` (the docs put the white-blowout threshold at ~8). The
+  default is now 2.2 and exposed as `--cloud-scatter` / `--scatter`.
+
+A residual: the example's `with_sky` recolour matches the background by colour,
+so once clouds fill the sky its corner-sample heuristic can mis-key. Use the
+cloud shader's own sky (skip `with_sky`) or a distinctive `background` colour.
+
+### 3.9 Clouds in the live window
+
+The interactive window never drew the deck at all — `render_viewer_clouds` had
+exactly one caller, the snapshot path — even though §1 documents the window
+taking the cloud pass. Fixed: when `clouds.enabled`, the window path renders the
+same offscreen linear-HDR composite (`render_to_texture`) and blits it onto the
+swapchain, so the window and the saved frames agree by construction.
+
+Two supporting details:
+
+- The swapchain's `usage` gains `COPY_DST` (`init/device_init.rs`); with
+  `RENDER_ATTACHMENT` only, that blit fails wgpu validation with a bare
+  `Copy error` — the deck is silently absent from the window.
+- The blit is size-guarded and **logs** when the surface and composite
+  disagree (window chrome makes the real surface 1920x1045, not 1920x1080), so
+  a skipped present can never be silent again.
+
+Known cost while clouds are up: the window composite re-creates its colour/HDR/
+depth targets each frame, and a snapshot request on the same frame renders the
+composite a second time. Hoisting those into a resize-keyed cache (and reusing
+the window composite when the snapshot size matches) is the obvious follow-up;
+it is a performance, not correctness, regression, and only affects the
+clouds-enabled path.
+
+
+
+
 ## 4. Uniforms
 
 `CloudUniforms` (WGSL struct, 256 B, `bytemuck::Pod`):
@@ -190,8 +284,9 @@ scene-widths, so the fog engages at every world scale, not just metres.
 | `screen` | `x width`, `y height` |
 | `up_axis` | `xyz` world up of the camera frame, `w = 1/terrain_span` |
 | `bounds` | `xyz` deck centre, `w extent_radius` |
-| `feature` | `x = 1/size` (puff scale), `y shadow_strength` |
+| `feature` | `x = 1/size` (puff scale), `y shadow_strength`, `z = raymarch step count` |
 | `weather` | `x weather_strength` |
+| `style` | `x = style flag` (0 realistic, 1 cartoon), `y = cel band count`, `z = edge darkening` |
 
 Bindings: 0 uniforms, 1 base_noise, 2 sampler, 3 detail_noise, 4 sampler,
 5 depth, 6 beauty_in, 7 clouds_out (storage), 8 worley, 9 weather map,
@@ -333,6 +428,7 @@ future work, not correctness.
 | Knob | Effect | Tuned starting point |
 | --- | --- | --- |
 | `coverage` | sky fill; low = separate puffs | 0.42–0.5 |
+| `style` | look: `realistic` (haze) or `cartoon` (cel) | realistic |
 | `density` | opacity multiplier | 0.6 |
 | `altitude_m`/`thickness_m` | deck placement (**world units offline**) | just above the peaks |
 | `size` | puff scale (divides noise frequency) | 2.5–3.5 |

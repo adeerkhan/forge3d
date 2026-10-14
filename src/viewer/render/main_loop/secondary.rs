@@ -9,6 +9,7 @@ impl Viewer {
         view: &wgpu::TextureView,
         _snapshot_dimensions: Option<(u32, u32)>,
         availability: RenderAvailability,
+        surface: Option<&wgpu::Texture>,
     ) -> wgpu::CommandEncoder {
         let RenderAvailability {
             have_gi,
@@ -138,22 +139,91 @@ impl Viewer {
             });
         if let Some(mut tv) = self.terrain_viewer.take() {
             if tv.has_terrain() {
+                // The cloud pass composites into the linear-HDR beauty and
+                // tonemaps the result into the snapshot before this point, so
+                // the snapshot sky must NOT be re-presented over it: that pass
+                // repaints the sky wherever depth == far and would erase every
+                // cloud in front of it. With clouds on, the deck supplies the
+                // sky (the caller sets `background` for the clear colour).
+                let clouds_active = tv.pbr_config.clouds.enabled;
                 eprintln!("[DEBUG main_loop] terrain_viewer path, has_terrain=true, snapshot_request={:?}, terrain_snap_size={:?}",
                 self.snapshot_request.is_some(), terrain_snap_size);
-                // Render to screen at window resolution
-                // Note: Motion blur is too expensive for real-time rendering (N full renders per frame),
-                // so we only apply it for snapshots. The interactive viewer shows a regular render.
-                terrain_rendered = tv.render(
-                    &mut encoder,
-                    &view,
-                    self.config.width,
-                    self.config.height,
-                    self.selected_feature_id,
-                    frame,
-                );
-                if terrain_rendered && self.sky_enabled {
-                    if let Some(depth_view) = tv.screen_depth_view() {
-                        self.present_sky_output(&mut encoder, view, Some(depth_view));
+                if clouds_active {
+                    // The live window must take the same linear-HDR route as a
+                    // snapshot: `tv.render` writes display-referred pixels
+                    // straight onto the swapchain, and the cloud pass can only
+                    // composite into a linear-HDR beauty. So render the terrain
+                    // (plus clouds, plus tonemap) offscreen through the shared
+                    // snapshot path, then blit the result onto the surface.
+                    //
+                    // NOTE: this re-creates the colour/HDR/depth targets every
+                    // frame while clouds are up. Snapshot requests already do
+                    // this per call; hoisting the window targets into a
+                    // resize-keyed cache is the obvious follow-up.
+                    let (win_w, win_h) = (self.config.width, self.config.height);
+                    let clouded = tv.render_to_texture(
+                        &mut encoder,
+                        self.config.format,
+                        win_w,
+                        win_h,
+                        self.selected_feature_id,
+                        frame,
+                    );
+                    if let Some(clouded) = clouded {
+                        if let Some(surface) = surface {
+                            if clouded.width() == win_w && clouded.height() == win_h {
+                                encoder.copy_texture_to_texture(
+                                    wgpu::ImageCopyTexture {
+                                        texture: &clouded,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    wgpu::ImageCopyTexture {
+                                        texture: surface,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    wgpu::Extent3d {
+                                        width: win_w,
+                                        height: win_h,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            } else {
+                                // Loud, never silent: a skipped blit leaves the
+                                // window cloudless and no wgpu error anywhere.
+                                eprintln!(
+                                    "[terrain] window cloud present skipped: surface {win_w}x{win_h} vs composite {}x{}",
+                                    clouded.width(),
+                                    clouded.height()
+                                );
+                            }
+                        }
+                        terrain_rendered = true;
+                    } else {
+                        eprintln!(
+                            "[terrain] window cloud render failed; falling back to direct terrain"
+                        );
+                    }
+                }
+                if !clouds_active || !terrain_rendered {
+                    // Render to screen at window resolution
+                    // Note: Motion blur is too expensive for real-time rendering (N full renders per frame),
+                    // so we only apply it for snapshots. The interactive viewer shows a regular render.
+                    terrain_rendered = tv.render(
+                        &mut encoder,
+                        &view,
+                        self.config.width,
+                        self.config.height,
+                        self.selected_feature_id,
+                        frame,
+                    );
+                    if terrain_rendered && self.sky_enabled {
+                        if let Some(depth_view) = tv.screen_depth_view() {
+                            self.present_sky_output(&mut encoder, view, Some(depth_view));
+                        }
                     }
                 }
 
@@ -173,7 +243,7 @@ impl Viewer {
                                     label: Some("viewer.render.post_motion_blur"),
                                 });
                         if let Some(tex) = motion_blur_tex {
-                            if snapshot_sky_ready {
+                            if snapshot_sky_ready && !clouds_active {
                                 if let Some(depth_view) = tv.snapshot_depth_view() {
                                     let color_view =
                                         tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -195,7 +265,7 @@ impl Viewer {
                             self.selected_feature_id,
                             frame,
                         ) {
-                            if snapshot_sky_ready {
+                            if snapshot_sky_ready && !clouds_active {
                                 if let Some(depth_view) = tv.snapshot_depth_view() {
                                     let color_view =
                                         tex.create_view(&wgpu::TextureViewDescriptor::default());

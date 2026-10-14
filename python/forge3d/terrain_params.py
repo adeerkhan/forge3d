@@ -277,6 +277,13 @@ class CloudSettings:
     shadow_strength: float = 0.35
     quality: str = "medium"
 
+    # Look of the deck. ``"realistic"`` is the physically-based Frostbite / HZD
+    # volumetric haze (domain-warped noise, fractal detail, powder + dual-lobe
+    # scattering). ``"cartoon"`` reuses the same raymarch but keeps clean rounded
+    # shapes with no fine erosion and shades them in flat cel bands, so the same
+    # `CloudSettings` gives either a photographic sky or a stylized one.
+    style: str = "realistic"
+
     # Visible cloud layer geometry and shading.
     #
     # NOTE on units: the interactive geospatial viewer is metre-based, so these
@@ -305,6 +312,8 @@ class CloudSettings:
                 raise ValueError(f"{name} must be finite and in [0, 1]")
         if str(self.quality) not in {"low", "medium", "high", "ultra"}:
             raise ValueError("quality must be one of: low, medium, high, ultra")
+        if str(self.style) not in {"realistic", "cartoon"}:
+            raise ValueError("style must be one of: realistic, cartoon")
         if not math.isfinite(float(self.altitude_m)) or float(self.altitude_m) < 0.0:
             raise ValueError("altitude_m must be finite and >= 0")
         if not math.isfinite(float(self.thickness_m)) or float(self.thickness_m) < 0.0:
@@ -372,6 +381,19 @@ CLOUD_PRESETS = {
         "phase_g": 0.6,
         "detail": 0.8,
         "powder": 0.4,
+    },
+    # Stylized toon deck: clean rounded masses, hard cel-shaded edges, no haze.
+    "cartoon": {
+        "enabled": True,
+        "style": "cartoon",
+        "coverage": 0.45,
+        "density": 0.95,
+        "altitude_m": 1800.0,
+        "thickness_m": 700.0,
+        "scatter_strength": 1.0,
+        "phase_g": 0.7,
+        "detail": 0.0,
+        "powder": 0.0,
     },
 }
 

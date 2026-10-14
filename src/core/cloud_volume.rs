@@ -36,6 +36,25 @@ pub(crate) fn cloud_field_extent(terrain_span: f32) -> f32 {
     (terrain_span * CLOUD_FIELD_EXTENT_SPAN_FACTOR).max(1.0)
 }
 
+/// Reference span (world units) at which the viewer's cloud noise stops
+/// shrinking with the scene.
+///
+/// Puff size is a physical property — cumulus are ~1 km across — so a
+/// geospatial viewer scene (kilometres wide) must not scale its noise by the
+/// whole DEM extent the way the small world-unit offline demos do. With
+/// `1 / terrain_span` over a 12 km DEM the noise volume (1 unit) stretches over
+/// the entire map, so the whole deck samples one point of the field and flattens
+/// into a uniform (often fully-off) sheet. The viewer caps the reference span
+/// here; the offline path keeps `1 / terrain_span` for its world-unit scenes.
+pub(crate) const CLOUD_NOISE_REFERENCE_SPAN_M: f32 = 1200.0;
+
+/// Cloud noise scale for a terrain of `terrain_span` world units. Small scenes
+/// stay scene-relative (the offline behaviour), large geospatial scenes get
+/// metre-scale puffs instead of one map-wide blob.
+pub(crate) fn cloud_noise_scale(terrain_span: f32) -> f32 {
+    1.0 / terrain_span.clamp(1.0, CLOUD_NOISE_REFERENCE_SPAN_M)
+}
+
 /// Resolve the documented `CloudSettings.quality` levels to a raymarch step
 /// count.
 ///
@@ -50,6 +69,45 @@ pub(crate) fn cloud_march_steps(quality: &str) -> u32 {
         "high" => 96,
         "ultra" => 160,
         _ => 56,
+    }
+}
+
+/// Number of flat cel bands the `cartoon` shading quantizes the sun term into.
+/// Three reads as a classic three-tone toon fill; more looks photo-ish, fewer
+/// loses the form. Carried in the uniform's `style.y`.
+const CARTOON_BANDS: f32 = 3.0;
+/// How strongly the `cartoon` style darkens the drawn underside / silhouette
+/// rim. Carried in the uniform's `style.z`.
+const CARTOON_EDGE: f32 = 0.65;
+
+/// Visible-cloud shading model. Both styles reuse the same raymarch, noise
+/// volumes and composite; they differ only in the density shaping and the
+/// sample lighting, so switching style never changes the pass topology.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloudStyle {
+    /// Physically-based Frostbite / HZD volumetric haze.
+    Realistic,
+    /// Flat cel-shaded stylized deck.
+    Cartoon,
+}
+
+impl CloudStyle {
+    /// Parse a `CloudSettings.style` string. Unknown values fall back to
+    /// `Realistic` (the historical look), never an error, so old configs and
+    /// typos keep rendering.
+    pub(crate) fn from_setting(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cartoon" | "toon" | "stylized" => Self::Cartoon,
+            _ => Self::Realistic,
+        }
+    }
+
+    /// Uniform flag consumed by `clouds.wgsl` (`style.x`).
+    fn flag(self) -> f32 {
+        match self {
+            Self::Realistic => 0.0,
+            Self::Cartoon => 1.0,
+        }
     }
 }
 
@@ -68,6 +126,9 @@ struct CloudUniforms {
     bounds: [f32; 4],
     feature: [f32; 4],
     weather: [f32; 4],
+    /// x = style flag (0 realistic, 1 cartoon), y = cartoon band count,
+    /// z = cartoon edge darkening, w = reserved.
+    style: [f32; 4],
 }
 
 /// Per-frame camera/sun inputs for the cloud raymarch.
@@ -114,6 +175,8 @@ pub(crate) struct CloudRenderSettings {
     pub weather_strength: f32,
     /// Optional path to a custom greyscale weather map; `None` uses the default.
     pub weather_map: Option<String>,
+    /// Visible-cloud look (physically-based or cel-shaded).
+    pub style: CloudStyle,
 }
 
 struct CloudOutput {
@@ -839,6 +902,12 @@ impl CloudVolumeResources {
                 0.0,
             ],
             weather: [clouds.weather_strength, 0.0, 0.0, 0.0],
+            style: [
+                clouds.style.flag(),
+                CARTOON_BANDS,
+                CARTOON_EDGE,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
