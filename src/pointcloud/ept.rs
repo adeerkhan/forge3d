@@ -2,6 +2,7 @@
 
 use super::error::{PointCloudError, PointCloudResult};
 use super::octree::{OctreeBounds, OctreeKey, OctreeNode};
+use super::copc::PointData;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -263,15 +264,6 @@ impl EptDataset {
     pub fn bounds(&self) -> OctreeBounds {
         self.root_bounds
     }
-}
-
-/// Decoded point data (shared with COPC)
-#[derive(Debug)]
-pub struct PointData {
-    pub positions: Vec<f64>,
-    pub colors: Option<Vec<u8>>,
-    pub intensities: Option<Vec<u16>>,
-    pub classifications: Option<Vec<u8>>,
 }
 
 fn read_dim_value(data: &[u8], dim: &EptDimension) -> f64 {

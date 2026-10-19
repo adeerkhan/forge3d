@@ -3,8 +3,8 @@
 use glam::DVec3;
 use std::collections::HashMap;
 
-use super::copc::{CopcDataset, PointData as CopcPointData};
-use super::ept::{EptDataset, PointData as EptPointData};
+use super::copc::{CopcDataset, PointData};
+use super::ept::EptDataset;
 use super::error::PointCloudResult;
 use super::traversal::{PointCloudTraverser, TraversalParams, VisibleNode};
 
@@ -247,7 +247,7 @@ impl PointCloudRenderer {
         visible: &[VisibleNode],
     ) -> PointCloudResult<PointBuffer> {
         self.load_points("copc", visible, |key| {
-            dataset.read_points(key).map(copc_to_buffer)
+            dataset.read_points(key).map(point_data_to_buffer)
         })
     }
 
@@ -258,7 +258,7 @@ impl PointCloudRenderer {
         visible: &[VisibleNode],
     ) -> PointCloudResult<PointBuffer> {
         self.load_points("ept", visible, |key| {
-            dataset.read_points(key).map(ept_to_buffer)
+            dataset.read_points(key).map(point_data_to_buffer)
         })
     }
 
@@ -375,16 +375,7 @@ impl PointCloudRenderer {
     }
 }
 
-fn copc_to_buffer(data: CopcPointData) -> PointBuffer {
-    let point_count = data.positions.len() / 3;
-    PointBuffer {
-        positions: data.positions,
-        colors: data.colors,
-        point_count,
-    }
-}
-
-fn ept_to_buffer(data: EptPointData) -> PointBuffer {
+fn point_data_to_buffer(data: PointData) -> PointBuffer {
     let point_count = data.positions.len() / 3;
     PointBuffer {
         positions: data.positions,
