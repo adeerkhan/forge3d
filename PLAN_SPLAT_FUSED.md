@@ -117,8 +117,12 @@ A single CLI-driven script that renders the fused scene as a cartographic map sh
   `fusion_media_transmittance`, which now calls it — bit-identical) and a
   `FUSED_TERRAIN_EDITS` anchor at the beauty composition so
   `L = L·T + env·(1−T)` with `T` the transmittance to the primary hit. At
-  fog density 0 it is exactly the base line; verified bit-for-bit by the
-  unchanged fixture path.
+  fog density 0 the transmittance is exactly 1 and the edit keeps the base
+  line's **statement verbatim**, so the fog-disabled path is byte-identical
+  to the base line, not merely close to it: folding `T` into the sum
+  instead would re-associate `frame + sun + ibl` into `frame + (sun + ibl)`,
+  which is equal in exact arithmetic but differs by 1 ULP in f32 for ~27 % of
+  pixels — below the tolerance-based golden's notice, above byte identity.
 - Example: `--hdr auto|none|PATH` (auto = fetch the CC0 Poly Haven
   *Kloofendal 48d Partly Cloudy (pure sky)* 2k HDRI once into
   `~/.forge3d/datasets/hdri/`, md5-checked; `none`/fixture keep Hosek),
