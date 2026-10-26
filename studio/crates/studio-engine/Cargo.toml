@@ -1,0 +1,20 @@
+[package]
+name = "studio-engine"
+description = "Forge3D engine integration layer for Studio: embedded-Python worker driving the certified TerrainRenderer pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[build-dependencies]
+pyo3-build-config = "0.21"
+
+[dependencies]
+studio-project.workspace = true
+image.workspace = true
+log.workspace = true
+env_logger.workspace = true
+# Embedded Python drives forge3d's certified TerrainRenderer entry point.
+pyo3 = "0.21"
+numpy = "0.21"
+ndarray = "0.15"
+tiff = "0.9"

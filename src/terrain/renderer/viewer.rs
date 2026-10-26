@@ -150,6 +150,12 @@ impl TerrainScene {
         self.viewer_heightmap.is_some()
     }
 
+    /// Unload the current viewer terrain, if any. Used by the Studio desktop
+    /// app (studio/) when a project is closed or a dataset is removed.
+    pub fn clear_viewer_terrain(&mut self) {
+        self.viewer_heightmap = None;
+    }
+
     pub fn viewer_terrain(&self) -> Option<&ViewerTerrainData> {
         self.viewer_heightmap.as_ref()
     }
