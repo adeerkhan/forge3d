@@ -33,6 +33,8 @@ pub enum Command {
     ClearTerrain,
     SetCamera(CameraParams),
     SetSun(SunParams),
+    /// Named colormap (forge3d registry key) for terrain rendering.
+    SetColormap(Option<String>),
     /// Render one terrain frame at the requested size and ship RGBA bytes.
     RenderFrame { width: u32, height: u32 },
     /// Render terrain at the requested size and write a PNG to disk.
@@ -660,6 +662,7 @@ struct WorkerState {
     scratch_png: PathBuf,
     camera: CameraParams,
     sun: SunParams,
+    colormap: Option<String>,
     terrain_visible: bool,
     dirty: bool,
     has_terrain: bool,
@@ -822,6 +825,7 @@ fn run_worker(
         scratch_png: std::env::temp_dir().join("forge3d-studio-frame.png"),
         camera: CameraParams::default(),
         sun: SunParams::default(),
+        colormap: None,
         terrain_visible: true,
         dirty: true,
         has_terrain: false,
@@ -891,6 +895,10 @@ fn run_worker(
             }
             Command::SetSun(sun) => {
                 engine.sun = sun;
+                engine.dirty = true;
+            }
+            Command::SetColormap(colormap) => {
+                engine.colormap = colormap;
                 engine.dirty = true;
             }
             Command::RenderFrame { width, height } => {
@@ -977,6 +985,7 @@ fn render_terrain_png(
                 "intensity": engine.sun.intensity,
             },
             "domain": [engine.domain.0, engine.domain.1],
+            "colormap": engine.colormap,
             "hdr_path": engine.hdr_path.to_string_lossy(),
             "out_png": out.to_string_lossy(),
         }),

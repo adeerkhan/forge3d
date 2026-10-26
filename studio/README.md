@@ -125,6 +125,12 @@ Milestones from GUI.md section 12:
       recipe validation and rendering through `MapScene.render` (the
       certified `gpu_terrain` path); recipe camera sliders; project format
       v2 stores the serialized `SceneRecipe` verbatim.
+- [x] **W1 ring: colormap picker** — terrain rendering accepts any
+      registered forge3d colormap (engine registry via `colormaps.list`);
+      project v2 persists the selection.
+- [x] **W5 ring: render certificates** — MapScene renders can request a
+      signed RenderCertificate (`certificate_payload_sha256` shown in the
+      scene panel).
 - [x] **Part IV harness** — `tests/harness_registry.json` + parity tests
       (`parity_mapscene.rs`): every template validates and renders through
       the engine; catalog ops asserted against the engine registries;

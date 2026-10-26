@@ -46,6 +46,7 @@ enum PendingJob {
     MapSceneTemplate,
     MapSceneRender,
     MapSceneValidate,
+    ColormapsList,
 }
 
 /// State of the MapScene (recipe) scene mode.
@@ -58,6 +59,7 @@ struct MapScenePanel {
     last_status: Option<String>,
     last_backend: Option<String>,
     last_diagnostics: Vec<String>,
+    last_metadata: Option<serde_json::Value>,
 }
 
 pub struct StudioApp {
@@ -79,6 +81,8 @@ pub struct StudioApp {
     scene_mode: SceneMode,
     mapscene: MapScenePanel,
     pending_jobs: std::collections::HashMap<u64, PendingJob>,
+    colormaps: Vec<String>,
+    mapscene_certificate: bool,
 }
 
 impl StudioApp {
@@ -109,6 +113,8 @@ impl StudioApp {
                 ..Default::default()
             },
             pending_jobs: std::collections::HashMap::new(),
+            colormaps: Vec::new(),
+            mapscene_certificate: false,
         }
     }
 
@@ -176,6 +182,9 @@ impl StudioApp {
                         backend,
                         software_fallback,
                     });
+                    // Warm the catalogs the UI dropdowns need.
+                    self.pending_jobs
+                        .insert(self.engine.call("colormaps.list", serde_json::json!({})), PendingJob::ColormapsList);
                 }
                 Event::TerrainLoaded {
                     path,
@@ -360,6 +369,7 @@ impl StudioApp {
                 self.mapscene.last_status = Some(status.clone());
                 self.mapscene.last_backend = Some(backend.clone());
                 self.mapscene.last_diagnostics = diagnostics;
+                self.mapscene.last_metadata = Some(result.clone());
                 match png {
                     Some(path) => {
                         if self.load_png_to_viewport(&path, ctx) {
@@ -382,6 +392,14 @@ impl StudioApp {
                     .to_owned();
                 self.mapscene.last_status = Some(status.clone());
                 self.set_status(format!("MapScene validation: {status}"));
+            }
+            Some(PendingJob::ColormapsList) => {
+                if let Some(list) = result.get("colormaps").and_then(|c| c.as_array()) {
+                    self.colormaps = list
+                        .iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect();
+                }
             }
             None => {
                 self.set_status(format!("Engine op '{op}' finished"));
@@ -440,7 +458,7 @@ impl StudioApp {
         let params = serde_json::json!({
             "recipe_json": serde_json::to_string(&recipe).unwrap_or_default(),
             "out_png": out.to_string_lossy(),
-            "certificate": false,
+            "certificate": self.mapscene_certificate,
         });
         let job = self.engine.call("mapscene.render", params);
         self.pending_jobs.insert(job, PendingJob::MapSceneRender);
@@ -866,6 +884,7 @@ impl StudioApp {
                 for diag in &self.mapscene.last_diagnostics {
                     ui.weak(format!("diag: {diag}"));
                 }
+                ui.checkbox(&mut self.mapscene_certificate, "Sign render certificate");
                 ui.horizontal(|ui| {
                     if ui.button("Render").clicked() {
                         self.render_mapscene();
@@ -874,6 +893,17 @@ impl StudioApp {
                         self.validate_mapscene();
                     }
                 });
+                if let Some(sha) = self
+                    .mapscene
+                    .last_metadata
+                    .as_ref()
+                    .and_then(|m| m.get("certificate_payload_sha256"))
+                    .and_then(|v| v.as_str())
+                {
+                    ui.weak(format!("cert sha256: {}", &sha[..sha.len().min(24)])
+                    )
+                    .on_hover_text(sha);
+                }
             }
             None => {
                 ui.weak("No recipe yet — build one from a template.");
@@ -978,6 +1008,30 @@ impl StudioApp {
         if self.project.sun != before {
             self.project_dirty = true;
             self.engine.send(Command::SetSun(self.project.sun));
+            self.invalidate_viewport();
+        }
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Colormap").strong());
+        let mut current = self.project.colormap.clone().unwrap_or_else(|| "default".to_owned());
+        egui::ComboBox::from_id_source("terrain_colormap")
+            .selected_text(current.clone())
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_value(&mut current, "default".to_owned(), "default (relief)")
+                    .changed()
+                {
+                    self.project.colormap = None;
+                }
+                for name in &self.colormaps {
+                    if ui.selectable_value(&mut current, name.clone(), name).changed() {
+                        self.project.colormap = Some(name.clone());
+                    }
+                }
+            });
+        if current != self.project.colormap.clone().unwrap_or_else(|| "default".to_owned()) {
+            self.project_dirty = true;
+            self.engine
+                .send(Command::SetColormap(self.project.colormap.clone()));
             self.invalidate_viewport();
         }
     }
