@@ -13,6 +13,8 @@ path = "src/main.rs"
 pyo3-build-config = "0.21"
 
 [dependencies]
+serde_json.workspace = true
+image.workspace = true
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true

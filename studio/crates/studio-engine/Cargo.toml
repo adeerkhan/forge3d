@@ -16,5 +16,5 @@ env_logger.workspace = true
 # Embedded Python drives forge3d's certified TerrainRenderer entry point.
 pyo3 = "0.21"
 numpy = "0.21"
-ndarray = "0.15"
-tiff = "0.9"
+# Bridge v2 op/results envelope.
+serde_json = "1"

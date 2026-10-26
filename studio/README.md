@@ -114,12 +114,38 @@ Milestones from GUI.md section 12:
 - [x] **4. First end-to-end workflow** — import DEM, orbit/zoom, sun
       sliders, viewport render, export PNG at chosen size, save/reopen
       project.
+- [x] **M1. Bridge v2 (W0)** — generic `studio_dispatch` JSON-op dispatcher
+      in the embedded interpreter; `Command::Call`/`Event::JobDone/JobFailed`
+      job protocol; terrain load/render migrated onto it. Ops: `probe`,
+      `terrain.load/info/render/clear`, `mapscene.templates/template/
+      render/validate`, `colormaps.list`, `presets.list`, `datasets.list`.
+- [x] **M2. MapScene in Studio (W2 ring 1)** — scene-mode switch (Terrain ⇄
+      MapScene); recipe templates built with the canonical example call
+      sequences (`terrain`, `terrain_raster`, `terrain_vector_labels`);
+      recipe validation and rendering through `MapScene.render` (the
+      certified `gpu_terrain` path); recipe camera sliders; project format
+      v2 stores the serialized `SceneRecipe` verbatim.
+- [x] **Part IV harness** — `tests/harness_registry.json` + parity tests
+      (`parity_mapscene.rs`): every template validates and renders through
+      the engine; catalog ops asserted against the engine registries;
+      device-lane-dependent golden gate behind `FORGE3D_STUDIO_GOLDEN_STRICT`.
 - [ ] **5. Embedded viewport** — current viewport is a CPU readback of the
       engine's render (~100–300 ms/frame, on-demand, not continuous).
       True embedding = repairing the native `TerrainScene` drift or sharing
       wgpu devices with eframe.
 - [ ] **6. Packaging** — Linux-first; Windows/macOS untested (libpython
       embedding and window setup need per-platform work).
+
+### Embedded-interpreter notes
+
+- `sys.executable` inside the embedded interpreter is repaired to the venv
+  Python at bridge load: forge3d's terrain runtime gate proves the runtime
+  by spawning `sys.executable` as a subprocess, and an embedded interpreter
+  otherwise reports the interpreter pyo3 linked against (which does not own
+  the forge3d environment). This is Studio-side and needs no engine change.
+- MapScene layers must carry a CRS (the engine's `missing_crs` validation is
+  a hard error by design); Studio templates propagate the terrain CRS from
+  `io.load_dem` into every layer and never invent one.
 
 ### Known limitations
 

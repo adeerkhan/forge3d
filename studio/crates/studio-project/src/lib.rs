@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Format version written by this build of the application.
-pub const CURRENT_FORMAT_VERSION: u32 = 1;
+pub const CURRENT_FORMAT_VERSION: u32 = 2;
+
+/// Scene mode: direct terrain rendering or a MapScene recipe scene.
+pub const SCENE_MODE_TERRAIN: &str = "terrain";
+pub const SCENE_MODE_MAPSCENE: &str = "mapscene";
 
 /// File extension used for Studio project documents (without the dot).
 pub const PROJECT_EXTENSION: &str = "forge3d";
@@ -123,6 +127,14 @@ pub struct Project {
     pub camera: CameraParams,
     pub sun: SunParams,
     pub export: ExportSettings,
+    /// v2: which scene mode the project was last in.
+    pub scene_mode: String,
+    /// v2: the serialized MapScene recipe (canonical `SceneRecipe.to_dict()`
+    /// output) when `scene_mode` is `mapscene`. Stored verbatim so
+    /// round-trips into the engine are byte-stable.
+    pub scene_recipe_json: Option<String>,
+    /// v2: named colormap for terrain rendering (forge3d registry key).
+    pub colormap: Option<String>,
 }
 
 impl Default for Project {
@@ -135,6 +147,9 @@ impl Default for Project {
             camera: CameraParams::default(),
             sun: SunParams::default(),
             export: ExportSettings::default(),
+            scene_mode: SCENE_MODE_TERRAIN.to_owned(),
+            scene_recipe_json: None,
+            colormap: None,
         }
     }
 }
@@ -195,6 +210,9 @@ impl Project {
         if self.export.width == 0 || self.export.height == 0 {
             warnings.push("Export size must be non-zero".to_owned());
         }
+        if self.scene_mode == SCENE_MODE_MAPSCENE && self.scene_recipe_json.is_none() {
+            warnings.push("MapScene project has no recipe yet".to_owned());
+        }
         warnings
     }
 }
@@ -237,9 +255,9 @@ mod tests {
 
     #[test]
     fn future_format_version_is_rejected() {
+        let future = CURRENT_FORMAT_VERSION + 1;
         let json = format!(
-            r#"{{ "format_version": {}, "name": "from the future" }}"#,
-            CURRENT_FORMAT_VERSION + 1
+            r#"{{ "format_version": {future}, "name": "from the future" }}"#
         );
         let dir = std::env::temp_dir().join("studio-project-test");
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -249,7 +267,7 @@ mod tests {
         std::fs::remove_file(&path).ok();
         assert!(matches!(
             err,
-            ProjectError::UnsupportedVersion { found: 2, .. } if CURRENT_FORMAT_VERSION == 1
+            ProjectError::UnsupportedVersion { found, .. } if found == future
         ));
     }
 
@@ -260,6 +278,43 @@ mod tests {
         assert_eq!(parsed.camera, CameraParams::default());
         assert_eq!(parsed.sun, SunParams::default());
         assert!(parsed.terrain.is_none());
+    }
+
+    #[test]
+    fn v1_project_loads_with_v2_defaults() {
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("v1.forge3d");
+        std::fs::write(
+            &path,
+            r#"{ "format_version": 1, "name": "legacy" }"#,
+        )
+        .expect("write");
+        let project = Project::load(&path).expect("v1 must load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(project.name, "legacy");
+        assert_eq!(project.scene_mode, SCENE_MODE_TERRAIN);
+        assert!(project.scene_recipe_json.is_none());
+        assert!(project.colormap.is_none());
+    }
+
+    #[test]
+    fn mapscene_recipe_round_trips_through_json() {
+        let mut project = Project::new();
+        project.scene_mode = SCENE_MODE_MAPSCENE.to_owned();
+        let recipe = serde_json::json!({
+            "kind": "scene_recipe",
+            "terrain": {"kind": "terrain_source", "path": "/tmp/dem.tif"},
+            "camera": {"kind": "orbit_camera", "distance": 2.0}
+        });
+        project.scene_recipe_json = Some(recipe.to_string());
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("v2recipe.forge3d");
+        project.save(&path).expect("save");
+        let loaded = Project::load(&path).expect("load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(project, loaded);
     }
 
     #[test]

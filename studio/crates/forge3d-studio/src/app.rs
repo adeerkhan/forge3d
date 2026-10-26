@@ -6,7 +6,7 @@
 //! real engine commands — there are no disconnected mockups.
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -33,6 +33,33 @@ struct PendingRender {
     requested_at: Instant,
 }
 
+/// Which scene pipeline the viewport is showing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SceneMode {
+    Terrain,
+    MapScene,
+}
+
+/// What a dispatched engine job was for, so `JobDone` can be routed.
+#[derive(Debug, Clone)]
+enum PendingJob {
+    MapSceneTemplate,
+    MapSceneRender,
+    MapSceneValidate,
+}
+
+/// State of the MapScene (recipe) scene mode.
+#[derive(Debug, Clone, Default)]
+struct MapScenePanel {
+    template: String,
+    raster_path: Option<PathBuf>,
+    label_text: String,
+    recipe_json: Option<serde_json::Value>,
+    last_status: Option<String>,
+    last_backend: Option<String>,
+    last_diagnostics: Vec<String>,
+}
+
 pub struct StudioApp {
     engine: EngineHandle,
     events: std::sync::mpsc::Receiver<Event>,
@@ -49,6 +76,9 @@ pub struct StudioApp {
     pending_render: Option<PendingRender>,
     viewport_rect: egui::Rect,
     theme_dark: bool,
+    scene_mode: SceneMode,
+    mapscene: MapScenePanel,
+    pending_jobs: std::collections::HashMap<u64, PendingJob>,
 }
 
 impl StudioApp {
@@ -73,6 +103,12 @@ impl StudioApp {
             pending_render: None,
             viewport_rect: egui::Rect::ZERO,
             theme_dark: true,
+            scene_mode: SceneMode::Terrain,
+            mapscene: MapScenePanel {
+                template: "terrain".to_owned(),
+                ..Default::default()
+            },
+            pending_jobs: std::collections::HashMap::new(),
         }
     }
 
@@ -218,6 +254,14 @@ impl StudioApp {
                 Event::Error { context, message } => {
                     self.push_error(context, message);
                 }
+                Event::JobDone { job, op, result } => {
+                    let kind = self.pending_jobs.remove(&job);
+                    self.handle_job_done(&op, kind, result, ctx);
+                }
+                Event::JobFailed { job, op, message } => {
+                    self.pending_jobs.remove(&job);
+                    self.push_error(format!("Engine op '{op}'"), message);
+                }
                 Event::Busy(busy) => {
                     self.busy = busy;
                 }
@@ -266,6 +310,168 @@ impl StudioApp {
         }
     }
 
+    // ------------------------------------------------------------ engine ops
+
+    /// Route a completed generic engine job.
+    fn handle_job_done(
+        &mut self,
+        op: &str,
+        kind: Option<PendingJob>,
+        result: serde_json::Value,
+        ctx: &Context,
+    ) {
+        match kind {
+            Some(PendingJob::MapSceneTemplate) => {
+                match result.get("recipe") {
+                    Some(recipe) => {
+                        self.mapscene.recipe_json = Some(recipe.clone());
+                        self.project.scene_recipe_json =
+                            Some(serde_json::to_string(recipe).unwrap_or_default());
+                        self.project_dirty = true;
+                        self.set_status(format!(
+                            "MapScene recipe built from template '{op}' ({} layers)",
+                            recipe
+                                .get("layers")
+                                .and_then(|l| l.as_array())
+                                .map(|a| a.len())
+                                .unwrap_or(0)
+                        ));
+                    }
+                    None => self.push_error("MapScene template", "no recipe in result"),
+                }
+            }
+            Some(PendingJob::MapSceneRender) => {
+                let png = result.get("png").and_then(|v| v.as_str()).map(PathBuf::from);
+                let status = result
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                let backend = result
+                    .get("backend")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                let diagnostics = result
+                    .get("diagnostics")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|d| d.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                self.mapscene.last_status = Some(status.clone());
+                self.mapscene.last_backend = Some(backend.clone());
+                self.mapscene.last_diagnostics = diagnostics;
+                match png {
+                    Some(path) => {
+                        if self.load_png_to_viewport(&path, ctx) {
+                            self.set_status(format!("MapScene rendered ({status}, {backend})"));
+                        } else {
+                            self.push_error("MapScene render", format!(
+                                "rendered but could not decode {}",
+                                path.display()
+                            ));
+                        }
+                    }
+                    None => self.push_error("MapScene render", "no png path in result"),
+                }
+            }
+            Some(PendingJob::MapSceneValidate) => {
+                let status = result
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                self.mapscene.last_status = Some(status.clone());
+                self.set_status(format!("MapScene validation: {status}"));
+            }
+            None => {
+                self.set_status(format!("Engine op '{op}' finished"));
+            }
+        }
+    }
+
+    /// Decode a rendered PNG file into the viewport texture.
+    fn load_png_to_viewport(&mut self, path: &Path, ctx: &Context) -> bool {
+        match image::open(path) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+                let texture = self.viewport_texture.get_or_insert_with(|| {
+                    ctx.load_texture(
+                        "studio-viewport",
+                        ColorImage::new([1, 1], Color32::BLACK),
+                        TextureOptions::LINEAR,
+                    )
+                });
+                texture.set(
+                    ColorImage::from_rgba_unmultiplied([w, h], rgba.into_raw().as_slice()),
+                    TextureOptions::LINEAR,
+                );
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    fn build_mapscene_template(&mut self) {
+        let Some(terrain) = self.project.terrain.clone() else {
+            self.push_error("MapScene template", "load a DEM dataset first");
+            return;
+        };
+        let params = serde_json::json!({
+            "template": self.mapscene.template,
+            "dem_path": terrain.path.to_string_lossy(),
+            "width": self.project.export.width,
+            "height": self.project.export.height,
+            "raster_path": self.mapscene.raster_path.as_ref().map(|p| p.to_string_lossy()),
+            "label_text": self.mapscene.label_text,
+        });
+        let job = self.engine.call("mapscene.template", params);
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneTemplate);
+        self.set_status("Building MapScene recipe from template…");
+    }
+
+    fn render_mapscene(&mut self) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("MapScene render", "build a recipe first");
+            return;
+        };
+        let out = std::env::temp_dir().join("forge3d-studio-mapscene.png");
+        let params = serde_json::json!({
+            "recipe_json": serde_json::to_string(&recipe).unwrap_or_default(),
+            "out_png": out.to_string_lossy(),
+            "certificate": false,
+        });
+        let job = self.engine.call("mapscene.render", params);
+        self.pending_jobs.insert(job, PendingJob::MapSceneRender);
+        self.set_status("Rendering MapScene…");
+    }
+
+    fn validate_mapscene(&mut self) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("MapScene validate", "build a recipe first");
+            return;
+        };
+        let params = serde_json::json!({
+            "recipe_json": serde_json::to_string(&recipe).unwrap_or_default(),
+        });
+        let job = self.engine.call("mapscene.validate", params);
+        self.pending_jobs.insert(job, PendingJob::MapSceneValidate);
+        self.set_status("Validating MapScene recipe…");
+    }
+
+    /// Patch the recipe's OrbitCamera fields from the properties sliders.
+    fn patch_mapscene_camera(&mut self, key: &str, value: f64) {
+        if let Some(recipe) = self.mapscene.recipe_json.as_mut() {
+            if let Some(camera) = recipe.get_mut("camera") {
+                camera[key] = serde_json::json!(value);
+                self.project.scene_recipe_json =
+                    Some(serde_json::to_string(recipe).unwrap_or_default());
+                self.project_dirty = true;
+            }
+        }
+    }
+
     fn new_project(&mut self) {
         if self.project.terrain.is_some() {
             self.engine.send(Command::ClearTerrain);
@@ -273,6 +479,11 @@ impl StudioApp {
         self.project = Project::new();
         self.project_path = None;
         self.project_dirty = false;
+        self.scene_mode = SceneMode::Terrain;
+        self.mapscene = MapScenePanel {
+            template: self.mapscene.template.clone(),
+            ..Default::default()
+        };
         self.sync_engine_state();
         self.invalidate_viewport();
         self.set_status("New project");
@@ -290,6 +501,18 @@ impl StudioApp {
                 for warning in project.validation_warnings() {
                     self.push_error("Opening project", warning);
                 }
+                self.scene_mode = if project.scene_mode == studio_project::SCENE_MODE_MAPSCENE {
+                    SceneMode::MapScene
+                } else {
+                    SceneMode::Terrain
+                };
+                self.mapscene.recipe_json = project
+                    .scene_recipe_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok());
+                self.mapscene.last_status = None;
+                self.mapscene.last_backend = None;
+                self.mapscene.last_diagnostics = Vec::new();
                 self.project = project;
                 self.project_path = Some(path);
                 self.project_dirty = false;
@@ -500,6 +723,28 @@ impl StudioApp {
                 ui.heading("Scene");
                 ui.separator();
 
+                let mode_before = self.scene_mode;
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.scene_mode, SceneMode::Terrain, "Terrain");
+                    ui.selectable_value(&mut self.scene_mode, SceneMode::MapScene, "MapScene");
+                });
+                if self.scene_mode != mode_before {
+                    self.project.scene_mode = match self.scene_mode {
+                        SceneMode::Terrain => studio_project::SCENE_MODE_TERRAIN.to_owned(),
+                        SceneMode::MapScene => studio_project::SCENE_MODE_MAPSCENE.to_owned(),
+                    };
+                    self.project_dirty = true;
+                }
+                ui.separator();
+
+                match self.scene_mode {
+                    SceneMode::Terrain => self.terrain_section(ui),
+                    SceneMode::MapScene => self.mapscene_section(ui),
+                }
+            });
+    }
+
+    fn terrain_section(&mut self, ui: &mut Ui) {
                 ui.label(egui::RichText::new("Layers").strong());
                 let terrain_present = self.project.terrain.is_some();
                 // Visibility is app-side for now: a hidden layer shows the
@@ -544,7 +789,96 @@ impl StudioApp {
                         }
                     }
                 }
+    }
+
+    fn mapscene_section(&mut self, ui: &mut Ui) {
+        let terrain_present = self.project.terrain.is_some();
+        if !terrain_present {
+            ui.weak("MapScene recipes build on the loaded DEM.");
+            ui.weak("Import a DEM first:");
+            if ui.button("Import DEM…").clicked() {
+                self.import_dem();
+            }
+            return;
+        }
+
+        ui.label(egui::RichText::new("Template").strong());
+        egui::ComboBox::from_id_source("mapscene_template")
+            .selected_text(self.mapscene.template.clone())
+            .show_ui(ui, |ui| {
+                for t in ["terrain", "terrain_raster", "terrain_vector_labels"] {
+                    ui.selectable_value(&mut self.mapscene.template, t.to_owned(), t);
+                }
             });
+        if self.mapscene.template == "terrain_raster" {
+            ui.horizontal(|ui| {
+                if ui.button("Pick raster…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images & rasters", &["png", "tif", "tiff", "jpg"])
+                        .pick_file()
+                    {
+                        self.mapscene.raster_path = Some(path);
+                    }
+                }
+                ui.weak(
+                    self.mapscene
+                        .raster_path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "no raster".to_owned()),
+                );
+            });
+        }
+        if self.mapscene.template == "terrain_vector_labels" {
+            ui.text_edit_singleline(&mut self.mapscene.label_text);
+        }
+        if ui.button("Build recipe from template").clicked() {
+            self.build_mapscene_template();
+        }
+
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Recipe").strong());
+        match &self.mapscene.recipe_json {
+            Some(recipe) => {
+                let layers = recipe
+                    .get("layers")
+                    .and_then(|l| l.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                ui.label(format!("{} layer(s)", layers));
+                for layer in recipe.get("layers").and_then(|l| l.as_array()).unwrap_or(&vec![]) {
+                    let id = layer
+                        .get("layer_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("layer");
+                    let kind = layer.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                    ui.horizontal(|ui| {
+                        ui.label(kind);
+                        ui.weak(id);
+                    });
+                }
+                if let Some(status) = &self.mapscene.last_status {
+                    ui.label(format!("Validation/render: {status}"));
+                }
+                if let Some(backend) = &self.mapscene.last_backend {
+                    ui.weak(format!("backend: {backend}"));
+                }
+                for diag in &self.mapscene.last_diagnostics {
+                    ui.weak(format!("diag: {diag}"));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Render").clicked() {
+                        self.render_mapscene();
+                    }
+                    if ui.button("Validate").clicked() {
+                        self.validate_mapscene();
+                    }
+                });
+            }
+            None => {
+                ui.weak("No recipe yet — build one from a template.");
+            }
+        }
     }
 
     fn right_panel(&mut self, ctx: &Context) {
@@ -556,13 +890,60 @@ impl StudioApp {
                     ui.heading("Properties");
                     ui.separator();
 
-                    self.camera_section(ui);
-                    ui.add_space(8.0);
-                    self.sun_section(ui);
-                    ui.add_space(8.0);
-                    self.export_section(ui);
+                    match self.scene_mode {
+                        SceneMode::Terrain => {
+                            self.camera_section(ui);
+                            ui.add_space(8.0);
+                            self.sun_section(ui);
+                            ui.add_space(8.0);
+                            self.export_section(ui);
+                        }
+                        SceneMode::MapScene => {
+                            self.mapscene_camera_section(ui);
+                            ui.add_space(8.0);
+                            self.export_section(ui);
+                        }
+                    }
                 });
             });
+    }
+
+    /// Recipe camera editing in MapScene mode: patches the serialized
+    /// SceneRecipe's OrbitCamera fields directly.
+    fn mapscene_camera_section(&mut self, ui: &mut Ui) {
+        ui.label(egui::RichText::new("Camera (recipe)").strong());
+        let Some(recipe) = self.mapscene.recipe_json.as_ref() else {
+            ui.weak("Build a recipe to edit its camera.");
+            return;
+        };
+        let camera = recipe.get("camera").cloned().unwrap_or_default();
+        let get = |key: &str| -> f64 {
+            camera.get(key).and_then(|v| v.as_f64()).unwrap_or(0.0)
+        };
+        let mut azimuth = get("azimuth_deg");
+        let mut distance = get("distance");
+        let mut elevation = get("elevation_deg");
+        let mut fov = get("fov_deg");
+        let changed = ui
+            .add(Slider::new(&mut azimuth, 0.0..=360.0).text("Azimuth"))
+            .changed()
+            | ui
+                .add(
+                    Slider::new(&mut distance, 0.1..=20_000.0)
+                        .text("Distance")
+                        .logarithmic(true),
+                )
+                .changed()
+            | ui
+                .add(Slider::new(&mut elevation, 1.0..=89.0).text("Elevation"))
+                .changed()
+            | ui.add(Slider::new(&mut fov, 10.0..=120.0).text("FOV")).changed();
+        if changed {
+            self.patch_mapscene_camera("azimuth_deg", azimuth);
+            self.patch_mapscene_camera("distance", distance);
+            self.patch_mapscene_camera("elevation_deg", elevation);
+            self.patch_mapscene_camera("fov_deg", fov);
+        }
     }
 
     fn camera_section(&mut self, ui: &mut Ui) {

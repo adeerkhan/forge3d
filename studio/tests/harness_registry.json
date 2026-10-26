@@ -1,0 +1,49 @@
+{
+  "$comment": "Forge3D Studio harness registry (GUI.md Part IV). Maps each migrated Studio capability to the forge3d example(s) that verify it and the Studio workstream it belongs to. Maintained alongside code; grows with every workstream item.",
+  "version": 1,
+  "entries": [
+    {
+      "capability": "mapscene-recipe-roundtrip",
+      "workstream": "W2",
+      "milestone": "M2",
+      "engine_surface": ["MapScene", "SceneRecipe.to_dict", "MapScene._recipe_from_dict", "MapScene.render"],
+      "examples": ["examples/mapscene_terrain_raster.py", "examples/mapscene_vector_labels.py"],
+      "studio_ops": ["mapscene.templates", "mapscene.template", "mapscene.validate", "mapscene.render"],
+      "parity_test": "studio::engine::tests::parity_mapscene::bridge_renders_example_mapscene_templates",
+      "golden": {
+        "path": "tests/golden/recipes/mapscene_terrain_raster.png",
+        "variant_env": "FORGE3D_RECIPE_GOLDEN_VARIANT",
+        "ssim_min": 0.995,
+        "mean_abs_max": 2.0,
+        "strict_env": "FORGE3D_STUDIO_GOLDEN_STRICT"
+      }
+    },
+    {
+      "capability": "terrain-frame-render",
+      "workstream": "W1",
+      "milestone": "M1",
+      "engine_surface": ["Session(window=False)", "TerrainRenderer.render_terrain_pbr_pom", "io.load_dem"],
+      "examples": ["examples/terrain_demo.py"],
+      "studio_ops": ["terrain.load", "terrain.info", "terrain.render", "terrain.clear"],
+      "parity_test": "studio::engine::tests::integration::engine_loads_dem_and_renders_frames"
+    },
+    {
+      "capability": "colormap-registry",
+      "workstream": "W1",
+      "milestone": "M4",
+      "engine_surface": ["colormaps.available", "colormaps.get", "Colormap1D.from_stops", "OverlayLayer.from_colormap1d"],
+      "examples": ["examples/population_spike_worldpoland/*"],
+      "studio_ops": ["colormaps.list"],
+      "parity_test": "studio::engine::tests::parity_mapscene::catalog_ops_list_registered_entries"
+    },
+    {
+      "capability": "renderer-presets",
+      "workstream": "W1",
+      "milestone": "M4",
+      "engine_surface": ["presets.available", "presets.get", "LightingPreset"],
+      "examples": ["examples/mapscene_offline_quality.py"],
+      "studio_ops": ["presets.list"],
+      "parity_test": "studio::engine::tests::parity_mapscene::catalog_ops_list_registered_entries"
+    }
+  ]
+}
