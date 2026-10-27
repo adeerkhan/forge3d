@@ -2,7 +2,7 @@
 ## Building the complete desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests.
-**Status header last updated:** 2026-10-27 (after the M3 unified-import + W1-depth rings landed in `studio/`).
+**Status header last updated:** 2026-10-27 (after the M4 core — schema-driven `TerrainRenderParams` property pages — landed in `studio/`; M1–M3, W1-depth and the W5 certificate ring were already in).
 **Knowledge graph:** `.ua/knowledge-graph.json` (2,372 nodes) covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (verification harnesses), and `studio/` (the app).
 
 ---
@@ -39,13 +39,14 @@ Implemented and tested (see `studio/README.md` for details):
 - Bridge v2 (M1): a generic `studio_dispatch` JSON-op dispatcher with a job protocol (`Command::Call` → `Event::JobDone`/`JobFailed`); every capability below rides it.
 - MapScene (M2, W2 ring 1): scene-mode switch (Terrain ⇄ MapScene), recipe templates built from the canonical examples, validation, certified `gpu_terrain` rendering, signed render certificates (W5).
 - Unified import (M3, W3 ring 1): `dataset.inspect` previews honest per-format metadata (GeoTIFF/COG, NPY, F3DZ, LAZ/COPC/EPT, 3D Tiles, OBJ/glTF, GeoJSON-family); only DEM-like sources claim the terrain slot, others register as project dataset references. `terrain.load` accepts `.npy` and `.f3dz` directly.
+- Terrain parameters (M4 core, W1 row 1): schema-driven `TerrainRenderParams` property pages — `terrain.params_schema` introspects the engine's own factory signature and every nested settings dataclass (21 root params, 26 settings sections, engine enum choices, the effective defaults a render really uses). Edits are validated by `terrain.params_validate` before they reach the renderer, so the engine's own error text appears inline; params the viewport pipeline pins are listed under "Not exposed" with their reasons.
 - Terrain depth (W1): colormap picker, renderer presets dropdown (`presets.get` → sun / MapScene lighting), camera rigs (`rig.bake` orbit/rail/follow) with a keyframe timeline scrubber + playback, and sequence render to `frame_%04d.png`.
 - Project persistence v2: dataset references, camera, sun, colormap/preset selection, serialized `SceneRecipe`, camera-rig JSON; version-gated loader with validation warnings.
 - Part IV harness: `tests/harness_registry.json` + parity tests (`parity_mapscene.rs`, `parity_ingest.rs`) asserting Studio's bridge reproduces what the engine's own API reports/renders, plus a device-lane-dependent golden gate.
 
 What is NOT yet exposed (the rest of this document plans exactly that):
 
-Vector/building layer *authoring* (import currently records metadata only), COG-over-HTTP streaming, path tracing, atmosphere/astro, smoke, splats, SDF, bundles, analysis tools, target-carrying rig playback, and the interactive (continuous) viewer.
+Vector/building layer *authoring* (import currently records metadata only), COG-over-HTTP streaming, path tracing, atmosphere/astro, smoke, splats, SDF, bundles, analysis tools, target-carrying rig playback, and the interactive (continuous) viewer. Within the parameter pages themselves: the two P6.1 color-space toggles (`colormap_srgb`, `output_srgb_eotf`) are `TerrainRenderParams` fields that `make_terrain_params_config` does not accept, so the pages cannot set them yet (the demo assigns them after construction); nested inputs such as virtual-texture stores, AOV export, offline accumulation (`aa_samples`) and vector overlays stay outside the pages by design and are listed in the panel's "Not exposed" section with their reasons.
 
 ---
 
@@ -76,6 +77,8 @@ Engine surface: `terrain_params.py` (the canonical 2,694-line typed parameter ca
 | Terrain instanced scattering (seeded distributions, LOD chains, density masks) | Scatter layer type with source/distribution editors | `terrain_scatter.py` |
 | Detail-normal map baking | Tools menu (offline batch op) | `_detail_normals.py` |
 | Double-double precision demo/timing (absolute GPU coordinates) | Diagnostics panel section | `precision.py` |
+
+**Status:** row 1 is implemented as the M4 property pages. Every parameter `make_terrain_params_config` accepts is editable except the ones the viewport pipeline owns (camera, sun, dataset geometry, colormap overlay) and engine-internal inputs (virtual-texture stores, AOV export, height-curve LUT files, offline accumulation); the panel lists those under "Not exposed" with the reason, so the gap is visible instead of silent. Rows 5–8 (analysis, scattering, detail-normal baking, precision demos) are still planned.
 
 ### W2 — MapScene & cartography (the flagship surface)
 
@@ -224,7 +227,7 @@ Each milestone ends with: build green, tests green (including new parity tests),
 | M1 | **Bridge v2** | W0: typed EngineOp protocol, dispatcher, job queue, progress/error events; project format v2 skeleton | M |
 | M2 | **MapScene in Studio** | W2 first ring: recipe editor for terrain+raster+vector+labels; template flows from the two canonical MVP examples; parity tests vs their goldens | L |
 | M3 | **Data ingestion** | W3: unified import dialog (GeoTIFF/COG/F3Z/mesh/point cloud/3D Tiles/GeoJSON), CRS step, dataset browser | M |
-| M4 | **Terrain depth** | W1: full `TerrainRenderParams` property pages, presets, colormap picker, rigs+animation timeline, scatter, analysis | L |
+| M4 | **Terrain depth** | W1: full `TerrainRenderParams` property pages (landed), presets, colormap picker, rigs+animation timeline, scatter, analysis | L |
 | M5 | **Certificates & diagnostics** | W5 first ring: certificates on every render, determinism panel, degradation ledger, telemetry | M |
 | M6 | **Path tracing & offline** | W4 ring 1: PT render mode, offline accumulation, denoise; parity vs PT example outputs | M |
 | M7 | **Atmosphere/astro/smoke** | W4 ring 2: AETHER settings, observation dialog, smoke volume import; example-backed acceptance runs | M |

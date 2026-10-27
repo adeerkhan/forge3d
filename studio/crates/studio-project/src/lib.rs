@@ -155,6 +155,12 @@ pub struct Project {
     /// v2 (additive): the serialized camera-rig spec + baked renderer-unit
     /// keyframes from the W1 animation timeline, as returned by `rig.bake`.
     pub camera_rig_json: Option<String>,
+    /// v2 (additive): M4 project-level `TerrainRenderParams` overrides for
+    /// the terrain viewport, exactly as `terrain.params_validate` accepted
+    /// them (section key -> settings object, root key -> scalar). Empty object
+    /// means "engine defaults"; unknown keys are rejected on load into the
+    /// engine rather than silently dropped.
+    pub terrain_params: serde_json::Value,
 }
 
 impl Default for Project {
@@ -172,6 +178,7 @@ impl Default for Project {
             colormap: None,
             datasets: Vec::new(),
             camera_rig_json: None,
+            terrain_params: serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }

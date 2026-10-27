@@ -23,7 +23,8 @@ studio/
 
 - **UI** (`forge3d-studio`): menu bar + toolbar, scene tree (left), engine
   viewport (center, drag to orbit / scroll to zoom), properties (right:
-  camera, sun, export), status bar (adapter, frame time, errors).
+  camera, sun, terrain parameters, camera rig, export), status bar (adapter,
+  frame time, errors).
 - **Engine worker** (`studio-engine`): a dedicated thread embeds CPython and
   drives forge3d's certified, golden-tested terrain pipeline:
   `Session(window=False)` → `TerrainRenderer.render_terrain_pbr_pom` →
@@ -117,9 +118,10 @@ Milestones from GUI.md section 12:
 - [x] **M1. Bridge v2 (W0)** — generic `studio_dispatch` JSON-op dispatcher
       in the embedded interpreter; `Command::Call`/`Event::JobDone/JobFailed`
       job protocol; terrain load/render migrated onto it. Ops: `probe`,
-      `terrain.load/info/render/clear`, `mapscene.templates/template/
-      render/validate`, `colormaps.list`, `presets.list`, `datasets.list`,
-      `dataset.inspect`, `presets.get`, `rig.bake`.
+      `terrain.load/info/render/clear`, `terrain.params_schema/params_
+      validate`, `mapscene.templates/template/render/validate`,
+      `colormaps.list`, `presets.list`, `datasets.list`, `dataset.inspect`,
+      `presets.get`, `rig.bake`.
 - [x] **M2. MapScene in Studio (W2 ring 1)** — scene-mode switch (Terrain ⇄
       MapScene); recipe templates built with the canonical example call
       sequences (`terrain`, `terrain_raster`, `terrain_vector_labels`);
@@ -150,6 +152,24 @@ Milestones from GUI.md section 12:
       timeline, and "render sequence" exports `frame_%04d.png` frames
       (center-locked replay; target-carrying playback is M4/M10).
       Parity: `parity_ingest.rs`.
+- [x] **M4 core: full `TerrainRenderParams` property pages** —
+      `terrain.params_schema` introspects `make_terrain_params_config`
+      and every nested settings dataclass (21 root params, 26 settings
+      sections, engine enum choices, the effective defaults a render
+      really uses), so a new engine parameter appears without a Rust
+      change. The right panel renders them as collapsible pages with a
+      widget per field type; an edit updates the project and schedules a
+      debounced `terrain.params_validate`, which runs the engine's own
+      constructors and whose message is shown inline — the renderer only
+      ever receives params the engine accepted, so a half-typed value can
+      never break the viewport. Params the viewport pipeline pins are
+      listed under "Not exposed" with their reasons. Project v2 persists
+      the params object. Parity: `parity_ingest.rs`
+      (`terrain_params_schema_covers_the_engine_demo_surface` classifies
+      every `examples/terrain_demo.py` flag, `terrain_params_validate_
+      reports_the_engines_own_errors`, `terrain_params_defaults_and_
+      enum_choices_validate`); integration: `render_params_reach_the_
+      renderer` (the empty default reproduces the pre-M4 frame exactly).
 - [x] **Part IV harness** — `tests/harness_registry.json` + parity tests
       (`parity_mapscene.rs`, `parity_ingest.rs`): every template validates
       and renders through the engine; catalog ops asserted against the
@@ -180,6 +200,14 @@ Milestones from GUI.md section 12:
 - One terrain dataset per scene; no mesh/point-cloud layers yet.
 - No cancel support for in-flight renders (GUI.md 8: they are never
   reported as successful cancellations — the UI simply waits).
+- The two P6.1 color-space toggles (`colormap_srgb`, `output_srgb_eotf`) are
+  `TerrainRenderParams` fields that `make_terrain_params_config` does not
+  accept (the demo assigns them after construction), so the parameter pages
+  cannot set them yet; they are recorded as a coverage gap in the parity
+  table rather than silently missing.
+- Parameter edits apply on the debounce (`PARAMS_VALIDATE_DEBOUNCE`), not
+  while typing: a value the engine rejects never reaches the renderer, so the
+  viewport keeps showing the last valid frame until the edit is fixed.
 - Windows/macOS are unverified; the libpython link step in `build.rs`
   handles Linux only so far.
 - The embedded interpreter requires the dev `.venv` today; a packaged

@@ -128,3 +128,67 @@ fn engine_loads_dem_and_renders_frames() {
 
     engine.shutdown();
 }
+
+/// M4: `SetRenderParams` must reach the renderer through the worker.
+///
+/// The empty default is the pre-M4 image, so unsetting an override has to
+/// reproduce the first frame exactly; a real override (exposure) has to
+/// change it. (Byte-identity of the empty default with the pre-M4 call was
+/// verified against a rendered PNG when the params plumbing landed.)
+#[test]
+fn render_params_reach_the_renderer() {
+    let _ = env_logger::try_init();
+    let (engine, events) = EngineHandle::spawn();
+    wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| matches!(e, Event::Ready { .. }).then_some(()),
+        "GPU Ready",
+    );
+
+    let dem = fixture_dem();
+    assert!(dem.is_file(), "DEM fixture missing: {}", dem.display());
+    engine.send(Command::LoadTerrain { path: dem });
+    wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| matches!(e, Event::TerrainLoaded { .. }).then_some(()),
+        "TerrainLoaded",
+    );
+
+    let render = || {
+        engine.send(Command::RenderFrame {
+            width: 320,
+            height: 240,
+        });
+        wait_for(
+            &events,
+            Duration::from_secs(300),
+            |e| match e {
+                Event::FrameReady { rgba, .. } => Some(rgba.clone()),
+                _ => None,
+            },
+            "FrameReady",
+        )
+    };
+
+    let base = render();
+
+    engine.send(Command::SetRenderParams(
+        serde_json::json!({ "exposure": 2.0 }),
+    ));
+    let brighter = render();
+    assert_ne!(
+        base, brighter,
+        "an exposure override must change the rendered frame"
+    );
+
+    engine.send(Command::SetRenderParams(serde_json::json!({})));
+    let restored = render();
+    assert_eq!(
+        base, restored,
+        "clearing the overrides must restore the historical frame"
+    );
+
+    engine.shutdown();
+}

@@ -37,6 +37,9 @@ pub enum Command {
     SetSun(SunParams),
     /// Named colormap (forge3d registry key) for terrain rendering.
     SetColormap(Option<String>),
+    /// M4: project-level `TerrainRenderParams` overrides for the terrain
+    /// viewport (validated by `terrain.params_validate` before they arrive).
+    SetRenderParams(serde_json::Value),
     /// Render one terrain frame at the requested size and ship RGBA bytes.
     RenderFrame {
         width: u32,
@@ -200,6 +203,8 @@ impl Drop for EngineHandle {
 /// return plain JSON-serializable dicts. `studio_dispatch` catches everything
 /// (returning the traceback text) so worker failures are always structured.
 const BRIDGE_SOURCE: &str = r##"
+import dataclasses
+import inspect
 import json
 import os
 import sys
@@ -208,6 +213,7 @@ import traceback
 
 import numpy as np
 import forge3d as f3d
+import forge3d.terrain_params as _tp
 from forge3d.terrain_params import make_terrain_params_config
 
 # Embedded-interpreter repair: forge3d's terrain runtime gate proves the
@@ -354,6 +360,372 @@ def _op_terrain_info(p):
     }
 
 
+# --- terrain parameter pages (M4) --------------------------------------------
+# The right panel's TerrainRenderParams pages are schema-driven:
+# `terrain.params_schema` introspects `make_terrain_params_config` and the
+# nested settings dataclasses, and `terrain.params_validate` runs the engine's
+# own constructors so its validation text reaches the UI verbatim. Studio never
+# reimplements a rule: a new parameter or a changed default appears in the
+# schema without a Rust edit.
+
+# Applied when the project has not set a value, so an empty params object
+# reproduces the pre-M4 viewport render exactly.
+_STUDIO_RENDER_DEFAULTS = {
+    "msaa_samples": 1,
+    "z_scale": 1.35,
+    "exposure": 1.0,
+    "albedo_mode": "colormap",
+    "colormap_strength": 1.0,
+    "ibl_enabled": True,
+}
+
+# Never editable from the pages: the viewport pipeline, another Studio panel,
+# or an engine-internal input owns them. The schema reports every one in
+# `excluded` with its reason so the UI can say so honestly instead of hiding.
+_EXCLUDED = {
+    "size_px": "output size (viewport / export dialog)",
+    "render_scale": "Studio renders at render_scale=1.0",
+    "terrain_span": "derived from the dataset domain",
+    "domain": "derived from the dataset domain",
+    "cam_radius": "Camera panel",
+    "cam_phi_deg": "Camera panel",
+    "cam_theta_deg": "Camera panel",
+    "fov_y_deg": "Camera panel",
+    "cam_target": "viewport orbits the terrain centre",
+    "camera_mode": "viewport uses the screen projection",
+    "light_azimuth_deg": "Sun panel",
+    "light_elevation_deg": "Sun panel",
+    "sun_intensity": "Sun panel",
+    "overlays": "colormap picker",
+    "vt_store": "engine-returned virtual-texture store handle",
+    "height_curve_lut": "256-entry LUT file (drive it from a script)",
+    "aa_samples": "offline accumulation only (forge3d.offline)",
+    "aa_seed": "offline accumulation only (forge3d.offline)",
+    "terrain_crs": "vector reprojection input, fixed at import time",
+    "terrain_data_revision": "engine cache key",
+    "prefetch_horizon_ms": "virtual-texture streaming policy",
+    "vt_upload_budget_bytes": "virtual-texture streaming policy",
+    "vt": "requires an open virtual-texture store",
+    "aov": "offline AOV export (forge3d.offline)",
+    "vector_overlay": "vector overlays belong to MapScene recipes",
+}
+
+# Closed value sets the engine validates against (locked by parity tests).
+# A str field absent here is free text whose engine validation the pages
+# surface inline instead of pre-filtering.
+_ENUM_CHOICES = {
+    "albedo_mode": ["colormap", "mix", "material"],
+    "culling": ["none", "frustum", "hzb_two_phase"],
+    "shading": ["forward", "visibility"],
+    "height_curve_mode": ["linear", "pow", "smoothstep"],
+    "pom.mode": ["Occlusion", "Relief", "Parallax"],
+    "clouds.quality": ["low", "medium", "high", "ultra"],
+    "volumetrics.mode": ["uniform", "height", "exponential"],
+    "sky.model": ["hosek-wilkie", "preetham", "approximate", "aether"],
+}
+
+_NO_DEFAULT = object()
+
+
+def _strip_optional(annotation):
+    """`Optional[X]` / `X | None` -> (X, nullable), else (X, False)."""
+    text = str(annotation).strip()
+    if text.startswith("Optional[") and text.endswith("]"):
+        return text[len("Optional["):-1].strip(), True
+    if text.endswith("| None"):
+        return text[:-len("| None")].strip(), True
+    if text.startswith("None |"):
+        return text[len("None |"):].strip(), True
+    return text, False
+
+
+def _field_spec(base):
+    """(kind, container) for a base annotation; kind None = not representable.
+
+    The container matters: the native `TerrainRenderParams` wrapper rejects a
+    list where the dataclass declares `Tuple[...]` (e.g. `clip`,
+    `clamp.height_range`), and JSON has no tuple type, so it is restored here.
+    """
+    if base in ("bool", "int", "float", "str"):
+        return base, None
+    for opener in ("Tuple[", "Sequence[", "List["):
+        if base.startswith(opener) and base.endswith("]"):
+            parts = [
+                part.strip()
+                for part in base[len(opener):-1].split(",")
+                if part.strip() and part.strip() != "..."
+            ]
+            container = tuple if opener == "Tuple[" else list
+            if parts and all(part == "float" for part in parts):
+                return "float[]", container
+            if parts and all(part == "int" for part in parts):
+                return "int[]", container
+            return None, None
+    return None, None
+
+
+def _section_class(annotation):
+    """The settings dataclass behind `Optional[FogSettings]`, else None."""
+    base, _nullable = _strip_optional(annotation)
+    cls = getattr(_tp, base, None)
+    return cls if cls is not None and dataclasses.is_dataclass(cls) else None
+
+
+def _json_safe(value):
+    return json.loads(json.dumps(value, default=lambda _obj: None))
+
+
+def _effective_defaults():
+    """What the engine actually renders with when the project set nothing."""
+    return _json_safe(dataclasses.asdict(make_terrain_params_config(
+        size_px=(64, 64),
+        render_scale=1.0,
+        terrain_span=1.0,
+        msaa_samples=1,
+        z_scale=1.35,
+        exposure=1.0,
+        domain=(0.0, 1.0),
+    )))
+
+
+def _section_defaults(key, cls, eff):
+    """The values a render really uses for one settings section when unset."""
+    eff_value = eff.get(key)
+    if isinstance(eff_value, dict):
+        return eff_value
+    return _json_safe(dataclasses.asdict(cls()))
+
+
+def _section_schema(key, cls, eff):
+    # Prefer the factory-built defaults (the values a render really uses);
+    # fall back to a bare construction for sections the factory passes through.
+    try:
+        defaults = _section_defaults(key, cls, eff)
+    except Exception as exc:
+        return {
+            "key": key,
+            "editable": False,
+            "reason": str(exc),
+            "fields": [],
+            "defaults": {},
+        }
+    fields = []
+    for field in dataclasses.fields(cls):
+        if not field.init:
+            continue
+        base, nullable = _strip_optional(field.type)
+        kind, _container = _field_spec(base)
+        if kind is None:
+            continue  # engine-internal input (handles, nested settings)
+        default = defaults.get(field.name, _NO_DEFAULT)
+        if default is _NO_DEFAULT or (default is None and not nullable):
+            continue
+        entry = {
+            "key": field.name,
+            "type": kind,
+            "nullable": nullable,
+            "default": default,
+        }
+        choices = _ENUM_CHOICES.get(f"{key}.{field.name}")
+        if key == "shadows" and field.name == "technique":
+            choices = sorted(cls.ALL_TECHNIQUES)
+        if choices:
+            entry["choices"] = choices
+        fields.append(entry)
+    return {
+        "key": key,
+        "editable": True,
+        "fields": fields,
+        "defaults": defaults,
+    }
+
+
+def _build_schema():
+    signature = inspect.signature(make_terrain_params_config)
+    eff = _effective_defaults()
+    excluded = []
+    sections = []
+    root_fields = []
+    for name, param in signature.parameters.items():
+        if name in _EXCLUDED:
+            excluded.append({"key": name, "reason": _EXCLUDED[name]})
+            continue
+        cls = _section_class(param.annotation)
+        if cls is not None:
+            sections.append(_section_schema(name, cls, eff))
+            continue
+        base, nullable = _strip_optional(param.annotation)
+        kind, _container = _field_spec(base)
+        if kind is None:
+            excluded.append({
+                "key": name,
+                "reason": "engine-internal type (not editable from Studio)",
+            })
+            continue
+        default = _STUDIO_RENDER_DEFAULTS.get(name, _NO_DEFAULT)
+        if default is _NO_DEFAULT:
+            default = eff.get(name, _NO_DEFAULT)
+        if default is _NO_DEFAULT:
+            default = (
+                param.default
+                if param.default is not inspect.Parameter.empty
+                else _NO_DEFAULT
+            )
+        if default is _NO_DEFAULT or (default is None and not nullable):
+            continue
+        entry = {
+            "key": name,
+            "type": kind,
+            "nullable": nullable,
+            "default": default,
+        }
+        choices = _ENUM_CHOICES.get(name)
+        if choices:
+            entry["choices"] = choices
+        root_fields.append(entry)
+    sections.insert(0, {
+        "key": "root",
+        "editable": True,
+        "fields": root_fields,
+        "defaults": {},
+    })
+    return {"sections": sections, "excluded": excluded}
+
+
+def _coerce(name, kind, container, nullable, value):
+    if value is None:
+        if nullable:
+            return None
+        raise ValueError(f"{name} must not be null")
+    if kind == "bool":
+        if not isinstance(value, bool):
+            raise ValueError(f"{name} must be true or false")
+        return value
+    if kind == "int":
+        if isinstance(value, bool):
+            raise ValueError(f"{name} must be an integer")
+        if isinstance(value, float):
+            if not value.is_integer():
+                raise ValueError(f"{name} must be an integer")
+            return int(value)
+        if not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        return value
+    if kind == "float":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{name} must be a number")
+        return float(value)
+    if kind == "str":
+        if not isinstance(value, str):
+            raise ValueError(f"{name} must be a string")
+        return value
+    if kind in ("float[]", "int[]"):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError(f"{name} must be an array")
+        out = []
+        for item in value:
+            if kind == "float[]":
+                if isinstance(item, bool) or not isinstance(item, (int, float)):
+                    raise ValueError(f"{name} must be an array of numbers")
+                out.append(float(item))
+            else:
+                if isinstance(item, bool) or not isinstance(item, int):
+                    raise ValueError(f"{name} must be an array of integers")
+                out.append(item)
+        return container(out)
+    raise ValueError(f"{name} has unsupported type {kind}")
+
+
+def _build_section(name, cls, value, eff):
+    """A section dict is a patch over the engine's effective defaults.
+
+    The pages materialize a section before editing it, but the bridge accepts
+    partial patches too (a hand-edited project, a script): settings classes
+    like `ShadowSettings` have required fields, so the defaults are merged in
+    rather than relying on the dataclass to fill the gaps.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object")
+    try:
+        merged = dict(_section_defaults(name, cls, eff))
+    except Exception:
+        merged = {}
+    fields = {field.name: field for field in dataclasses.fields(cls) if field.init}
+    for key, raw in value.items():
+        field = fields.get(key)
+        if field is None:
+            raise ValueError(f"unknown {name} setting: {key}")
+        base, nullable = _strip_optional(field.type)
+        kind, container = _field_spec(base)
+        if kind is None:
+            # Engine-internal input (a handle, nested settings): never sent
+            # from the pages, so a stale value in a project file is dropped.
+            merged.pop(key, None)
+            continue
+        merged[key] = _coerce(f"{name}.{key}", kind, container, nullable, raw)
+    return cls(**merged)
+
+
+def _params_to_kwargs(params):
+    """Project params -> validated `make_terrain_params_config` kwargs.
+
+    Unknown keys are an error (a typo must never be silently dropped), keys
+    the viewport pins are dropped, and everything else is coerced to the
+    annotation's type so the engine's own validators see what they expect.
+    """
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        raise ValueError("terrain params must be an object")
+    signature = inspect.signature(make_terrain_params_config)
+    eff = None
+    kwargs = {}
+    for key, value in params.items():
+        param = signature.parameters.get(key)
+        if param is None:
+            raise ValueError(f"unknown terrain param: {key}")
+        if key in _EXCLUDED:
+            continue  # pinned by the viewport pipeline (see schema.excluded)
+        cls = _section_class(param.annotation)
+        if cls is not None:
+            if eff is None:
+                eff = _effective_defaults()
+            kwargs[key] = _build_section(key, cls, value, eff)
+            continue
+        base, nullable = _strip_optional(param.annotation)
+        kind, container = _field_spec(base)
+        if kind is None:
+            raise ValueError(f"terrain param {key} is not editable from Studio")
+        kwargs[key] = _coerce(key, kind, container, nullable, value)
+    return kwargs
+
+
+def _op_terrain_params_schema(p):
+    return _build_schema()
+
+
+def _op_terrain_params_validate(p):
+    """Run the engine's own constructors over the project's params.
+
+    Raises on the first invalid value, so `studio_dispatch` returns the
+    engine's message (and traceback) and the UI shows it inline.
+    """
+    kwargs = _params_to_kwargs(p.get("params"))
+    # Required factory inputs the viewport owns; the pages never set them.
+    kwargs.setdefault("size_px", (64, 64))
+    kwargs.setdefault("render_scale", 1.0)
+    kwargs.setdefault("terrain_span", 1.0)
+    kwargs.setdefault("domain", (0.0, 1.0))
+    kwargs.setdefault("cam_target", (0.0, 0.0, 0.0))
+    for key, value in _STUDIO_RENDER_DEFAULTS.items():
+        kwargs.setdefault(key, value)
+    config = make_terrain_params_config(**kwargs)
+    f3d.TerrainRenderParams(config)
+    return {"valid": True, "fields": len(kwargs)}
+
+
 def _op_terrain_render(p):
     if _heightmap is None:
         raise RuntimeError("no terrain loaded")
@@ -368,27 +740,30 @@ def _op_terrain_render(p):
     sun = p["sun"]
     domain = p.get("domain") or [_domain[0], _domain[1]]
     span = float(p.get("terrain_span") or max(domain[1] - domain[0], 1.0) * 6.0)
-    config = make_terrain_params_config(
-        size_px=(int(p["width"]), int(p["height"])),
-        render_scale=1.0,
-        terrain_span=span,
-        msaa_samples=1,
-        z_scale=1.35,
-        exposure=1.0,
-        domain=(float(domain[0]), float(domain[1])),
-        albedo_mode="colormap",
-        colormap_strength=1.0,
-        ibl_enabled=True,
-        light_azimuth_deg=float(sun["azimuth_deg"]),
-        light_elevation_deg=float(sun["elevation_deg"]),
-        sun_intensity=float(sun["intensity"]),
-        cam_radius=float(camera["radius"]),
-        cam_phi_deg=float(camera["phi_deg"]),
-        cam_theta_deg=float(camera["theta_deg"]),
-        fov_y_deg=float(camera["fov_deg"]),
-        camera_mode="screen",
-        overlays=[overlay],
-    )
+    # Project params first, then the Studio defaults for anything unset, and
+    # last the values the viewport pipeline owns (geometry, camera, sun,
+    # colormap overlay) so no project param can override them. With an empty
+    # params object this is exactly the pre-M4 call.
+    kwargs = _params_to_kwargs(p.get("params"))
+    for key, value in _STUDIO_RENDER_DEFAULTS.items():
+        kwargs.setdefault(key, value)
+    kwargs.update({
+        "size_px": (int(p["width"]), int(p["height"])),
+        "render_scale": 1.0,
+        "terrain_span": span,
+        "domain": (float(domain[0]), float(domain[1])),
+        "cam_radius": float(camera["radius"]),
+        "cam_phi_deg": float(camera["phi_deg"]),
+        "cam_theta_deg": float(camera["theta_deg"]),
+        "fov_y_deg": float(camera["fov_deg"]),
+        "cam_target": (0.0, 0.0, 0.0),
+        "camera_mode": "screen",
+        "light_azimuth_deg": float(sun["azimuth_deg"]),
+        "light_elevation_deg": float(sun["elevation_deg"]),
+        "sun_intensity": float(sun["intensity"]),
+        "overlays": [overlay],
+    })
+    config = make_terrain_params_config(**kwargs)
     frame = _renderer.render_terrain_pbr_pom(
         material_set=_material,
         env_maps=_ibl,
@@ -1019,6 +1394,8 @@ _OPS = {
     "terrain.info": _op_terrain_info,
     "terrain.render": _op_terrain_render,
     "terrain.clear": _op_terrain_clear,
+    "terrain.params_schema": _op_terrain_params_schema,
+    "terrain.params_validate": _op_terrain_params_validate,
     "mapscene.templates": _op_mapscene_templates,
     "mapscene.template": _op_mapscene_template,
     "mapscene.render": _op_mapscene_render,
@@ -1150,6 +1527,8 @@ struct WorkerState {
     camera: CameraParams,
     sun: SunParams,
     colormap: Option<String>,
+    /// M4: project-level terrain params handed to `terrain.render`.
+    render_params: serde_json::Value,
     terrain_visible: bool,
     dirty: bool,
     has_terrain: bool,
@@ -1324,6 +1703,7 @@ fn run_worker(
         camera: CameraParams::default(),
         sun: SunParams::default(),
         colormap: None,
+        render_params: serde_json::Value::Object(serde_json::Map::new()),
         terrain_visible: true,
         dirty: true,
         has_terrain: false,
@@ -1397,6 +1777,10 @@ fn run_worker(
             }
             Command::SetColormap(colormap) => {
                 engine.colormap = colormap;
+                engine.dirty = true;
+            }
+            Command::SetRenderParams(params) => {
+                engine.render_params = params;
                 engine.dirty = true;
             }
             Command::RenderFrame { width, height } => {
@@ -1484,6 +1868,7 @@ fn render_terrain_png(
             },
             "domain": [engine.domain.0, engine.domain.1],
             "colormap": engine.colormap,
+            "params": engine.render_params,
             "hdr_path": engine.hdr_path.to_string_lossy(),
             "out_png": out.to_string_lossy(),
         }),

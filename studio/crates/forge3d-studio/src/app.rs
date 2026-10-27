@@ -5,7 +5,7 @@
 //! bar at the bottom. Every control is wired to real application state and
 //! real engine commands — there are no disconnected mockups.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -18,6 +18,9 @@ use studio_project::{CameraParams, Project, SunParams};
 use crate::icons::Icons;
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(120);
+/// M4: how long a terrain-parameter edit settles before it is re-validated
+/// by the engine (typing a value should not dispatch one job per keystroke).
+const PARAMS_VALIDATE_DEBOUNCE: Duration = Duration::from_millis(700);
 const MAX_STATUS_ERRORS: usize = 4;
 
 struct GpuInfo {
@@ -60,6 +63,10 @@ enum PendingJob {
         out_dir: PathBuf,
         total: u32,
     },
+    /// M4: the terrain-parameter schema (warm once, at engine ready).
+    ParamsSchema,
+    /// M4: validation of the current terrain params against the engine.
+    ParamsValidate,
 }
 
 /// One baked camera-rig keyframe in renderer world units.
@@ -216,6 +223,23 @@ pub struct StudioApp {
     rig_playback: RigPlayback,
     /// W1: in-flight sequence render, if any.
     sequence: Option<SequenceState>,
+    /// M4: `terrain.params_schema` — the sections, fields, defaults, enum
+    /// choices and pinned params introspected from the engine's
+    /// `make_terrain_params_config` (None until the engine reports ready).
+    params_schema: Option<serde_json::Value>,
+    /// M4: why the schema request failed, if it did — shown in place of the
+    /// pages so a broken bridge is visible instead of an eternal "loading".
+    params_schema_error: Option<String>,
+    /// M4: first line of the engine's rejection of the current params, shown
+    /// inline under the pages (None = the current params validate).
+    params_validation: Option<String>,
+    /// M4: when the debounced `terrain.params_validate` job should fire.
+    params_validate_due: Option<Instant>,
+    /// M4: a validate job is in flight; further edits wait for it.
+    params_validate_pending: bool,
+    /// M4: text being typed into a parse-on-commit field (nullable numbers
+    /// and arrays), so partial input like "1." survives across frames.
+    param_drafts: HashMap<String, String>,
 }
 
 impl StudioApp {
@@ -258,6 +282,12 @@ impl StudioApp {
                 play_t0: 0.0,
             },
             sequence: None,
+            params_schema: None,
+            params_schema_error: None,
+            params_validation: None,
+            params_validate_due: None,
+            params_validate_pending: false,
+            param_drafts: HashMap::new(),
         }
     }
 
@@ -333,6 +363,13 @@ impl StudioApp {
                     self.pending_jobs.insert(
                         self.engine.call("presets.list", serde_json::json!({})),
                         PendingJob::PresetsList,
+                    );
+                    // M4: the property pages are schema-driven — warm the
+                    // schema once so the panel paints complete on first use.
+                    self.pending_jobs.insert(
+                        self.engine
+                            .call("terrain.params_schema", serde_json::json!({})),
+                        PendingJob::ParamsSchema,
                     );
                 }
                 Event::TerrainLoaded {
@@ -425,12 +462,19 @@ impl StudioApp {
     // -------------------------------------------------------------- actions
 
     fn request_viewport_render(&mut self) {
-        let size = self.viewport_rect.size();
-        let width = (size.x.round() as u32).max(1);
-        let height = (size.y.round() as u32).max(1);
         if self.busy {
             return;
         }
+        self.queue_viewport_render();
+    }
+
+    /// Queue a viewport render regardless of the busy flag. Used when a job's
+    /// own completion invalidates the frame: `JobDone` arrives before
+    /// `Busy(false)`, so the gated request would be dropped.
+    fn queue_viewport_render(&mut self) {
+        let size = self.viewport_rect.size();
+        let width = (size.x.round() as u32).max(1);
+        let height = (size.y.round() as u32).max(1);
         self.pending_render = Some(PendingRender {
             width,
             height,
@@ -679,6 +723,28 @@ impl StudioApp {
                     ));
                 }
             }
+            Some(PendingJob::ParamsSchema) => {
+                self.params_schema = Some(result);
+                self.params_schema_error = None;
+            }
+            Some(PendingJob::ParamsValidate) => {
+                self.params_validate_pending = false;
+                // The engine accepted the current params: hand them to the
+                // renderer and refresh the frame (they were never applied
+                // while invalid, so the viewport may still show old params).
+                let had_error = self.params_validation.take().is_some();
+                self.engine.send(Command::SetRenderParams(
+                    self.project.terrain_params.clone(),
+                ));
+                if self.scene_mode == SceneMode::Terrain {
+                    // MapScene owns the viewport texture in its own mode.
+                    self.viewport_texture = None;
+                    self.queue_viewport_render();
+                }
+                if had_error {
+                    self.set_status("Terrain parameters valid again");
+                }
+            }
             None => {
                 self.set_status(format!("Engine op '{op}' finished"));
             }
@@ -687,6 +753,23 @@ impl StudioApp {
 
     /// Route a failed generic engine job.
     fn handle_job_failed(&mut self, op: &str, kind: Option<PendingJob>, message: &str) {
+        if matches!(&kind, Some(PendingJob::ParamsValidate)) {
+            self.params_validate_pending = false;
+            // The engine's own validation text, inline under the pages: the
+            // viewport keeps the last params it accepted, so nothing else
+            // fails and no error toast is raised.
+            self.params_validation =
+                Some(message.lines().next().unwrap_or(message).trim().to_owned());
+            return;
+        }
+        if matches!(&kind, Some(PendingJob::ParamsSchema)) {
+            // The pages cannot be built: say so where they would be, and keep
+            // the engine's own reason in the error list.
+            self.params_schema_error =
+                Some(message.lines().next().unwrap_or(message).trim().to_owned());
+            self.push_error("Terrain parameters", message.to_owned());
+            return;
+        }
         if let Some(PendingJob::SequenceFrame { total, .. }) = kind {
             if let Some(state) = self.sequence.as_mut() {
                 state.failed.push(message.to_owned());
@@ -1120,6 +1203,9 @@ impl StudioApp {
             play_t0: 0.0,
         };
         self.sequence = None;
+        self.params_validation = None;
+        self.params_validate_due = None;
+        self.param_drafts.clear();
         self.sync_engine_state();
         self.invalidate_viewport();
         self.set_status("New project");
@@ -1164,6 +1250,10 @@ impl StudioApp {
                 };
                 self.project_path = Some(path);
                 self.project_dirty = false;
+                // M4: the newly opened params replace the old pages' state.
+                self.params_validation = None;
+                self.params_validate_due = None;
+                self.param_drafts.clear();
                 self.sync_engine_state();
                 self.invalidate_viewport();
                 self.set_status(format!("Opened {}", self.project_path_display()));
@@ -1216,6 +1306,45 @@ impl StudioApp {
     fn sync_engine_state(&mut self) {
         self.engine.send(Command::SetCamera(self.project.camera));
         self.engine.send(Command::SetSun(self.project.sun));
+        // M4: the project's terrain params travel with it. They were validated
+        // by the pages when they were last edited; a hand-edited project file
+        // surfaces the engine's own error on the first render.
+        self.engine.send(Command::SetRenderParams(
+            self.project.terrain_params.clone(),
+        ));
+    }
+
+    /// M4: mark the terrain params for the debounced engine validation.
+    fn schedule_params_validate(&mut self) {
+        // A stale message would describe values the user just replaced.
+        self.params_validation = None;
+        self.params_validate_due = Some(Instant::now() + PARAMS_VALIDATE_DEBOUNCE);
+    }
+
+    /// M4: dispatch the debounced terrain-params validation once the edits
+    /// settle. One job at a time: edits made while a validation is in flight
+    /// leave the due time set, so the next pass re-checks the newest values.
+    fn flush_params_validate(&mut self) {
+        if self.params_validate_pending {
+            return;
+        }
+        let due = self
+            .params_validate_due
+            .map(|at| Instant::now() >= at)
+            .unwrap_or(false);
+        if !due {
+            return;
+        }
+        self.params_validate_due = None;
+        self.params_validate_pending = true;
+        let params = self.project.terrain_params.clone();
+        self.pending_jobs.insert(
+            self.engine.call(
+                "terrain.params_validate",
+                serde_json::json!({ "params": params }),
+            ),
+            PendingJob::ParamsValidate,
+        );
     }
 
     fn reset_camera(&mut self) {
@@ -1607,6 +1736,8 @@ impl StudioApp {
                             ui.add_space(8.0);
                             self.sun_section(ui);
                             ui.add_space(8.0);
+                            self.render_params_section(ui);
+                            ui.add_space(8.0);
                             self.rig_section(ui);
                             ui.add_space(8.0);
                             self.export_section(ui);
@@ -1748,6 +1879,77 @@ impl StudioApp {
                 self.apply_preset(name);
             }
         }
+    }
+
+    /// M4: schema-driven `TerrainRenderParams` property pages.
+    ///
+    /// Sections, fields, defaults, enum choices and the pinned-parameter list
+    /// all come from `terrain.params_schema`, which the bridge introspects
+    /// from `make_terrain_params_config` and the nested settings dataclasses —
+    /// so the panel cannot drift from the engine. An edit updates the project
+    /// and schedules a debounced `terrain.params_validate`; only params the
+    /// engine accepted reach the renderer, and its rejection text is shown
+    /// inline instead of breaking the viewport.
+    fn render_params_section(&mut self, ui: &mut Ui) {
+        let Some(schema) = self.params_schema.as_ref() else {
+            ui.label(egui::RichText::new("Terrain parameters").strong());
+            match &self.params_schema_error {
+                Some(error) => {
+                    ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {error}"));
+                    ui.weak(
+                        "The engine did not report its parameter schema, so the pages \
+                         cannot be built.",
+                    );
+                }
+                None => {
+                    ui.weak("loading the engine's parameter schema…");
+                }
+            }
+            return;
+        };
+        let changes = params_pages(
+            ui,
+            schema,
+            self.params_validation.as_deref(),
+            &self.project.terrain_params,
+            &mut self.param_drafts,
+        );
+        if changes.is_empty() {
+            return;
+        }
+        for (section_key, key, value) in changes {
+            if section_key == "root" {
+                insert_root_param(&mut self.project.terrain_params, &key, value);
+            } else {
+                let defaults = self.section_defaults(&section_key);
+                insert_section_param(
+                    &mut self.project.terrain_params,
+                    &section_key,
+                    &defaults,
+                    &key,
+                    value,
+                );
+            }
+        }
+        self.project_dirty = true;
+        self.schedule_params_validate();
+    }
+
+    /// Materialization defaults for one section (copied out of the schema) so
+    /// the first edit to a section keeps its siblings' engine defaults.
+    fn section_defaults(&self, section_key: &str) -> serde_json::Value {
+        self.params_schema
+            .as_ref()
+            .and_then(|schema| schema.get("sections"))
+            .and_then(|sections| sections.as_array())
+            .and_then(|sections| {
+                sections.iter().find(|section| {
+                    section.get("key").and_then(|k| k.as_str()) == Some(section_key)
+                })
+            })
+            .and_then(|section| section.get("defaults"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}))
     }
 
     /// W1: camera-rig spec, keyframe bake, timeline scrubber, playback, and
@@ -2093,6 +2295,7 @@ impl eframe::App for StudioApp {
                 self.request_viewport_render();
             }
         }
+        self.flush_params_validate();
         self.flush_pending_render();
     }
 }
@@ -2112,5 +2315,545 @@ fn sanitize_name(name: &str) -> String {
         "untitled".to_owned()
     } else {
         cleaned
+    }
+}
+
+// ------------------------------------------------------- M4: params widgets
+
+/// `height_curve_mode` -> `Height Curve Mode` (schema keys are snake_case).
+fn title_case(key: &str) -> String {
+    let mut out = String::with_capacity(key.len());
+    for (index, word) in key.split('_').enumerate() {
+        if index > 0 {
+            out.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
+}
+
+/// Draw the whole parameter page tree and return the pending edits.
+///
+/// Independent of `StudioApp` so it can be rendered headlessly in tests; the
+/// caller applies the returned edits and schedules the engine validation.
+fn params_pages(
+    ui: &mut Ui,
+    schema: &serde_json::Value,
+    validation: Option<&str>,
+    params: &serde_json::Value,
+    drafts: &mut HashMap<String, String>,
+) -> Vec<(String, String, serde_json::Value)> {
+    ui.label(egui::RichText::new("Terrain parameters").strong());
+    if let Some(message) = validation {
+        ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {message}"));
+        ui.weak("The viewport keeps the last valid parameters until this is fixed.");
+        ui.add_space(4.0);
+    }
+    let mut changes = Vec::new();
+    let Some(sections) = schema
+        .get("sections")
+        .and_then(|sections| sections.as_array())
+    else {
+        ui.weak("the engine reported no editable terrain parameters");
+        return changes;
+    };
+    for section in sections {
+        let Some(section_key) = section.get("key").and_then(|key| key.as_str()) else {
+            continue;
+        };
+        let fields = section.get("fields").and_then(|fields| fields.as_array());
+        if section_key == "root" {
+            // Root scalars sit flat under the header; settings collapse.
+            if let Some(fields) = fields {
+                for field in fields {
+                    if let Some(change) = param_field(ui, section_key, field, params, drafts) {
+                        changes.push(change);
+                    }
+                }
+            }
+            continue;
+        }
+        egui::CollapsingHeader::new(title_case(section_key))
+            .id_source(format!("params_section_{section_key}"))
+            .show(ui, |ui| {
+                if !section
+                    .get("editable")
+                    .and_then(|editable| editable.as_bool())
+                    .unwrap_or(false)
+                {
+                    ui.weak(
+                        section
+                            .get("reason")
+                            .and_then(|reason| reason.as_str())
+                            .unwrap_or("not editable from Studio"),
+                    );
+                    return;
+                }
+                let Some(fields) = fields else { return };
+                for field in fields {
+                    if let Some(change) = param_field(ui, section_key, field, params, drafts) {
+                        changes.push(change);
+                    }
+                }
+            });
+    }
+    // Honest reporting: params the pages cannot edit say why.
+    if let Some(excluded) = schema.get("excluded").and_then(|e| e.as_array()) {
+        if !excluded.is_empty() {
+            egui::CollapsingHeader::new(format!("Not exposed ({})", excluded.len()))
+                .id_source("params_excluded")
+                .show(ui, |ui| {
+                    for entry in excluded {
+                        let key = entry.get("key").and_then(|k| k.as_str()).unwrap_or("?");
+                        let reason = entry
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("engine-internal");
+                        ui.weak(format!("{key} — {reason}"));
+                    }
+                });
+        }
+    }
+    changes
+}
+
+/// Render one schema field; returns the `(section, key, value)` change, if any.
+///
+/// The widget type follows the schema's field type: checkbox for booleans,
+/// drag values for numbers, a combo box for engine-validated enums, a text
+/// field otherwise. Enum choices come from the engine, so a bad value can
+/// only come from free text — where `terrain.params_validate` catches it.
+fn param_field(
+    ui: &mut Ui,
+    section_key: &str,
+    field: &serde_json::Value,
+    params: &serde_json::Value,
+    drafts: &mut HashMap<String, String>,
+) -> Option<(String, String, serde_json::Value)> {
+    let key = field.get("key").and_then(|key| key.as_str())?;
+    let kind = field.get("type").and_then(|kind| kind.as_str())?;
+    let nullable = field
+        .get("nullable")
+        .and_then(|nullable| nullable.as_bool())
+        .unwrap_or(false);
+    let default = field
+        .get("default")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let current = match section_key {
+        "root" => params.get(key),
+        _ => params.get(section_key).and_then(|section| section.get(key)),
+    }
+    .cloned()
+    .unwrap_or(default);
+    let label = title_case(key);
+    let id = format!("param_{section_key}_{key}");
+    let change = |value: serde_json::Value| Some((section_key.to_owned(), key.to_owned(), value));
+
+    match kind {
+        "bool" => {
+            let mut value = current.as_bool().unwrap_or(false);
+            ui.checkbox(&mut value, label)
+                .changed()
+                .then(|| change(serde_json::json!(value)))?
+        }
+        "int" if !nullable => {
+            let mut value = current.as_i64().unwrap_or(0);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(&label);
+                changed = ui
+                    .add(egui::DragValue::new(&mut value).speed(1.0))
+                    .changed();
+            });
+            if changed {
+                return change(serde_json::json!(value));
+            }
+            None
+        }
+        "float" if !nullable => {
+            let mut value = current.as_f64().unwrap_or(0.0);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(&label);
+                changed = ui.add(egui::DragValue::new(&mut value)).changed();
+            });
+            if changed {
+                return change(serde_json::json!(value));
+            }
+            None
+        }
+        "str" => {
+            if let Some(choices) = field.get("choices").and_then(|c| c.as_array()) {
+                let current_text = current.as_str().unwrap_or_default().to_owned();
+                let mut selected = current_text.clone();
+                let mut picked = false;
+                ui.horizontal(|ui| {
+                    ui.label(&label);
+                    egui::ComboBox::from_id_source(&id)
+                        .selected_text(selected.clone())
+                        .show_ui(ui, |ui| {
+                            for choice in choices.iter().filter_map(|c| c.as_str()) {
+                                if ui
+                                    .selectable_value(&mut selected, choice.to_owned(), choice)
+                                    .changed()
+                                {
+                                    picked = true;
+                                }
+                            }
+                        });
+                });
+                return if picked && selected != current_text {
+                    change(serde_json::json!(selected))
+                } else {
+                    None
+                };
+            }
+            // Free-form string: the engine's validator is the authority.
+            let mut text = current.as_str().unwrap_or_default().to_owned();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(&label);
+                changed = ui
+                    .add(egui::TextEdit::singleline(&mut text).desired_width(140.0))
+                    .changed();
+            });
+            if changed {
+                return change(serde_json::json!(text));
+            }
+            None
+        }
+        _ => param_text_field(ui, &id, &label, &current, kind, nullable, drafts).and_then(change),
+    }
+}
+
+/// Text field whose contents are parsed before they are committed — nullable
+/// numbers (empty box = engine default) and numeric arrays. Unparseable input
+/// stays in the draft, so a half-typed `1.` or `1, 2,` is not fought across
+/// frames; nothing reaches the project until the text is a complete value.
+fn param_text_field(
+    ui: &mut Ui,
+    id: &str,
+    label: &str,
+    committed: &serde_json::Value,
+    kind: &str,
+    nullable: bool,
+    drafts: &mut HashMap<String, String>,
+) -> Option<serde_json::Value> {
+    let canonical = match kind {
+        "float[]" | "int[]" => committed
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    // 6000.0 reads better as "6000" in an editable box.
+                    .map(|item| {
+                        item.as_f64()
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| item.to_string())
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
+        _ => committed
+            .as_f64()
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+    };
+    let mut text = drafts
+        .entry(id.to_owned())
+        .or_insert_with(|| canonical.clone())
+        .clone();
+    let mut committed_value = None;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(120.0)
+                .hint_text(if nullable { "default" } else { "" }),
+        );
+        if response.changed() {
+            committed_value = parse_param_text(&text, kind, nullable);
+        }
+    });
+    drafts.insert(id.to_owned(), text);
+    committed_value
+}
+
+/// Parse a text field into a params value; `None` means "not a complete value
+/// yet" (keep the draft). An empty box is the engine default when nullable.
+fn parse_param_text(text: &str, kind: &str, nullable: bool) -> Option<serde_json::Value> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return nullable.then_some(serde_json::Value::Null);
+    }
+    match kind {
+        "float" => trimmed
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(|value| serde_json::json!(value)),
+        "int" => trimmed
+            .parse::<i64>()
+            .ok()
+            .map(|value| serde_json::json!(value)),
+        "float[]" => {
+            let mut values = Vec::new();
+            for part in trimmed.split(',') {
+                let value = part.trim().parse::<f64>().ok()?;
+                if !value.is_finite() {
+                    return None;
+                }
+                values.push(value);
+            }
+            Some(serde_json::json!(values))
+        }
+        "int[]" => {
+            let mut values = Vec::new();
+            for part in trimmed.split(',') {
+                values.push(part.trim().parse::<i64>().ok()?);
+            }
+            Some(serde_json::json!(values))
+        }
+        _ => None,
+    }
+}
+
+/// Write a root-level param into the project's params object.
+fn insert_root_param(params: &mut serde_json::Value, key: &str, value: serde_json::Value) {
+    if !params.is_object() {
+        *params = serde_json::Value::Object(serde_json::Map::new());
+    }
+    if let Some(map) = params.as_object_mut() {
+        map.insert(key.to_owned(), value);
+    }
+}
+
+/// Write a section field, materializing the section from its engine defaults
+/// first so the sibling fields keep the values a render would really have used.
+fn insert_section_param(
+    params: &mut serde_json::Value,
+    section: &str,
+    defaults: &serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) {
+    if !params.is_object() {
+        *params = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let Some(map) = params.as_object_mut() else {
+        return;
+    };
+    let entry = map
+        .entry(section.to_owned())
+        .or_insert_with(|| defaults.clone());
+    if !entry.is_object() {
+        *entry = defaults.clone();
+    }
+    if let Some(section_map) = entry.as_object_mut() {
+        section_map.insert(key.to_owned(), value);
+    }
+}
+
+#[cfg(test)]
+mod params_tests {
+    use super::*;
+
+    /// A miniature schema shaped exactly like `terrain.params_schema`, with one
+    /// field per widget type the bridge can emit.
+    fn test_schema() -> serde_json::Value {
+        serde_json::json!({
+            "excluded": [
+                { "key": "size_px", "reason": "output size (viewport / export dialog)" },
+                { "key": "vt", "reason": "requires an open virtual-texture store" }
+            ],
+            "sections": [
+                {
+                    "key": "root",
+                    "editable": true,
+                    "defaults": {},
+                    "fields": [
+                        { "key": "exposure", "type": "float", "nullable": false, "default": 1.0 },
+                        { "key": "msaa_samples", "type": "int", "nullable": false, "default": 1 },
+                        { "key": "ibl_enabled", "type": "bool", "nullable": false, "default": true },
+                        {
+                            "key": "albedo_mode",
+                            "type": "str",
+                            "nullable": false,
+                            "default": "colormap",
+                            "choices": ["colormap", "mix", "material"]
+                        },
+                        { "key": "culling", "type": "str", "nullable": false, "default": "frustum" },
+                        {
+                            "key": "clip",
+                            "type": "float[]",
+                            "nullable": true,
+                            "default": [0.1, 6000.0]
+                        },
+                        {
+                            "key": "nodata_height_below",
+                            "type": "float",
+                            "nullable": true,
+                            "default": null
+                        }
+                    ]
+                },
+                {
+                    "key": "shadows",
+                    "editable": true,
+                    "defaults": { "technique": "PCSS", "resolution": 4096 },
+                    "fields": [
+                        {
+                            "key": "technique",
+                            "type": "str",
+                            "nullable": false,
+                            "default": "PCSS",
+                            "choices": ["HARD", "PCSS"]
+                        },
+                        {
+                            "key": "resolution",
+                            "type": "int",
+                            "nullable": false,
+                            "default": 4096
+                        }
+                    ]
+                }
+            ]
+        })
+    }
+
+    /// Lay the pages out twice in a headless egui context: every widget type
+    /// must render without panicking and without inventing edits. (Collapsed
+    /// section bodies are only laid out on screen, so this covers the root
+    /// fields plus the shared header/excluded chrome.)
+    #[test]
+    fn param_pages_render_headlessly_without_inventing_edits() {
+        let schema = test_schema();
+        let params = serde_json::json!({});
+        let mut drafts = HashMap::new();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(420.0, 700.0),
+            )),
+            ..Default::default()
+        };
+        for frame in 0..2 {
+            let mut changes = None;
+            let _ = ctx.run(input.clone(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    changes = Some(params_pages(
+                        ui,
+                        &schema,
+                        Some("msaa_samples must be 1, 2, 4, or 8"),
+                        &params,
+                        &mut drafts,
+                    ));
+                });
+            });
+            let changes = changes.expect("panel ran");
+            assert!(
+                changes.is_empty(),
+                "frame {frame}: laying out the pages must not produce edits, got {changes:?}"
+            );
+        }
+        // The parse-on-commit fields got their canonical text as a draft.
+        assert_eq!(
+            drafts.get("param_root_clip").map(String::as_str),
+            Some("0.1, 6000")
+        );
+        assert_eq!(
+            drafts
+                .get("param_root_nodata_height_below")
+                .map(String::as_str),
+            Some("")
+        );
+        // Values that are not editable in a page leave no draft behind.
+        assert!(!drafts.contains_key("param_root_exposure"));
+    }
+
+    #[test]
+    fn title_case_builds_headers_from_schema_keys() {
+        assert_eq!(title_case("shadows"), "Shadows");
+        assert_eq!(title_case("height_curve_mode"), "Height Curve Mode");
+        assert_eq!(title_case("pom"), "Pom");
+        assert_eq!(title_case(""), "");
+    }
+
+    #[test]
+    fn parse_param_text_waits_for_complete_values() {
+        // Plain numbers commit as soon as they parse.
+        assert_eq!(
+            parse_param_text("1.5", "float", false),
+            Some(serde_json::json!(1.5))
+        );
+        // "1." is a complete number, "-" is not: the draft must survive.
+        assert_eq!(
+            parse_param_text("1.", "float", false),
+            Some(serde_json::json!(1.0))
+        );
+        assert_eq!(parse_param_text("-", "float", false), None);
+        assert_eq!(parse_param_text("", "float", false), None);
+        // An empty box means "engine default" only where null is legal.
+        assert_eq!(
+            parse_param_text("", "float", true),
+            Some(serde_json::Value::Null)
+        );
+        // Arrays: a trailing comma is still being typed.
+        assert_eq!(
+            parse_param_text("0.1, 6000", "float[]", false),
+            Some(serde_json::json!([0.1, 6000.0]))
+        );
+        assert_eq!(parse_param_text("1,2,", "float[]", false), None);
+        assert_eq!(
+            parse_param_text("", "float[]", true),
+            Some(serde_json::Value::Null)
+        );
+        // Non-finite values never reach the project.
+        assert_eq!(parse_param_text("inf", "float", false), None);
+    }
+
+    #[test]
+    fn section_edits_materialize_the_engine_defaults() {
+        let defaults = serde_json::json!({ "resolution": 4096, "cascades": 3 });
+        let mut params = serde_json::json!({});
+        insert_section_param(
+            &mut params,
+            "shadows",
+            &defaults,
+            "cascades",
+            serde_json::json!(2),
+        );
+        assert_eq!(
+            params,
+            serde_json::json!({ "shadows": { "resolution": 4096, "cascades": 2 } }),
+            "the first edit to a section must keep its engine defaults"
+        );
+        insert_section_param(
+            &mut params,
+            "shadows",
+            &defaults,
+            "resolution",
+            serde_json::json!(1024),
+        );
+        assert_eq!(
+            params,
+            serde_json::json!({ "shadows": { "resolution": 1024, "cascades": 2 } }),
+            "later edits must not re-materialize over earlier ones"
+        );
+
+        insert_root_param(&mut params, "exposure", serde_json::json!(1.5));
+        assert_eq!(params["exposure"], serde_json::json!(1.5));
+
+        // A malformed params document is repaired, never silently dropped.
+        let mut broken = serde_json::Value::Null;
+        insert_root_param(&mut broken, "z_scale", serde_json::json!(2.0));
+        assert_eq!(broken, serde_json::json!({ "z_scale": 2.0 }));
     }
 }

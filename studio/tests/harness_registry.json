@@ -92,6 +92,22 @@
       "studio_ops": ["rig.bake"],
       "parity_test": "studio::engine::tests::parity_ingest::rig_bake_orbit_yields_monotonic_renderer_keyframes",
       "notes": "Bakes in scatter-source units then rescales keyframe radii by terrain_span / source.terrain_width into renderer units; timeline replays a center-locked orbit camera (target-carrying playback lands with M4/M10)."
+    },
+    {
+      "capability": "terrain-render-params-pages",
+      "workstream": "W1",
+      "milestone": "M4",
+      "engine_surface": [
+        "terrain_params.make_terrain_params_config",
+        "terrain_params.TerrainRenderParams",
+        "terrain_params.ShadowSettings",
+        "terrain_params.SkySettings",
+        "TerrainRenderer.render_terrain_pbr_pom"
+      ],
+      "examples": ["examples/terrain_demo.py"],
+      "studio_ops": ["terrain.params_schema", "terrain.params_validate", "terrain.render"],
+      "parity_test": "studio::engine::tests::parity_ingest::terrain_params_schema_covers_the_engine_demo_surface",
+      "notes": "Schema is introspected from the engine's own signature plus every nested settings dataclass (21 root params, 26 sections, engine enum choices, effective defaults), so new parameters appear without a Rust change. Every terrain_demo.py flag is classified as a page field, a section field, a pinned param reported in `excluded` with a reason, or a non-params demo knob; unclassified flags fail the test. Validation runs the engine's constructors, so its error text is shown verbatim and the renderer only receives params it accepted. Known gap: colormap_srgb / output_srgb_eotf are TerrainRenderParams fields that the config factory does not accept (the demo assigns them after construction)."
     }
   ]
 }
