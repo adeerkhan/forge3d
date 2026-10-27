@@ -570,3 +570,121 @@ fn scene_compile_document_semantics() {
 
     engine.shutdown();
 }
+
+/// M5: the certificate lifecycle — a terrain render signed to a path writes
+/// the deterministic JSON, and `certificate.verify` validates it against the
+/// development key. A tampered payload must fail.
+#[test]
+fn certificate_lifecycle() {
+    let (engine, events) = spawn_ready();
+
+    let dem = fuji_dem();
+    engine.send(Command::LoadTerrain { path: dem });
+    wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| matches!(e, Event::TerrainLoaded { .. }).then_some(()),
+        "TerrainLoaded",
+    );
+
+    let out = std::env::temp_dir().join("studio-cert-frame.png");
+    let cert = std::env::temp_dir().join("studio-cert-frame.json");
+    let _ = std::fs::remove_file(&cert);
+    let render_params = serde_json::json!({
+        "width": 160, "height": 120,
+        "camera": {"phi_deg": 135.0, "theta_deg": 58.0, "radius": 6000.0,
+                   "fov_deg": 54.0},
+        "sun": {"azimuth_deg": 138.0, "elevation_deg": 24.0, "intensity": 2.4},
+        "out_png": out.to_string_lossy(),
+    });
+
+    // Signed render: the op writes the deterministic certificate JSON.
+    let mut signed_params = render_params.clone();
+    signed_params["certificate_path"] = serde_json::json!(cert.to_string_lossy());
+    let job = engine.call("terrain.render", signed_params);
+    wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| match e {
+            Event::JobDone { job: done, .. } if *done == job => Some(()),
+            Event::JobFailed {
+                job: done, message, ..
+            } if *done == job => {
+                panic!("signed terrain render failed: {message}");
+            }
+            _ => None,
+        },
+        "terrain.render(signed)",
+    );
+    let cert_text = std::fs::read_to_string(&cert).expect("certificate JSON written");
+    let cert_json: serde_json::Value = serde_json::from_str(&cert_text).expect("cert parses");
+    assert!(
+        cert_json
+            .get("signature")
+            .and_then(|s| s.get("sig"))
+            .is_some(),
+        "certificate carries a signature block"
+    );
+
+    // Verification passes for the dev-signed file...
+    let job = engine.call(
+        "certificate.verify",
+        serde_json::json!({ "path": cert.to_string_lossy() }),
+    );
+    let valid = wait_for(
+        &events,
+        Duration::from_secs(60),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("valid").and_then(|v| v.as_bool()),
+            _ => None,
+        },
+        "certificate.verify(valid)",
+    );
+    assert!(valid, "dev-signed certificate must verify");
+
+    // ...and a tampered payload hash must fail.
+    let mut tampered = cert_json.clone();
+    tampered["payload_sha256"] = serde_json::json!(format!("{:0>64}", "0"));
+    let tampered_path = std::env::temp_dir().join("studio-cert-tampered.json");
+    std::fs::write(&tampered_path, serde_json::to_string(&tampered).unwrap())
+        .expect("write tampered cert");
+    let job = engine.call(
+        "certificate.verify",
+        serde_json::json!({ "path": tampered_path.to_string_lossy() }),
+    );
+    let valid = wait_for(
+        &events,
+        Duration::from_secs(60),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("valid").and_then(|v| v.as_bool()),
+            _ => None,
+        },
+        "certificate.verify(tampered)",
+    );
+    assert!(!valid, "tampered certificate must fail");
+
+    // The diagnostics snapshot exposes the ledger + memory telemetry shape.
+    let job = engine.call("diagnostics.snapshot", serde_json::json!({}));
+    let snapshot = wait_for(
+        &events,
+        Duration::from_secs(60),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => Some(result.clone()),
+            _ => None,
+        },
+        "diagnostics.snapshot",
+    );
+    assert!(snapshot
+        .get("degradations")
+        .and_then(|d| d.as_array())
+        .is_some());
+    assert!(snapshot.get("memory").and_then(|m| m.as_object()).is_some());
+
+    engine.shutdown();
+}

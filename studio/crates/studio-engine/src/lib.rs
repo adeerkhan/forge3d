@@ -37,6 +37,9 @@ pub enum Command {
     SetSun(SunParams),
     /// Named colormap (forge3d registry key) for terrain rendering.
     SetColormap(Option<String>),
+    /// M5: sign a RenderCertificate for every terrain render (writes the
+    /// deterministic JSON next to the scratch frame).
+    SetCertificate(bool),
     /// M4: project-level `TerrainRenderParams` overrides for the terrain
     /// viewport (validated by `terrain.params_validate` before they arrive).
     SetRenderParams(serde_json::Value),
@@ -779,6 +782,7 @@ def _op_terrain_render(p):
         "overlays": [overlay],
     })
     config = make_terrain_params_config(**kwargs)
+    certificate = p.get("certificate_path")
     frame = _renderer.render_terrain_pbr_pom(
         material_set=_material,
         env_maps=_ibl,
@@ -786,9 +790,13 @@ def _op_terrain_render(p):
         heightmap=_heightmap,
         target=None,
         water_mask=None,
+        certificate=str(certificate) if certificate else None,
     )
     frame.save(str(p["out_png"]))
-    return {"png": str(p["out_png"]), "terrain_span": span}
+    result = {"png": str(p["out_png"]), "terrain_span": span}
+    if certificate:
+        result["certificate_path"] = str(certificate)
+    return result
 
 
 def _op_terrain_clear(p):
@@ -1084,6 +1092,61 @@ def _op_scene_compile(p):
         "diagnostics": diagnostics,
         "layer_count": len(layers_out),
     }
+
+
+# --- ops: provenance, diagnostics & determinism (M5) --------------------------
+
+def _op_certificate_verify(p):
+    """Verify a signed RenderCertificate against the development signing key.
+
+    In-process renders sign with the deterministic dev seed (certificate.py's
+    documented non-production key), so verification derives the matching
+    public key rather than trusting anything embedded in the file.
+    """
+    import hashlib
+    from forge3d import _ed25519
+    from forge3d.certificate import verify, payload_sha256, _dev_signing_seed
+    cert_path = p["path"]
+    cert = json.loads(open(cert_path, "rb").read())
+    pubkey = _ed25519.public_key_from_private(_dev_signing_seed())
+    valid = verify(cert, pubkey)
+    return {
+        "valid": bool(valid),
+        # The payload digest is computed over the canonical signed view; the
+        # written JSON carries it inside the signature block, not verbatim.
+        "payload_sha256": payload_sha256(cert),
+        "signed_with": "development key",
+    }
+
+
+def _op_diagnostics_snapshot(p):
+    """Degradation ledger + GPU memory telemetry, exactly as recorded."""
+    from forge3d import _degradation
+    return {
+        "degradations": _degradation.snapshot(),
+        "memory": f3d.mem.memory_metrics(),
+    }
+
+
+def _op_determinism_check(p):
+    """Render the current terrain twice with identical parameters and compare
+    SHA-256 over the PNG bytes. Honest about scope: this is a two-run check
+    inside one process with one backend — not a cross-machine guarantee.
+    """
+    import hashlib
+    if _heightmap is None:
+        raise RuntimeError("no terrain loaded")
+    out_a = p["out_a"]
+    out_b = p["out_b"]
+    _op_terrain_render({"width": p.get("width", 320), "height": p.get("height", 240),
+                        "camera": p["camera"], "sun": p["sun"],
+                        "out_png": out_a})
+    _op_terrain_render({"width": p.get("width", 320), "height": p.get("height", 240),
+                        "camera": p["camera"], "sun": p["sun"],
+                        "out_png": out_b})
+    sha_a = hashlib.sha256(open(out_a, "rb").read()).hexdigest()
+    sha_b = hashlib.sha256(open(out_b, "rb").read()).hexdigest()
+    return {"sha_a": sha_a, "sha_b": sha_b, "match": sha_a == sha_b}
 
 def _op_mapscene_render(p):
     """Render a recipe JSON through MapScene.render (the certified path)."""
@@ -1602,6 +1665,9 @@ _OPS = {
     "presets.list": _op_presets_list,
     "presets.get": _op_presets_get,
     "datasets.list": _op_datasets_list,
+    "certificate.verify": _op_certificate_verify,
+    "diagnostics.snapshot": _op_diagnostics_snapshot,
+    "determinism.check": _op_determinism_check,
     "dataset.inspect": _op_dataset_inspect,
     "rig.bake": _op_rig_bake,
 }
@@ -1725,6 +1791,7 @@ struct WorkerState {
     camera: CameraParams,
     sun: SunParams,
     colormap: Option<String>,
+    request_certificate: bool,
     /// M4: project-level terrain params handed to `terrain.render`.
     render_params: serde_json::Value,
     terrain_visible: bool,
@@ -1903,6 +1970,7 @@ fn run_worker(
         camera: CameraParams::default(),
         sun: SunParams::default(),
         colormap: None,
+        request_certificate: false,
         render_params: serde_json::Value::Object(serde_json::Map::new()),
         terrain_visible: true,
         dirty: true,
@@ -1979,6 +2047,9 @@ fn run_worker(
                 engine.colormap = colormap;
                 engine.dirty = true;
             }
+            Command::SetCertificate(request) => {
+                engine.request_certificate = request;
+            }
             Command::SetRenderParams(params) => {
                 engine.render_params = params;
                 engine.dirty = true;
@@ -2048,6 +2119,12 @@ fn render_terrain_png(
     if !engine.terrain_visible {
         return Err("terrain layer is hidden".to_owned());
     }
+    // M5: a signed certificate per render lands next to the output frame.
+    let certificate_path = engine.request_certificate.then(|| {
+        let path = out.with_extension("cert.json");
+        let _ = std::fs::remove_file(&path);
+        path
+    });
     dispatch(
         py,
         engine.bridge.bind(py),
@@ -2072,6 +2149,9 @@ fn render_terrain_png(
             "params": engine.render_params,
             "hdr_path": engine.hdr_path.to_string_lossy(),
             "out_png": out.to_string_lossy(),
+            "certificate_path": certificate_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
         }),
     )
     .map(|_| ())

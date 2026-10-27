@@ -299,10 +299,10 @@ Engine surface: `certificate.py`, `provenance.py`, `_ed25519.py`, `_canonical_js
 
 | Studio capability | Exposed as | Harness example |
 |---|---|---|
-| Render certificates on every render *(MapScene: delivered)* | Bottom ▸ Certificates + status chip | `certificate.py`, `provenance_demo.py` |
+| Render certificates on every render *(landed 2026-10-27: terrain + MapScene render to path, dev-key verification op, tamper rejection, Certificates dock tab)* | Bottom ▸ Certificates + status chip | `certificate.py`, `provenance_demo.py` |
 | Per-pixel provenance overlay | Viewport layer toggle | `provenance.py` |
-| Determinism panel (canonical frame, SHA-256, backend pinning) | `Tools ▸ Determinism check…` + Statistics | `determinism.py` |
-| Degradation ledger | Statistics — never silently degrade | `_degradation.py`, `diagnostics.py` |
+| Determinism check *(landed 2026-10-27: Tools menu — two-run SHA-256 comparison of the live frame, in-process; backend pinning via env)* | `Tools ▸ Determinism check…` + Statistics | `determinism.py` |
+| Degradation ledger + memory telemetry *(landed 2026-10-27: `diagnostics.snapshot` op + Statistics dock tab)* | Statistics — never silently degrade | `_degradation.py`, `diagnostics.py` |
 | Engine scene bundles (distinct from Studio projects) | `File ▸ Export ▸ Scene bundle…` | `bundle.py` |
 | Anamnesis warm-store cache for sequences | Render queue + cache inspector | `anamnesis.py` |
 | Render-pass composition | `Render ▸ Compositor…` (later) | `render_pass.py`, `turkiye_river_basins_3d.py` |
@@ -347,7 +347,7 @@ Engine surface: `viewer.py`, `viewer_ipc.py`, `viewer_contract.py`, `_viewer_bin
 | Undo/redo command stack over the document (snapshot per gesture) | U1 *(landed)* |
 | Selection-driven Inspector per layer kind; M4 parameter pages re-homed; **`scene.compile` (document → SceneRecipe) landed** — templates materialize document rows, renders compile from the document, per-kind editors (raster/vector/labels) patch layer style, unrenderable kinds surface honest compile diagnostics | U2 *(landed 2026-10-27, parity-locked)* |
 | Viewport tools, 3D navigation gizmo, HUD (zoom, scale bar, safe frame), compare mode *(landed 2026-10-27 — gizmo maths unit-tested, presets+gizmo share one mapping, inverted camera-preset convention fixed; cursor world-coords and geodesic measure arrive with engine pick/measure ops)* | U3 *(landed)* |
-| Bottom dock: timeline, console, certificates, statistics | U0 (tabs) / M5 (content) |
+| Bottom dock: timeline, console, certificates, statistics | U0 (tabs) / M5 *(content landed 2026-10-27)* |
 | Examples gallery with tiers and one-click scenes | U4 |
 
 ### W10 — Examples port

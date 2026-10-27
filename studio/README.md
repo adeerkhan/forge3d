@@ -228,6 +228,15 @@ Milestones from GUI.md section 12:
       fixtures are materialized with a disclosed `git lfs pull` background
       fetch, and missing fixtures surface the exact remedy instead of a
       raw engine error.
+- [x] **M5. Certificates & diagnostics** — every terrain render can be
+      signed to a deterministic certificate JSON (`Render ▸ Request
+      certificate`); MapScene certificates carry the payload SHA-256; the
+      new Certificates dock tab lists session certificates with one-click
+      `certificate.verify` (dev-key derivation, tamper rejection tested);
+      the Statistics tab shows the degradation ledger + memory telemetry
+      via `diagnostics.snapshot`; `Tools ▸ Determinism check…` renders the
+      current frame twice and compares SHA-256 (parity test
+      `certificate_lifecycle`).
 - [ ] **5. Embedded viewport** — current viewport is a CPU readback of the
       engine's render (~100–300 ms/frame, on-demand, not continuous).
       True embedding = repairing the native `TerrainScene` drift or sharing

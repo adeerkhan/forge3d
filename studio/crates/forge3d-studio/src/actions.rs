@@ -26,6 +26,7 @@ pub enum Menu {
     Scene,
     Layer,
     Render,
+    Tools,
     Help,
 }
 
@@ -48,6 +49,7 @@ impl Menu {
             Menu::Scene => "Scene",
             Menu::Layer => "Layer",
             Menu::Render => "Render",
+            Menu::Tools => "Tools",
             Menu::Help => "Help",
         }
     }
@@ -162,6 +164,11 @@ pub enum Action {
     LayerToBottom,
     // Render
     RenderFrame,
+    /// M5: sign a RenderCertificate for every terrain render.
+    RequestCertificate,
+    // Tools
+    /// M5: render the current terrain twice and compare SHA-256.
+    DeterminismCheck,
     // Help
     ShowExamples,
     ShowShortcuts,
@@ -538,6 +545,24 @@ pub const ACTIONS: &[ActionDef] = &[
         menu: Some(Menu::Render),
         checkable: false,
         need: Need::Nothing,
+    },
+    ActionDef {
+        action: Action::RequestCertificate,
+        label: "Request certificate",
+        icon: None,
+        shortcut: None,
+        menu: Some(Menu::Render),
+        checkable: true,
+        need: Need::Nothing,
+    },
+    ActionDef {
+        action: Action::DeterminismCheck,
+        label: "Determinism check…",
+        icon: Some(Icon::Activity),
+        shortcut: None,
+        menu: Some(Menu::Tools),
+        checkable: false,
+        need: Need::Layers,
     },
     // ---------------------------------------------------------------- Help
     ActionDef {

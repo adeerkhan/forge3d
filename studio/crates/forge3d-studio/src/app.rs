@@ -45,6 +45,15 @@ struct LogEntry {
     text: String,
 }
 
+/// M5: one signed RenderCertificate the session produced.
+#[derive(Debug, Clone)]
+struct CertRecord {
+    source: String,
+    path: PathBuf,
+    payload_sha256: Option<String>,
+    verified: Option<bool>,
+}
+
 struct PendingRender {
     width: u32,
     height: u32,
@@ -67,6 +76,14 @@ enum PendingJob {
     SceneCompile {
         render_after: bool,
     },
+    /// M5: verify one stored certificate.
+    CertificateVerify {
+        index: usize,
+    },
+    /// M5: two-run SHA-256 comparison of the current frame.
+    DeterminismCheck,
+    /// M5: degradation ledger + memory telemetry snapshot.
+    DiagnosticsSnapshot,
     MapSceneValidate,
     ColormapsList,
     PresetsList,
@@ -304,6 +321,12 @@ pub struct StudioApp {
     /// U3: A/B split against the last exported frame.
     compare_mode: bool,
     compare_split: f32,
+    /// M5: request a signed RenderCertificate for every terrain render.
+    request_certificate: bool,
+    /// M5: certificates seen this session (path + sha + verify state).
+    certificates: Vec<CertRecord>,
+    /// M5: last diagnostics snapshot (degradations + memory).
+    stats: Option<serde_json::Value>,
     compare_texture: Option<TextureHandle>,
     /// U4: the gallery entry waiting for its dataset to load.
     pending_example: Option<crate::ui::examples::ExampleEntry>,
@@ -415,6 +438,9 @@ impl StudioApp {
             show_safe_frame: false,
             compare_mode: false,
             compare_split: 0.5,
+            request_certificate: false,
+            certificates: Vec::new(),
+            stats: None,
             compare_texture: None,
             pending_example: None,
             pending_mapscene_camera: None,
@@ -560,6 +586,30 @@ impl StudioApp {
                     rgba,
                     render_ms,
                 } => {
+                    // M5: the worker writes a signed certificate next to the
+                    // scratch frame when signing is on; record it.
+                    if self.request_certificate {
+                        let cert_path = std::env::temp_dir().join("forge3d-studio-frame.cert.json");
+                        if let Ok(text) = std::fs::read_to_string(&cert_path) {
+                            let sha = serde_json::from_str::<serde_json::Value>(&text)
+                                .ok()
+                                .and_then(|cert| {
+                                    cert.get("payload_sha256")
+                                        .and_then(|v| v.as_str().map(String::from))
+                                });
+                            let record = CertRecord {
+                                source: "terrain".to_owned(),
+                                path: cert_path.clone(),
+                                payload_sha256: sha,
+                                verified: None,
+                            };
+                            if !self.certificates.iter().any(|c| {
+                                c.path == record.path && c.payload_sha256 == record.payload_sha256
+                            }) {
+                                self.certificates.push(record);
+                            }
+                        }
+                    }
                     let texture = self.viewport_texture.get_or_insert_with(|| {
                         ctx.load_texture(
                             "studio-viewport",
@@ -746,6 +796,25 @@ impl StudioApp {
                 self.mapscene.last_backend = Some(backend.clone());
                 self.mapscene.last_diagnostics = diagnostics;
                 self.mapscene.last_metadata = Some(result.clone());
+                if let Some(cert_path) = result
+                    .get("certificate_path")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                {
+                    let sha = std::fs::read_to_string(&cert_path)
+                        .ok()
+                        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                        .and_then(|cert| {
+                            cert.get("payload_sha256")
+                                .and_then(|v| v.as_str().map(String::from))
+                        });
+                    self.certificates.push(CertRecord {
+                        source: "mapscene".to_owned(),
+                        path: cert_path,
+                        payload_sha256: sha,
+                        verified: None,
+                    });
+                }
                 match png {
                     Some(path) => {
                         if self.load_png_to_viewport(&path, ctx) {
@@ -768,6 +837,44 @@ impl StudioApp {
                     .to_owned();
                 self.mapscene.last_status = Some(status.clone());
                 self.set_status(format!("MapScene validation: {status}"));
+            }
+            Some(PendingJob::CertificateVerify { index }) => {
+                let valid = result.get("valid").and_then(|v| v.as_bool());
+                if let Some(cert) = self.certificates.get_mut(index) {
+                    cert.verified = valid;
+                    if let Some(sha) = result.get("payload_sha256").and_then(|v| v.as_str()) {
+                        cert.payload_sha256 = Some(sha.to_owned());
+                    }
+                }
+                match valid {
+                    Some(true) => self.set_status("Certificate verified (development key)."),
+                    Some(false) => {
+                        self.push_error("Certificate", "signature INVALID for this certificate")
+                    }
+                    None => self.push_error("Certificate", "verify returned no verdict"),
+                }
+            }
+            Some(PendingJob::DeterminismCheck) => {
+                let sha_a = result.get("sha_a").and_then(|v| v.as_str()).unwrap_or("?");
+                let sha_b = result.get("sha_b").and_then(|v| v.as_str()).unwrap_or("?");
+                let matched = result
+                    .get("match")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if matched {
+                    self.set_status(format!(
+                        "Determinism check: PASS — both runs produced {sha_a}"
+                    ));
+                } else {
+                    self.push_error(
+                        "Determinism check",
+                        format!("FAIL — run A {sha_a} vs run B {sha_b}"),
+                    );
+                }
+            }
+            Some(PendingJob::DiagnosticsSnapshot) => {
+                self.stats = Some(result.clone());
+                self.set_status("Statistics refreshed");
             }
             Some(PendingJob::ColormapsList) => {
                 if let Some(list) = result.get("colormaps").and_then(|c| c.as_array()) {
@@ -1029,10 +1136,17 @@ impl StudioApp {
             return;
         };
         let out = std::env::temp_dir().join("forge3d-studio-mapscene.png");
+        let cert_path = std::env::temp_dir().join("forge3d-studio-mapscene-cert.json");
+        if self.mapscene_certificate {
+            let _ = std::fs::remove_file(&cert_path);
+        }
         let params = serde_json::json!({
             "recipe_json": serde_json::to_string(&recipe).unwrap_or_default(),
             "out_png": out.to_string_lossy(),
             "certificate": self.mapscene_certificate,
+            "certificate_path": self
+                .mapscene_certificate
+                .then(|| cert_path.to_string_lossy().into_owned()),
         });
         let job = self.engine.call("mapscene.render", params);
         self.pending_jobs.insert(job, PendingJob::MapSceneRender);
@@ -2355,7 +2469,9 @@ impl StudioApp {
                         {
                             self.dock.bottom_collapsed = false;
                         }
-                        for (index, name) in ["Timeline", "Console"].iter().enumerate() {
+                        for (index, name) in
+                            ["Timeline", "Console", "Certs", "Stats"].iter().enumerate()
+                        {
                             if ui
                                 .selectable_label(self.dock.bottom_tab == index, *name)
                                 .clicked()
@@ -2375,8 +2491,11 @@ impl StudioApp {
             .frame(dock::panel_frame(&self.tokens))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let _ =
-                        dock::tab_strip(ui, &["Timeline", "Console"], &mut self.dock.bottom_tab);
+                    let _ = dock::tab_strip(
+                        ui,
+                        &["Timeline", "Console", "Certs", "Stats"],
+                        &mut self.dock.bottom_tab,
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
                             .small_button("▾")
@@ -2390,10 +2509,138 @@ impl StudioApp {
                 dock::strip_separator(ui);
                 match self.dock.bottom_tab {
                     0 => self.timeline_tab(ui),
-                    _ => self.console_tab(ui),
+                    1 => self.console_tab(ui),
+                    2 => self.certificates_tab(ui),
+                    _ => self.statistics_tab(ui),
                 }
             });
         self.dock.bottom_height = response.response.rect.height();
+    }
+
+    /// M5: certificates produced this session, with one-click verification.
+    fn certificates_tab(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label(theme::group_label("Render certificates"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("refresh stats")
+                    .on_hover_text("Fetch the degradation ledger and memory telemetry")
+                    .clicked()
+                {
+                    let job = self
+                        .engine
+                        .call("diagnostics.snapshot", serde_json::json!({}));
+                    self.pending_jobs
+                        .insert(job, PendingJob::DiagnosticsSnapshot);
+                }
+            });
+        });
+        ui.separator();
+        if self.certificates.is_empty() {
+            ui.weak(
+                "No certificates yet — enable 'Request render certificate' (Render menu)                  or the MapScene scene panel, then render.",
+            );
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_source("certs_scroll")
+            .show(ui, |ui| {
+                for (index, cert) in self.certificates.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let icon = self
+                            .icons
+                            .texture(ui.ctx(), crate::icons::Icon::CircleCheck);
+                        ui.add(egui::Image::new(&icon).fit_to_exact_size(egui::vec2(13.0, 13.0)));
+                        ui.label(theme::meta(&cert.source));
+                        if let Some(sha) = &cert.payload_sha256 {
+                            ui.monospace(theme::meta(&sha[..sha.len().min(20)]))
+                                .on_hover_text(sha);
+                        }
+                        match cert.verified {
+                            Some(true) => {
+                                ui.label(
+                                    egui::RichText::new("verified")
+                                        .small()
+                                        .color(Color32::from_rgb(120, 200, 140)),
+                                );
+                            }
+                            Some(false) => {
+                                ui.label(
+                                    egui::RichText::new("INVALID")
+                                        .small()
+                                        .color(ui.visuals().error_fg_color),
+                                );
+                            }
+                            None => {
+                                if ui.small_button("verify").clicked() {
+                                    let job = self.engine.call(
+                                        "certificate.verify",
+                                        serde_json::json!({
+                                            "path": cert.path.to_string_lossy()
+                                        }),
+                                    );
+                                    self.pending_jobs
+                                        .insert(job, PendingJob::CertificateVerify { index });
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+    }
+
+    /// M5: adapter, degradations and the memory ledger. Never silently
+    /// degrade — the ledger is the engine's own record.
+    fn statistics_tab(&mut self, ui: &mut Ui) {
+        if let Some(gpu) = &self.gpu {
+            ui.label(theme::group_label("Device"));
+            ui.label(theme::meta(format!(
+                "{} · {}{}",
+                gpu.adapter,
+                gpu.backend,
+                if gpu.software_fallback {
+                    " · software fallback"
+                } else {
+                    ""
+                }
+            )));
+        }
+        if let Some(ms) = self.last_frame_ms {
+            ui.label(theme::meta(format!("last terrain frame: {ms:.0} ms")));
+        }
+        ui.add_space(4.0);
+        let Some(stats) = &self.stats else {
+            ui.weak("Press 'refresh stats' in the Certificates tab (or render) to collect.");
+            return;
+        };
+        ui.label(theme::group_label("Degradation ledger"));
+        let degradations = stats
+            .get("degradations")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+        if degradations.is_empty() {
+            ui.weak("No degradations recorded — nothing was silently disabled.");
+        } else {
+            for d in degradations {
+                let kind = d.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+                let name = d.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let consequence = d.get("consequence").and_then(|v| v.as_str()).unwrap_or("");
+                ui.label(
+                    egui::RichText::new(format!("{kind}/{name}: {consequence}"))
+                        .small()
+                        .color(ui.visuals().warn_fg_color),
+                );
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(theme::group_label("Memory ledger"));
+        if let Some(memory) = stats.get("memory").and_then(|m| m.as_object()) {
+            for (key, value) in memory {
+                let v = value.as_f64().unwrap_or(0.0);
+                ui.label(theme::meta(format!("{key}: {v:.0}")));
+            }
+        }
     }
 
     /// Timeline tab: the camera-rig bake, keyframe scrubber and playback.
@@ -3205,6 +3452,38 @@ impl StudioApp {
             }
             Action::ToggleSafeFrame => {
                 self.show_safe_frame = !self.show_safe_frame;
+            }
+            Action::RequestCertificate => {
+                self.request_certificate = !self.request_certificate;
+                self.engine
+                    .send(Command::SetCertificate(self.request_certificate));
+                self.set_status(if self.request_certificate {
+                    "Every terrain render will now be signed (dev key; see the Certs tab)"
+                } else {
+                    "Terrain renders are no longer signed"
+                });
+            }
+            Action::DeterminismCheck => {
+                let params = serde_json::json!({
+                    "width": 320,
+                    "height": 240,
+                    "camera": {
+                        "phi_deg": self.project.camera.phi_deg,
+                        "theta_deg": self.project.camera.theta_deg,
+                        "radius": self.project.camera.radius,
+                        "fov_deg": self.project.camera.fov_deg,
+                        "target": [self.project.camera.target_x, 0.0,
+                                   self.project.camera.target_z],
+                    },
+                    "sun": {
+                        "azimuth_deg": self.project.sun.azimuth_deg,
+                        "elevation_deg": self.project.sun.elevation_deg,
+                        "intensity": self.project.sun.intensity,
+                    },
+                });
+                let job = self.engine.call("determinism.check", params);
+                self.pending_jobs.insert(job, PendingJob::DeterminismCheck);
+                self.set_status("Determinism check: rendering the frame twice…");
             }
             Action::ToggleCompare => {
                 self.compare_mode = !self.compare_mode;
