@@ -1,7 +1,9 @@
 //! Forge3D Studio entry point.
 
+mod actions;
 mod app;
 mod icons;
+mod ui;
 
 use eframe::NativeOptions;
 use egui::ViewportBuilder;

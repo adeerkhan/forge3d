@@ -10,23 +10,37 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, ColorImage, Context, Image, Response, Sense, Slider, TextureHandle, TextureOptions, Ui,
+    Color32, ColorImage, Context, Response, Sense, Slider, TextureHandle, TextureOptions, Ui,
 };
 use studio_engine::{Command, EngineHandle, Event};
 use studio_project::{CameraParams, Project, SunParams};
 
+use crate::actions::Action;
 use crate::icons::Icons;
+use crate::ui::dock::{self, DockState, LayoutPreset};
+use crate::ui::palette::Palette;
+use crate::ui::status::StatusParts;
+use crate::ui::theme::{self, Tokens};
+use crate::ui::{menu, shortcuts, status, toolbar};
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(120);
 /// M4: how long a terrain-parameter edit settles before it is re-validated
 /// by the engine (typing a value should not dispatch one job per keystroke).
 const PARAMS_VALIDATE_DEBOUNCE: Duration = Duration::from_millis(700);
 const MAX_STATUS_ERRORS: usize = 4;
+/// Console history kept in the bottom dock.
+const MAX_LOG_LINES: usize = 500;
 
 struct GpuInfo {
     adapter: String,
     backend: String,
     software_fallback: bool,
+}
+
+/// One line in the bottom dock's Console tab.
+struct LogEntry {
+    error: bool,
+    text: String,
 }
 
 struct PendingRender {
@@ -240,14 +254,29 @@ pub struct StudioApp {
     /// M4: text being typed into a parse-on-commit field (nullable numbers
     /// and arrays), so partial input like "1." survives across frames.
     param_drafts: HashMap<String, String>,
+    /// U0: dock sizes, active tab per slot and the last layout preset.
+    dock: DockState,
+    /// U0: the dock state we last wrote to disk (save on change, not per frame).
+    saved_dock: DockState,
+    /// U0: design tokens for the active theme (panel fill, density, accent).
+    tokens: Tokens,
+    /// U0: `Ctrl+K` command palette.
+    palette: Palette,
+    /// U0: the keyboard reference window.
+    shortcuts_open: bool,
+    /// U0: console lines (newest last), fed by errors and status messages.
+    log: VecDeque<LogEntry>,
+    /// Last renderer preset applied to the scene (shown in the Inspector).
+    applied_preset: Option<String>,
 }
 
 impl StudioApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        cc.egui_ctx.set_visuals(egui::Visuals::dark());
+        theme::apply(&cc.egui_ctx, true);
         let icons = Icons::load(&cc.egui_ctx, Color32::from_white_alpha(230));
 
         let (engine, events) = EngineHandle::spawn();
+        let dock = DockState::load();
         Self {
             engine,
             events,
@@ -288,6 +317,13 @@ impl StudioApp {
             params_validate_due: None,
             params_validate_pending: false,
             param_drafts: HashMap::new(),
+            saved_dock: dock.clone(),
+            dock,
+            tokens: Tokens::dark(),
+            palette: Palette::default(),
+            shortcuts_open: false,
+            log: VecDeque::new(),
+            applied_preset: None,
         }
     }
 
@@ -300,10 +336,25 @@ impl StudioApp {
         while self.errors.len() > MAX_STATUS_ERRORS {
             self.errors.pop_front();
         }
+        let text = self.errors.back().cloned().unwrap_or_default();
+        self.push_log(true, text);
     }
 
     fn set_status(&mut self, message: impl Into<String>) {
-        self.status = Some(message.into());
+        let message = message.into();
+        self.status = Some(message.clone());
+        self.push_log(false, message);
+    }
+
+    /// Append a line to the Console tab, keeping a bounded history.
+    fn push_log(&mut self, error: bool, text: String) {
+        if self.log.back().map(|entry| entry.text.as_str()) == Some(text.as_str()) {
+            return;
+        }
+        self.log.push_back(LogEntry { error, text });
+        while self.log.len() > MAX_LOG_LINES {
+            self.log.pop_front();
+        }
     }
 
     fn sync_window_title(&self, ctx: &Context) {
@@ -321,17 +372,8 @@ impl StudioApp {
 
     fn apply_theme(&mut self, ctx: &Context, dark: bool) {
         self.theme_dark = dark;
-        ctx.set_visuals(if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        });
-        let visuals = if dark {
-            egui::Visuals::dark()
-        } else {
-            egui::Visuals::light()
-        };
-        ctx.set_visuals(visuals);
+        self.tokens = Tokens::for_theme(dark);
+        theme::apply(ctx, dark);
         let fg = if dark {
             Color32::from_white_alpha(230)
         } else {
@@ -652,6 +694,7 @@ impl StudioApp {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?")
                     .to_owned();
+                self.applied_preset = Some(name.clone());
                 self.set_status(format!(
                     "Preset '{name}' → sun az {azimuth:.0}° el {elevation:.0}° (intensity ×0.5); exposure/shadows stay manual"
                 ));
@@ -1369,157 +1412,207 @@ impl StudioApp {
 
     // -------------------------------------------------------------- panels
 
+    /// Menu bar + toolbar (GUI.md III.1/III.2). Every entry is an [`Action`]
+    /// from the registry, so the menus, the toolbar, the shortcut window and
+    /// the command palette cannot drift apart.
     fn top_panel(&mut self, ctx: &Context) {
+        let mut chosen: Option<Action> = None;
         egui::TopBottomPanel::top("studio_top").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New Project").clicked() {
-                        ui.close_menu();
-                        self.new_project();
-                    }
-                    if ui.button("Open Project…").clicked() {
-                        ui.close_menu();
-                        self.open_project();
-                    }
-                    if ui.button("Save Project").clicked() {
-                        ui.close_menu();
-                        self.save_project(false);
-                    }
-                    if ui.button("Save Project As…").clicked() {
-                        ui.close_menu();
-                        self.save_project(true);
-                    }
-                    ui.separator();
-                    if ui.button("Import Dataset…").clicked() {
-                        ui.close_menu();
-                        self.import_dataset();
-                    }
-                    if ui.button("Export PNG…").clicked() {
-                        ui.close_menu();
-                        self.export_png();
-                    }
-                });
-                ui.menu_button("View", |ui| {
-                    if ui.checkbox(&mut self.theme_dark, "Dark theme").changed() {
-                        self.apply_theme(ui.ctx(), self.theme_dark);
-                    }
-                });
-                ui.menu_button("Help", |ui| {
-                    if ui.button("About Forge3D Studio").clicked() {
-                        ui.close_menu();
-                        self.set_status(
-                            "Forge3D Studio 0.1.0 — desktop app for the Forge3D engine",
-                        );
-                    }
-                });
-            });
-
             ui.add_space(2.0);
+            if let Some(action) = menu::menu_bar(
+                ui,
+                |action| self.action_checked(action),
+                |action| self.action_enabled(action),
+            ) {
+                chosen = Some(action);
+            }
+            ui.add_space(1.0);
+            let project = self
+                .project_path
+                .as_ref()
+                .map(|path| path.display().to_string());
             ui.horizontal(|ui| {
-                if self
-                    .icon_button(ui, "folder-open", "Open project (Ctrl+O)")
-                    .clicked()
+                if let Some(action) =
+                    toolbar::toolbar(ui, &self.icons, self.tokens.icon + 2.0, |action| {
+                        self.action_enabled(action)
+                    })
                 {
-                    self.open_project();
+                    chosen = Some(action);
                 }
-                if self
-                    .icon_button(ui, "save", "Save project (Ctrl+S)")
+                toolbar::project_chip(ui, project.as_deref(), self.busy);
+            });
+            ui.add_space(2.0);
+        });
+        if let Some(action) = chosen {
+            self.run_action(ctx, action);
+        }
+    }
+
+    /// Whether a toggle-style action is currently on (theme, layout preset).
+    fn action_checked(&self, action: Action) -> bool {
+        match action {
+            Action::ThemeDark => self.theme_dark,
+            Action::ThemeLight => !self.theme_dark,
+            Action::LayoutDefault => self.dock.preset == LayoutPreset::Default,
+            Action::LayoutCartography => self.dock.preset == LayoutPreset::Cartography,
+            Action::LayoutModeling => self.dock.preset == LayoutPreset::Modeling,
+            Action::LayoutData => self.dock.preset == LayoutPreset::Data,
+            _ => false,
+        }
+    }
+
+    /// Whether an action can run right now. Actions that only need the app
+    /// (not a dataset) stay enabled; ones that need a terrain are disabled and
+    /// explain themselves on hover via the status bar.
+    fn action_enabled(&self, action: Action) -> bool {
+        match action {
+            Action::ExportPng | Action::RenderFrame | Action::FitView => {
+                self.project.terrain.is_some()
+            }
+            Action::CameraTop
+            | Action::CameraFront
+            | Action::CameraRight
+            | Action::CameraIso
+            | Action::CameraReset
+            | Action::ZoomIn
+            | Action::ZoomOut => self.project.terrain.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Left dock: Layers (the scene objects), Scene (mode + MapScene recipe),
+    /// Assets (colormaps and presets). Collapses to a 30 px rail.
+    fn left_panel(&mut self, ctx: &Context) {
+        const TABS: [&str; 3] = ["Layers", "Scene", "Assets"];
+        if self.dock.left_collapsed {
+            egui::SidePanel::left("studio_dock_left_rail")
+                .exact_width(30.0)
+                .resizable(false)
+                .frame(dock::panel_frame(&self.tokens))
+                .show(ctx, |ui| {
+                    ui.add_space(2.0);
+                    if dock::collapsed_rail(ui, &TABS, &mut self.dock.left_tab) {
+                        self.dock.left_collapsed = false;
+                    }
+                });
+            return;
+        }
+        let response = egui::SidePanel::left("studio_dock_left")
+            .resizable(true)
+            .default_width(self.dock.left_width)
+            .width_range(self.tokens.dock_min..=460.0)
+            .frame(dock::panel_frame(&self.tokens))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let _ = dock::tab_strip(ui, &TABS, &mut self.dock.left_tab);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("«")
+                            .on_hover_text("Collapse the left dock")
+                            .clicked()
+                        {
+                            self.dock.left_collapsed = true;
+                        }
+                    });
+                });
+                dock::strip_separator(ui);
+                egui::ScrollArea::vertical()
+                    .id_source("left_dock_scroll")
+                    .show(ui, |ui| match self.dock.left_tab {
+                        0 => self.terrain_section(ui),
+                        1 => self.scene_section(ui),
+                        _ => self.assets_section(ui),
+                    });
+            });
+        self.dock.left_width = response.response.rect.width();
+    }
+
+    /// Scene tab: the render pipeline switch plus the MapScene recipe editor.
+    fn scene_section(&mut self, ui: &mut Ui) {
+        ui.label(theme::group_label("Pipeline"));
+        let mode_before = self.scene_mode;
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.scene_mode, SceneMode::Terrain, "Terrain");
+            ui.selectable_value(&mut self.scene_mode, SceneMode::MapScene, "MapScene");
+        });
+        if self.scene_mode != mode_before {
+            self.project.scene_mode = match self.scene_mode {
+                SceneMode::Terrain => studio_project::SCENE_MODE_TERRAIN.to_owned(),
+                SceneMode::MapScene => studio_project::SCENE_MODE_MAPSCENE.to_owned(),
+            };
+            self.project_dirty = true;
+        }
+        ui.add_space(8.0);
+        match self.scene_mode {
+            SceneMode::Terrain => {
+                ui.weak("Terrain scenes are edited through Layers and the Inspector.");
+                ui.weak("MapScene adds cartographic layers, labels and furniture.");
+            }
+            SceneMode::MapScene => self.mapscene_section(ui),
+        }
+    }
+
+    /// Assets tab: the engine's colormap and renderer-preset registries.
+    fn assets_section(&mut self, ui: &mut Ui) {
+        ui.label(theme::group_label("Colormaps"));
+        if self.colormaps.is_empty() {
+            ui.weak("no colormaps loaded");
+        }
+        let current = self
+            .project
+            .colormap
+            .clone()
+            .unwrap_or_else(|| "default".to_owned());
+        egui::ScrollArea::vertical()
+            .id_source("assets_colormaps")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                let is_default = self.project.colormap.is_none();
+                if ui
+                    .selectable_label(is_default, "default (relief)")
                     .clicked()
+                    && !is_default
                 {
-                    self.save_project(false);
-                }
-                ui.separator();
-                if self
-                    .icon_button(ui, "file-input", "Import dataset (Ctrl+I)")
-                    .clicked()
-                {
-                    self.import_dataset();
-                }
-                if self
-                    .icon_button(ui, "file-output", "Export PNG (Ctrl+E)")
-                    .clicked()
-                {
-                    self.export_png();
-                }
-                ui.separator();
-                if self
-                    .icon_button(ui, "rotate-ccw", "Reset camera to fit dataset")
-                    .clicked()
-                {
-                    self.reset_camera();
-                }
-                if self
-                    .icon_button(ui, "orbit", "Camera presets and navigation")
-                    .clicked()
-                {
-                    self.set_status("Drag the viewport to orbit; scroll to zoom");
-                }
-                ui.separator();
-                if self
-                    .icon_button(ui, "image", "Render current viewport")
-                    .clicked()
-                {
+                    self.project.colormap = None;
+                    self.project_dirty = true;
+                    self.engine.send(Command::SetColormap(None));
                     self.invalidate_viewport();
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.busy {
-                        ui.add(egui::Spinner::new().size(14.0));
-                        ui.weak("working…");
+                let names = self.colormaps.clone();
+                for name in names {
+                    let selected = current == name;
+                    if ui.selectable_label(selected, &name).clicked() && !selected {
+                        self.project.colormap = Some(name.clone());
+                        self.project_dirty = true;
+                        self.engine.send(Command::SetColormap(Some(name.clone())));
+                        self.invalidate_viewport();
                     }
-                    if let Some(project) =
-                        self.project_path.as_ref().map(|p| p.display().to_string())
-                    {
-                        ui.weak(project);
-                    } else {
-                        ui.weak("unsaved project");
-                    }
-                });
-            });
-        });
-    }
-
-    fn icon_button(&self, ui: &mut Ui, name: &str, tooltip: &str) -> Response {
-        let texture = self.icons.get(ui.ctx(), name);
-        let response = ui
-            .add(
-                egui::Button::image(Image::new(&texture).fit_to_exact_size(egui::vec2(18.0, 18.0)))
-                    .fill(Color32::TRANSPARENT),
-            )
-            .on_hover_text(tooltip);
-        response
-    }
-
-    fn left_panel(&mut self, ctx: &Context) {
-        egui::SidePanel::left("studio_scene")
-            .resizable(true)
-            .default_width(260.0)
-            .show(ctx, |ui| {
-                ui.heading("Scene");
-                ui.separator();
-
-                let mode_before = self.scene_mode;
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.scene_mode, SceneMode::Terrain, "Terrain");
-                    ui.selectable_value(&mut self.scene_mode, SceneMode::MapScene, "MapScene");
-                });
-                if self.scene_mode != mode_before {
-                    self.project.scene_mode = match self.scene_mode {
-                        SceneMode::Terrain => studio_project::SCENE_MODE_TERRAIN.to_owned(),
-                        SceneMode::MapScene => studio_project::SCENE_MODE_MAPSCENE.to_owned(),
-                    };
-                    self.project_dirty = true;
                 }
-                ui.separator();
-
-                match self.scene_mode {
-                    SceneMode::Terrain => self.terrain_section(ui),
-                    SceneMode::MapScene => self.mapscene_section(ui),
+            });
+        ui.add_space(10.0);
+        ui.label(theme::group_label("Renderer presets"));
+        if self.presets.is_empty() {
+            ui.weak("no presets loaded");
+        }
+        let presets = self.presets.clone();
+        egui::ScrollArea::vertical()
+            .id_source("assets_presets")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for name in presets {
+                    if ui
+                        .selectable_label(false, &name)
+                        .on_hover_text("Map the preset's first directional light onto the sun")
+                        .clicked()
+                    {
+                        self.apply_preset(name);
+                    }
                 }
             });
     }
 
     fn terrain_section(&mut self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("Layers").strong());
+        ui.label(theme::group_label("Scene layers"));
         let terrain_present = self.project.terrain.is_some();
         // Visibility is app-side for now: a hidden layer shows the
         // empty-state message instead of the last rendered frame.
@@ -1537,7 +1630,7 @@ impl StudioApp {
         }
         ui.add_space(8.0);
 
-        ui.label(egui::RichText::new("Datasets").strong());
+        ui.label(theme::group_label("Datasets"));
         match &self.project.terrain {
             Some(terrain) => {
                 egui::Grid::new("dataset_info")
@@ -1722,34 +1815,155 @@ impl StudioApp {
     }
 
     fn right_panel(&mut self, ctx: &Context) {
-        egui::SidePanel::right("studio_properties")
+        let response = egui::SidePanel::right("studio_dock_right")
             .resizable(true)
-            .default_width(280.0)
+            .default_width(self.dock.right_width)
+            .width_range(self.tokens.dock_min..=520.0)
+            .frame(dock::panel_frame(&self.tokens))
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.heading("Properties");
-                    ui.separator();
-
-                    match self.scene_mode {
-                        SceneMode::Terrain => {
-                            self.camera_section(ui);
-                            ui.add_space(8.0);
-                            self.sun_section(ui);
-                            ui.add_space(8.0);
-                            self.render_params_section(ui);
-                            ui.add_space(8.0);
-                            self.rig_section(ui);
-                            ui.add_space(8.0);
-                            self.export_section(ui);
-                        }
-                        SceneMode::MapScene => {
-                            self.mapscene_camera_section(ui);
-                            ui.add_space(8.0);
-                            self.export_section(ui);
-                        }
-                    }
-                });
+                let _ = dock::tab_strip(ui, &["Inspector", "Render"], &mut self.dock.right_tab);
+                dock::strip_separator(ui);
+                egui::ScrollArea::vertical()
+                    .id_source("right_dock_scroll")
+                    .show(ui, |ui| match self.dock.right_tab {
+                        0 => self.inspector_tab(ui),
+                        _ => self.render_params_section(ui),
+                    });
             });
+        self.dock.right_width = response.response.rect.width();
+    }
+
+    /// Inspector tab: properties of what is selected. Until U1 introduces
+    /// selectable layers, the selection is the scene itself (camera, sun,
+    /// output), which is exactly what the old "Properties" column mixed in.
+    fn inspector_tab(&mut self, ui: &mut Ui) {
+        match self.scene_mode {
+            SceneMode::Terrain => {
+                self.camera_section(ui);
+                ui.add_space(10.0);
+                self.sun_section(ui);
+            }
+            SceneMode::MapScene => self.mapscene_camera_section(ui),
+        }
+        ui.add_space(10.0);
+        self.export_section(ui);
+    }
+
+    /// Bottom dock: the rig timeline and the console. Collapses to one row.
+    fn bottom_dock(&mut self, ctx: &Context) {
+        if self.dock.bottom_collapsed {
+            egui::TopBottomPanel::bottom("studio_dock_bottom_rail")
+                .exact_height(24.0)
+                .frame(dock::panel_frame(&self.tokens))
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("▴")
+                            .on_hover_text("Expand the bottom dock")
+                            .clicked()
+                        {
+                            self.dock.bottom_collapsed = false;
+                        }
+                        for (index, name) in ["Timeline", "Console"].iter().enumerate() {
+                            if ui
+                                .selectable_label(self.dock.bottom_tab == index, *name)
+                                .clicked()
+                            {
+                                self.dock.bottom_tab = index;
+                                self.dock.bottom_collapsed = false;
+                            }
+                        }
+                    });
+                });
+            return;
+        }
+        let response = egui::TopBottomPanel::bottom("studio_dock_bottom")
+            .resizable(true)
+            .default_height(self.dock.bottom_height)
+            .height_range(90.0..=440.0)
+            .frame(dock::panel_frame(&self.tokens))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let _ =
+                        dock::tab_strip(ui, &["Timeline", "Console"], &mut self.dock.bottom_tab);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .small_button("▾")
+                            .on_hover_text("Collapse the bottom dock")
+                            .clicked()
+                        {
+                            self.dock.bottom_collapsed = true;
+                        }
+                    });
+                });
+                dock::strip_separator(ui);
+                match self.dock.bottom_tab {
+                    0 => self.timeline_tab(ui),
+                    _ => self.console_tab(ui),
+                }
+            });
+        self.dock.bottom_height = response.response.rect.height();
+    }
+
+    /// Timeline tab: the camera-rig bake, keyframe scrubber and playback.
+    fn timeline_tab(&mut self, ui: &mut Ui) {
+        egui::ScrollArea::vertical()
+            .id_source("timeline_scroll")
+            .show(ui, |ui| self.rig_section(ui));
+    }
+
+    /// Console tab: every engine error and status line, newest last.
+    fn console_tab(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.label(theme::group_label("Engine log"));
+            ui.weak(format!("{} line(s)", self.log.len()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .add_enabled(!self.log.is_empty(), egui::Button::new("Clear").small())
+                    .clicked()
+                {
+                    self.log.clear();
+                }
+            });
+        });
+        ui.add_space(2.0);
+        if self.log.is_empty() {
+            ui.weak("No engine messages yet — imports, renders and errors appear here.");
+            return;
+        }
+        egui::ScrollArea::vertical()
+            .id_source("console_scroll")
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for entry in &self.log {
+                    let text = egui::RichText::new(&entry.text).monospace().size(11.5);
+                    let text = if entry.error {
+                        text.color(ui.visuals().error_fg_color)
+                    } else {
+                        text
+                    };
+                    ui.label(text);
+                }
+            });
+    }
+
+    /// Label describing the current selection for the status bar.
+    fn selection_label(&self) -> Option<String> {
+        match self.scene_mode {
+            SceneMode::Terrain => self.project.terrain.as_ref().map(|terrain| {
+                let name = terrain
+                    .path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| terrain.path.display().to_string());
+                format!("{name} · {}×{}", terrain.width, terrain.height)
+            }),
+            SceneMode::MapScene => self
+                .mapscene
+                .last_status
+                .as_ref()
+                .map(|status| format!("MapScene · {status}")),
+        }
     }
 
     /// Recipe camera editing in MapScene mode: patches the serialized
@@ -1788,7 +2002,7 @@ impl StudioApp {
     }
 
     fn camera_section(&mut self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("Camera").strong());
+        ui.label(theme::group_label("Camera"));
         let before = self.project.camera;
         let camera: &mut CameraParams = &mut self.project.camera;
         ui.add(Slider::new(&mut camera.phi_deg, 0.0..=360.0).text("Orbit φ"));
@@ -1810,7 +2024,7 @@ impl StudioApp {
     }
 
     fn sun_section(&mut self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("☀ Sun").strong());
+        ui.label(theme::group_label("Sun"));
         let before = self.project.sun;
         let sun: &mut SunParams = &mut self.project.sun;
         ui.add(Slider::new(&mut sun.azimuth_deg, 0.0..=360.0).text("Azimuth"));
@@ -1822,63 +2036,27 @@ impl StudioApp {
             self.invalidate_viewport();
         }
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Colormap").strong());
-        let mut current = self
-            .project
-            .colormap
-            .clone()
-            .unwrap_or_else(|| "default".to_owned());
-        egui::ComboBox::from_id_source("terrain_colormap")
-            .selected_text(current.clone())
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_value(&mut current, "default".to_owned(), "default (relief)")
-                    .changed()
-                {
-                    self.project.colormap = None;
-                }
-                for name in &self.colormaps {
-                    if ui
-                        .selectable_value(&mut current, name.clone(), name)
-                        .changed()
-                    {
-                        self.project.colormap = Some(name.clone());
-                    }
-                }
+        egui::Grid::new("active_look")
+            .num_columns(2)
+            .spacing([10.0, 3.0])
+            .show(ui, |ui| {
+                ui.label(theme::meta("Colormap"));
+                ui.label(
+                    self.project
+                        .colormap
+                        .clone()
+                        .unwrap_or_else(|| "default (relief)".to_owned()),
+                );
+                ui.end_row();
+                ui.label(theme::meta("Preset"));
+                ui.label(
+                    self.applied_preset
+                        .clone()
+                        .unwrap_or_else(|| "none".to_owned()),
+                );
+                ui.end_row();
             });
-        if current
-            != self
-                .project
-                .colormap
-                .clone()
-                .unwrap_or_else(|| "default".to_owned())
-        {
-            self.project_dirty = true;
-            self.engine
-                .send(Command::SetColormap(self.project.colormap.clone()));
-            self.invalidate_viewport();
-        }
-        ui.add_space(4.0);
-        // W1: renderer presets map their first directional light onto this
-        // sun (see PendingJob::PresetApply); exposure/shadows stay manual.
-        ui.label(egui::RichText::new("Preset").strong());
-        if self.presets.is_empty() {
-            ui.weak("no presets loaded");
-        } else {
-            let mut chosen: Option<String> = None;
-            egui::ComboBox::from_id_source("terrain_preset")
-                .selected_text("apply preset…")
-                .show_ui(ui, |ui| {
-                    for name in &self.presets {
-                        if ui.selectable_label(false, name).clicked() {
-                            chosen = Some(name.clone());
-                        }
-                    }
-                });
-            if let Some(name) = chosen {
-                self.apply_preset(name);
-            }
-        }
+        ui.weak("Colormaps and presets live in the Assets tab of the left dock.");
     }
 
     /// M4: schema-driven `TerrainRenderParams` property pages.
@@ -1955,7 +2133,7 @@ impl StudioApp {
     /// W1: camera-rig spec, keyframe bake, timeline scrubber, playback, and
     /// sequence rendering.
     fn rig_section(&mut self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("Camera rig").strong());
+        ui.label(theme::group_label("Camera rig"));
         egui::ComboBox::from_id_source("rig_kind")
             .selected_text(self.rig.kind.clone())
             .show_ui(ui, |ui| {
@@ -2028,7 +2206,7 @@ impl StudioApp {
     }
 
     fn export_section(&mut self, ui: &mut Ui) {
-        ui.label(egui::RichText::new("Export").strong());
+        ui.label(theme::group_label("Export"));
         let export = &mut self.project.export;
         ui.horizontal(|ui| {
             ui.add(
@@ -2048,52 +2226,36 @@ impl StudioApp {
         }
     }
 
-    fn bottom_panel(&mut self, ctx: &Context) {
+    /// Status bar: adapter, frame time, selection, jobs, latest message.
+    fn status_panel(&mut self, ctx: &Context) {
+        let selection = self.selection_label();
+        let mut clear = false;
         egui::TopBottomPanel::bottom("studio_status").show(ctx, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                if let Some(gpu) = &self.gpu {
-                    let icon = self.icons.get(ui.ctx(), "cpu");
-                    ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(13.0, 13.0)));
-                    let label = if gpu.software_fallback {
-                        format!("{} (software fallback!)", gpu.adapter)
-                    } else {
-                        format!("{} ({})", gpu.adapter, gpu.backend)
-                    };
-                    ui.label(egui::RichText::new(label).weak());
-                    ui.separator();
-                }
-                if let Some(ms) = self.last_frame_ms {
-                    ui.label(egui::RichText::new(format!("frame {ms:.0} ms")).weak());
-                }
-                if self.busy {
-                    ui.add(egui::Spinner::new().size(12.0));
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(latest) = self.errors.back() {
-                        let icon = self.icons.get(ui.ctx(), "circle-alert");
-                        ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(13.0, 13.0)))
-                            .on_hover_text(
-                                self.errors.iter().cloned().collect::<Vec<_>>().join("\n"),
-                            );
-                        ui.label(
-                            egui::RichText::new(latest.clone())
-                                .color(ui.visuals().error_fg_color)
-                                .small(),
-                        )
-                        .on_hover_text(latest.clone());
-                        if ui.small_button("clear").clicked() {
-                            self.errors.clear();
-                        }
-                    } else if let Some(status) = &self.status {
-                        let icon = self.icons.get(ui.ctx(), "circle-check");
-                        ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(13.0, 13.0)));
-                        ui.label(egui::RichText::new(status.clone()).weak().small());
-                    }
-                });
-            });
-            ui.add_space(2.0);
+            ui.add_space(1.0);
+            let parts = StatusParts {
+                adapter: self.gpu.as_ref().map(|gpu| gpu.adapter.as_str()),
+                backend: self.gpu.as_ref().map(|gpu| gpu.backend.as_str()),
+                software: self
+                    .gpu
+                    .as_ref()
+                    .map(|gpu| gpu.software_fallback)
+                    .unwrap_or(false),
+                frame_ms: self.last_frame_ms,
+                busy: self.busy,
+                selection: selection.as_deref(),
+                status: self.status.as_deref(),
+                latest_error: self.errors.back().map(String::as_str),
+                error_count: self.errors.len(),
+            };
+            clear = status::status_bar(ui, &self.icons, &parts);
+            ui.add_space(1.0);
         });
+        if clear {
+            self.errors.clear();
+        }
+        if self.gpu.is_some() && self.last_frame_ms.is_none() && !self.busy {
+            ctx.request_repaint_after(Duration::from_millis(250));
+        }
     }
 
     fn viewport_panel(&mut self, ctx: &Context) {
@@ -2153,22 +2315,122 @@ impl StudioApp {
         }
     }
 
+    /// Dispatch the registry's shortcuts. Generated from [`crate::actions`], so
+    /// a new action's binding is live the moment it is declared, and plain-key
+    /// bindings never fire while a text field owns the keyboard.
     fn handle_shortcuts(&mut self, ctx: &Context) {
-        ctx.input(|i| {
-            let ctrl = i.modifiers.ctrl;
-            if ctrl && i.key_pressed(egui::Key::O) {
-                self.open_project();
+        let text_focused = ctx.memory(|memory| memory.focused().is_some());
+        let mut chosen = None;
+        for def in crate::actions::ACTIONS {
+            let Some(shortcut) = def.shortcut else {
+                continue;
+            };
+            if text_focused && !shortcut.ctrl && shortcut.key != egui::Key::F1 {
+                continue;
             }
-            if ctrl && i.key_pressed(egui::Key::S) {
-                self.save_project(false);
+            if ctx.input_mut(|input| input.consume_shortcut(&shortcut.to_egui())) {
+                chosen = Some(def.action);
+                break;
             }
-            if ctrl && i.key_pressed(egui::Key::I) {
-                self.import_dataset();
+        }
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) && self.palette.open {
+            self.palette.open = false;
+        }
+        if let Some(action) = chosen {
+            self.run_action(ctx, action);
+        }
+    }
+
+    /// Run one registry action. The match is exhaustive: declaring an action
+    /// without handling it does not compile.
+    fn run_action(&mut self, ctx: &Context, action: Action) {
+        match action {
+            Action::NewProject => self.new_project(),
+            Action::OpenProject => self.open_project(),
+            Action::SaveProject => self.save_project(false),
+            Action::SaveProjectAs => self.save_project(true),
+            Action::ImportDataset => self.import_dataset(),
+            Action::ExportPng => self.export_png(),
+            Action::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Action::ZoomIn => self.zoom_camera(1.25),
+            Action::ZoomOut => self.zoom_camera(0.8),
+            Action::FitView => self.fit_view(),
+            Action::CameraTop => self.set_view(135.0, 88.0),
+            Action::CameraFront => self.set_view(180.0, 12.0),
+            Action::CameraRight => self.set_view(90.0, 12.0),
+            Action::CameraIso => self.set_view(135.0, 45.0),
+            Action::CameraReset => self.reset_camera(),
+            Action::LayoutDefault => self.set_layout(LayoutPreset::Default),
+            Action::LayoutCartography => self.set_layout(LayoutPreset::Cartography),
+            Action::LayoutModeling => self.set_layout(LayoutPreset::Modeling),
+            Action::LayoutData => self.set_layout(LayoutPreset::Data),
+            Action::ResetLayout => {
+                self.dock = DockState::default();
+                self.persist_layout();
             }
-            if ctrl && i.key_pressed(egui::Key::E) {
-                self.export_png();
+            Action::ThemeDark => self.apply_theme(ctx, true),
+            Action::ThemeLight => self.apply_theme(ctx, false),
+            Action::RenderFrame => {
+                if self.project.terrain.is_some() {
+                    self.invalidate_viewport();
+                    self.set_status("Rendering the current view…");
+                } else {
+                    self.set_status(
+                        "No terrain loaded — use File ▸ Import dataset… to add a DEM first",
+                    );
+                }
             }
-        });
+            Action::ShowShortcuts => self.shortcuts_open = true,
+            Action::ShowAbout => self.set_status(format!(
+                "Forge3D Studio {} — embedded forge3d engine, bridge v2 (17 operations)",
+                env!("CARGO_PKG_VERSION")
+            )),
+            Action::OpenPalette => self.palette.toggle(),
+        }
+    }
+
+    fn set_layout(&mut self, preset: LayoutPreset) {
+        self.dock.apply_preset(preset);
+        self.persist_layout();
+    }
+
+    fn persist_layout(&mut self) {
+        self.dock.save();
+        self.saved_dock = self.dock.clone();
+    }
+
+    /// Zoom the orbit camera by `factor` (>1 zooms out, <1 zooms in).
+    fn zoom_camera(&mut self, factor: f32) {
+        if self.project.terrain.is_none() {
+            return;
+        }
+        self.project.camera.radius = (self.project.camera.radius * factor).clamp(10.0, 100_000.0);
+        self.push_camera();
+    }
+
+    /// Named camera direction (phi = orbit azimuth, theta = elevation).
+    fn set_view(&mut self, phi_deg: f32, theta_deg: f32) {
+        if self.project.terrain.is_none() {
+            return;
+        }
+        self.project.camera.phi_deg = phi_deg.clamp(0.0, 360.0);
+        self.project.camera.theta_deg = theta_deg.clamp(1.0, 89.0);
+        self.push_camera();
+    }
+
+    /// Re-fit the orbit radius to the loaded dataset, keeping the angles.
+    fn fit_view(&mut self) {
+        let Some(terrain) = &self.project.terrain else {
+            return;
+        };
+        self.project.camera.radius = (terrain.width.max(terrain.height) as f32) * 0.8;
+        self.push_camera();
+    }
+
+    fn push_camera(&mut self) {
+        self.project_dirty = true;
+        self.engine.send(Command::SetCamera(self.project.camera));
+        self.invalidate_viewport();
     }
 
     /// M3: the unified import dialog — per-format metadata preview from
@@ -2272,11 +2534,23 @@ impl eframe::App for StudioApp {
         self.tick_playback(ctx);
 
         self.top_panel(ctx);
-        self.bottom_panel(ctx);
+        self.status_panel(ctx);
+        self.bottom_dock(ctx);
         self.left_panel(ctx);
         self.right_panel(ctx);
         self.viewport_panel(ctx);
         self.import_window(ctx);
+        if let Some(action) = crate::ui::palette::window(ctx, &mut self.palette) {
+            self.run_action(ctx, action);
+        }
+        shortcuts::window(ctx, &mut self.shortcuts_open);
+
+        // Persist layout changes (splitter drags included) once they settle.
+        let (width, height) = (ctx.screen_rect().width(), ctx.screen_rect().height());
+        self.dock.clamp(width, height);
+        if self.dock != self.saved_dock {
+            self.persist_layout();
+        }
 
         // Kick the very first render once the GPU is up.
         if self.gpu.is_some() && self.viewport_texture.is_none() && self.pending_render.is_none() {
