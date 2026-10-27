@@ -127,7 +127,13 @@ pub enum Action {
     UngroupLayer,
     RenameLayer,
     SelectAllLayers,
+    // View — viewport tools (U3)
+    ToolOrbit,
+    ToolPan,
+    ToolZoom,
     // View
+    ToggleSafeFrame,
+    ToggleCompare,
     ZoomIn,
     ZoomOut,
     FitView,
@@ -443,6 +449,35 @@ pub const ACTIONS: &[ActionDef] = &[
     view(Action::ResetLayout, "Reset layout", None, None, false),
     view(Action::ThemeDark, "Theme: Dark", None, None, true),
     view(Action::ThemeLight, "Theme: Light", None, None, true),
+    view(
+        Action::ToolOrbit,
+        "Orbit tool",
+        Some(Icon::Orbit),
+        None,
+        true,
+    ),
+    view(Action::ToolPan, "Pan tool", Some(Icon::Move), None, true),
+    view(
+        Action::ToolZoom,
+        "Zoom tool",
+        Some(Icon::ZoomIn),
+        None,
+        true,
+    ),
+    view(
+        Action::ToggleSafeFrame,
+        "Safe frame",
+        Some(Icon::Frame),
+        None,
+        true,
+    ),
+    view(
+        Action::ToggleCompare,
+        "Compare with last export",
+        Some(Icon::Columns2),
+        None,
+        true,
+    ),
     // --------------------------------------------------------------- Scene
     scene(
         Action::AddTerrainLayer,
@@ -589,6 +624,11 @@ impl Action {
             Action::ExportPng,
             Action::RenderFrame,
             Action::FitView,
+            Action::ToolOrbit,
+            Action::ToolPan,
+            Action::ToolZoom,
+            Action::ToggleSafeFrame,
+            Action::ToggleCompare,
         ]
     }
 

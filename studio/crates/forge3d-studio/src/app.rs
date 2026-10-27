@@ -9,9 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{
-    Color32, ColorImage, Context, Response, Sense, Slider, TextureHandle, TextureOptions, Ui,
-};
+use egui::{Color32, ColorImage, Context, Response, Slider, TextureHandle, TextureOptions, Ui};
 use studio_engine::{Command, EngineHandle, Event};
 use studio_project::document::{DocHistory, LayerId, LayerKind};
 use studio_project::{CameraParams, Layer, Project, SunParams};
@@ -286,12 +284,56 @@ pub struct StudioApp {
     opacity_edit: Option<LayerId>,
     /// U4: the examples gallery window + its thumbnails.
     gallery: crate::ui::examples::GalleryState,
+    /// U4: in-flight `git lfs pull` for an example fixture (receiver end).
+    lfs_fetch: Option<std::sync::mpsc::Receiver<std::io::Result<bool>>>,
+    /// U3: the viewport tool owning the left mouse button.
+    viewport_tool: crate::ui::viewport::ViewportTool,
+    /// U3: draw the safe-frame overlay in the viewport.
+    show_safe_frame: bool,
+    /// U3: A/B split against the last exported frame.
+    compare_mode: bool,
+    compare_split: f32,
+    compare_texture: Option<TextureHandle>,
     /// U4: the gallery entry waiting for its dataset to load.
     pending_example: Option<crate::ui::examples::ExampleEntry>,
     /// U4: camera override for the next MapScene template build.
     pending_mapscene_camera: Option<serde_json::Value>,
     /// U4: render the MapScene recipe as soon as the template job returns.
     render_after_recipe: bool,
+}
+
+/// Resolve a dataset path that may be relative to the repository root.
+///
+/// Gallery scenes and project files reference engine fixtures like
+/// `assets/tif/Mount_Fuji_30m.tif`; those are only meaningful relative to
+/// the checkout, never the process CWD (which depends on how the binary was
+/// launched). Absolute paths pass through untouched; missing relative paths
+/// are returned unchanged so the engine's own error text stays honest.
+fn resolve_repo_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let candidate = root.join(path);
+    if candidate.exists() {
+        candidate.canonicalize().unwrap_or(candidate)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// True when a file exists but is an unresolved git-LFS pointer rather than
+/// its content (the fixture was not materialized with `git lfs pull`).
+fn is_lfs_pointer(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 32];
+    match file.read_exact(&mut head) {
+        Ok(()) => head.starts_with(b"version https://git-lfs"),
+        Err(_) => false,
+    }
 }
 
 impl StudioApp {
@@ -353,6 +395,12 @@ impl StudioApp {
             history: DocHistory::new(HISTORY_LIMIT),
             opacity_edit: None,
             gallery: crate::ui::examples::GalleryState::default(),
+            lfs_fetch: None,
+            viewport_tool: crate::ui::viewport::ViewportTool::Orbit,
+            show_safe_frame: false,
+            compare_mode: false,
+            compare_split: 0.5,
+            compare_texture: None,
             pending_example: None,
             pending_mapscene_camera: None,
             render_after_recipe: false,
@@ -1516,11 +1564,13 @@ impl StudioApp {
                 .as_ref()
                 .map(|path| path.display().to_string());
             ui.horizontal(|ui| {
-                if let Some(action) =
-                    toolbar::toolbar(ui, &self.icons, self.tokens.icon + 2.0, |action| {
-                        self.action_enabled(action)
-                    })
-                {
+                if let Some(action) = toolbar::toolbar(
+                    ui,
+                    &self.icons,
+                    self.tokens.icon + 2.0,
+                    |action| self.action_enabled(action),
+                    |action| self.action_checked(action),
+                ) {
                     chosen = Some(action);
                 }
                 toolbar::project_chip(ui, project.as_deref(), self.busy);
@@ -1541,6 +1591,11 @@ impl StudioApp {
             Action::LayoutCartography => self.dock.preset == LayoutPreset::Cartography,
             Action::LayoutModeling => self.dock.preset == LayoutPreset::Modeling,
             Action::LayoutData => self.dock.preset == LayoutPreset::Data,
+            Action::ToolOrbit => self.viewport_tool == crate::ui::viewport::ViewportTool::Orbit,
+            Action::ToolPan => self.viewport_tool == crate::ui::viewport::ViewportTool::Pan,
+            Action::ToolZoom => self.viewport_tool == crate::ui::viewport::ViewportTool::Zoom,
+            Action::ToggleSafeFrame => self.show_safe_frame,
+            Action::ToggleCompare => self.compare_mode,
             _ => false,
         }
     }
@@ -2560,30 +2615,139 @@ impl StudioApp {
         }
     }
 
+    /// Apply a camera preset through the shared gizmo mapping (U3).
+    fn apply_camera_preset(&mut self, action: Action) {
+        if self.project.terrain.is_none() {
+            return;
+        }
+        if let Some(camera) = crate::ui::viewport::preset_camera(action, &self.project.camera) {
+            self.project.camera = camera;
+            self.push_camera();
+        }
+    }
+
+    /// U3: pan the orbit target on the ground plane by screen pixels.
+    fn pan_target(&mut self, dx: f32, dy: f32) {
+        let camera = &self.project.camera;
+        let (right, _up, forward) =
+            crate::ui::viewport::camera_basis(camera.phi_deg, camera.theta_deg);
+        let wpp = crate::ui::viewport::world_width_at_target(camera)
+            / self.viewport_rect.width().max(1.0);
+        // Screen-right on the ground plane, and screen-up's ground shadow
+        // (the horizontal direction away from the camera).
+        let right_xz = glam::vec2(right.x, right.z);
+        let right_xz = if right_xz.length() > 1e-5 {
+            right_xz / right_xz.length()
+        } else {
+            glam::Vec2::X
+        };
+        let away_xz = -glam::vec2(forward.x, forward.z);
+        let away_xz = if away_xz.length() > 1e-5 {
+            away_xz / away_xz.length()
+        } else {
+            glam::Vec2::X
+        };
+        let world_dx = right_xz * (-dx * wpp) + away_xz * (dy * wpp);
+        let camera = &mut self.project.camera;
+        // Keep the target near the dataset; the engine's span is 6x the
+        // height domain, so half of that is a generous bound.
+        let bound = 5.0;
+        camera.target_x = (camera.target_x + world_dx.x).clamp(-bound, bound);
+        camera.target_z = (camera.target_z + world_dx.y).clamp(-bound, bound);
+        self.push_camera();
+        self.request_viewport_render();
+    }
+
     fn viewport_panel(&mut self, ctx: &Context) {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(12, 12, 14)))
             .show(ctx, |ui| {
                 self.viewport_rect = ui.available_rect_before_wrap();
                 let size = self.viewport_rect.size();
+                let rect = self.viewport_rect;
 
                 if let Some(texture) = &self.viewport_texture {
-                    let (rect, response) = ui.allocate_exact_size(size, Sense::click_and_drag());
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                        Color32::WHITE,
-                    );
+                    let (paint_rect, response) =
+                        ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+                    // U3 compare mode: A/B split against the last export.
+                    let split_x = rect.left() + rect.width() * self.compare_split.clamp(0.05, 0.95);
+                    if self.compare_mode {
+                        if let Some(compare) = &self.compare_texture {
+                            // Left of the split: current frame. Right: export.
+                            if split_x > paint_rect.left() {
+                                ui.painter().image(
+                                    texture.id(),
+                                    egui::Rect::from_min_max(
+                                        paint_rect.left_top(),
+                                        egui::pos2(split_x.min(paint_rect.right()), paint_rect.bottom()),
+                                    ),
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(
+                                            (split_x - paint_rect.left()) / paint_rect.width(),
+                                            1.0,
+                                        ),
+                                    ),
+                                    Color32::WHITE,
+                                );
+                            }
+                            let right_part = egui::Rect::from_min_max(
+                                egui::pos2(split_x.max(paint_rect.left()), paint_rect.top()),
+                                paint_rect.right_bottom(),
+                            );
+                            if right_part.width() > 1.0 {
+                                ui.painter().image(
+                                    compare.id(),
+                                    right_part,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(
+                                            (split_x - paint_rect.left()) / paint_rect.width(),
+                                            0.0,
+                                        ),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    Color32::WHITE,
+                                );
+                            }
+                            // Divider.
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(split_x, paint_rect.top()),
+                                    egui::pos2(split_x, paint_rect.bottom()),
+                                ],
+                                egui::Stroke::new(1.5_f32, Color32::from_white_alpha(160)),
+                            );
+                        } else {
+                            ui.painter().image(
+                                texture.id(),
+                                paint_rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                    } else {
+                        ui.painter().image(
+                            texture.id(),
+                            paint_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                    }
+
                     self.handle_viewport_input(&response);
+                    self.paint_hud(ui);
+                    self.paint_gizmo(ui);
+                    if self.show_safe_frame {
+                        Self::paint_safe_frame(ui, rect);
+                    }
                 } else {
-                    ui.allocate_rect(self.viewport_rect, Sense::hover());
+                    ui.allocate_rect(rect, egui::Sense::hover());
                     let message = if self.gpu.is_none() {
                         "Starting Forge3D engine…"
                     } else if self.project.terrain.is_some() {
                         "Rendering first frame…"
                     } else {
-                        "No terrain loaded — use File ▸ Import DEM… (or open a project)"
+                        "No terrain loaded — use Scene \u{25b8} Add layer \u{25b8} Terrain DEM… (or open an example)"
                     };
                     ui.centered_and_justified(|ui| {
                         ui.label(
@@ -2596,24 +2760,247 @@ impl StudioApp {
             });
     }
 
-    fn handle_viewport_input(&mut self, response: &Response) {
+    /// U3: zoom read-out, cursor read-out, scale bar and render time.
+    fn paint_hud(&self, ui: &mut Ui) {
+        use crate::ui::viewport as vp;
+        let Some(terrain) = self.project.terrain.as_ref() else {
+            return;
+        };
+        let camera = &self.project.camera;
+        let span = (terrain.height_max - terrain.height_min).abs().max(1.0) * 6.0;
+        let zoom = vp::zoom_percent(camera.radius, span * 1.65);
+        let (bar_world, bar_label) = vp::scale_bar(vp::world_width_at_target(camera), 0.2);
+        let bar_px = if vp::world_width_at_target(camera) > 0.0 {
+            (bar_world / vp::world_width_at_target(camera)) * self.viewport_rect.width()
+        } else {
+            0.0
+        };
+
+        let painter = ui.painter();
+        let origin = self.viewport_rect.left_bottom() + egui::vec2(12.0, -12.0);
+        let text = egui::RichText::new(format!(
+            "zoom {:.0}%{}",
+            zoom,
+            self.last_frame_ms
+                .map(|ms| format!("  ·  frame {:.0} ms", ms))
+                .unwrap_or_default(),
+        ))
+        .monospace()
+        .size(11.0)
+        .color(Color32::from_white_alpha(190));
+        painter.text(
+            origin + egui::vec2(0.0, -26.0),
+            egui::Align2::LEFT_BOTTOM,
+            text.text(),
+            egui::FontId::monospace(11.0),
+            Color32::from_white_alpha(190),
+        );
+        // Scale bar.
+        let bar_y = origin.y - 8.0;
+        painter.line_segment(
+            [
+                egui::pos2(origin.x, bar_y),
+                egui::pos2(origin.x + bar_px, bar_y),
+            ],
+            egui::Stroke::new(1.5_f32, Color32::from_white_alpha(190)),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(origin.x, bar_y - 4.0),
+                egui::pos2(origin.x, bar_y + 4.0),
+            ],
+            egui::Stroke::new(1.5_f32, Color32::from_white_alpha(190)),
+        );
+        painter.line_segment(
+            [
+                egui::pos2(origin.x + bar_px, bar_y - 4.0),
+                egui::pos2(origin.x + bar_px, bar_y + 4.0),
+            ],
+            egui::Stroke::new(1.5_f32, Color32::from_white_alpha(190)),
+        );
+        painter.text(
+            egui::pos2(origin.x + bar_px + 6.0, bar_y),
+            egui::Align2::LEFT_CENTER,
+            bar_label,
+            egui::FontId::monospace(11.0),
+            Color32::from_white_alpha(190),
+        );
+        // Scale-bar provenance note: derived from the orbit camera maths.
+        painter.text(
+            egui::pos2(origin.x, bar_y + 14.0),
+            egui::Align2::LEFT_CENTER,
+            "scale at target plane",
+            egui::FontId::monospace(9.0),
+            Color32::from_white_alpha(110),
+        );
+    }
+
+    /// U3: Blender-style navigation gizmo, top-right of the viewport.
+    fn paint_gizmo(&mut self, ui: &mut Ui) {
+        use crate::ui::viewport as vp;
+        use glam::Vec3;
+        let center = self.viewport_rect.right_top() - egui::vec2(52.0, 52.0);
+        let radius = 34.0;
+        let basis = vp::camera_basis(self.project.camera.phi_deg, self.project.camera.theta_deg);
+        let painter = ui.painter();
+        // Back hemisphere axes first, dimmed.
+        let axes = [
+            (vp::GizmoZone::PosX, Vec3::X, Color32::from_rgb(224, 94, 94)),
+            (
+                vp::GizmoZone::NegX,
+                -Vec3::X,
+                Color32::from_rgb(224, 94, 94),
+            ),
+            (
+                vp::GizmoZone::PosY,
+                Vec3::Y,
+                Color32::from_rgb(148, 214, 118),
+            ),
+            (
+                vp::GizmoZone::NegY,
+                -Vec3::Y,
+                Color32::from_rgb(148, 214, 118),
+            ),
+            (
+                vp::GizmoZone::PosZ,
+                Vec3::Z,
+                Color32::from_rgb(108, 150, 235),
+            ),
+            (
+                vp::GizmoZone::NegZ,
+                -Vec3::Z,
+                Color32::from_rgb(108, 150, 235),
+            ),
+        ];
+        let forward = basis.2;
+        let mut order: Vec<(vp::GizmoZone, Vec3, Color32)> =
+            axes.iter().map(|(z, a, c)| (*z, *a, *c)).collect();
+        order.sort_by_key(|(_z, axis, _c)| {
+            let depth = axis.dot(forward);
+            (depth * 1000.0) as i32
+        });
+        for (zone, axis, color) in order {
+            let dir = vp::axis_screen_dir(basis, axis);
+            let tip = center + egui::vec2(dir.x, dir.y) * radius;
+            let towards_viewer = axis.dot(forward) > 0.0;
+            let fill = if towards_viewer {
+                color
+            } else {
+                color.gamma_multiply(0.35)
+            };
+            painter.line_segment([center, tip], egui::Stroke::new(2.0_f32, fill));
+            painter.circle_filled(tip, 7.0, fill);
+            let label = match zone {
+                vp::GizmoZone::PosX => "X",
+                vp::GizmoZone::NegX => "-X",
+                vp::GizmoZone::PosY => "Y",
+                vp::GizmoZone::NegY => "-Y",
+                vp::GizmoZone::PosZ => "Z",
+                vp::GizmoZone::NegZ => "-Z",
+                vp::GizmoZone::Center => "",
+            };
+            if !label.is_empty() {
+                painter.text(
+                    tip,
+                    egui::Align2::CENTER_CENTER,
+                    label,
+                    egui::FontId::monospace(9.0),
+                    Color32::from_black_alpha(210),
+                );
+            }
+        }
+        // Centre ball (isometric).
+        painter.circle_filled(center, 6.0, Color32::from_white_alpha(210));
+        painter.circle_stroke(
+            center,
+            6.0,
+            egui::Stroke::new(1.0_f32, Color32::from_black_alpha(120)),
+        );
+
+        // Interaction: click a handle to snap, drag anywhere on the gizmo to
+        // orbit. The gizmo reserves its corner from the viewport response
+        // only when the cursor is over it.
+        let gizmo_rect =
+            egui::Rect::from_center_size(center, egui::vec2(radius * 2.8, radius * 2.8));
+        let response = ui.allocate_rect(gizmo_rect, egui::Sense::click_and_drag());
         if response.dragged() {
             let delta = response.drag_delta();
             let camera = &mut self.project.camera;
             camera.phi_deg = (camera.phi_deg + delta.x * 0.4).rem_euclid(360.0);
             camera.theta_deg = (camera.theta_deg + delta.y * 0.4).clamp(1.0, 89.0);
-            self.engine.send(Command::SetCamera(self.project.camera));
-            self.project_dirty = true;
+            self.push_camera();
             self.request_viewport_render();
+        } else if response.clicked() {
+            let cursor = response.interact_pointer_pos().unwrap_or(egui::Pos2::ZERO);
+            if let Some(zone) = vp::gizmo_zone_at(
+                glam::vec2(cursor.x, cursor.y),
+                glam::vec2(center.x, center.y),
+                radius,
+                basis,
+            ) {
+                self.project.camera = vp::snap_camera(zone, &self.project.camera);
+                self.push_camera();
+                self.request_viewport_render();
+            }
         }
+    }
 
+    fn paint_safe_frame(ui: &mut Ui, rect: egui::Rect) {
+        let painter = ui.painter();
+        for (fraction, label) in [(0.9, "action"), (0.8, "title")] {
+            let inset = egui::vec2(
+                rect.width() * (1.0 - fraction) / 2.0,
+                rect.height() * (1.0 - fraction) / 2.0,
+            );
+            let inner = rect.shrink2(inset);
+            painter.rect_stroke(
+                inner,
+                0.0,
+                egui::Stroke::new(1.0_f32, Color32::from_white_alpha(70)),
+            );
+            painter.text(
+                inner.left_top() + egui::vec2(4.0, 4.0),
+                egui::Align2::LEFT_TOP,
+                label,
+                egui::FontId::monospace(9.0),
+                Color32::from_white_alpha(90),
+            );
+        }
+    }
+
+    /// U3: tool-aware viewport input.
+    ///
+    /// Left-drag is owned by the active tool; middle-drag always pans and the
+    /// wheel always zooms, Blender-style. The gizmo consumes its own corner
+    /// before this runs (it allocates its rect later in the same panel, which
+    /// egui hit-tests on top).
+    fn handle_viewport_input(&mut self, response: &Response) {
+        use crate::ui::viewport::ViewportTool;
+        // Middle-drag pan, regardless of tool.
+        if response.dragged_by(egui::PointerButton::Middle) {
+            let delta = response.drag_delta();
+            self.pan_target(delta.x, delta.y);
+            return;
+        }
         let scroll_y = response.ctx.input(|i| i.raw_scroll_delta.y);
         if scroll_y != 0.0 && response.hovered() {
-            let camera = &mut self.project.camera;
-            camera.radius = (camera.radius * (1.0 + scroll_y * 0.0015)).clamp(10.0, 100_000.0);
-            self.engine.send(Command::SetCamera(self.project.camera));
-            self.project_dirty = true;
-            self.request_viewport_render();
+            self.zoom_camera(1.0 + scroll_y * 0.0015);
+            return;
+        }
+        if !response.dragged_by(egui::PointerButton::Primary) {
+            return;
+        }
+        let delta = response.drag_delta();
+        match self.viewport_tool {
+            ViewportTool::Orbit => {
+                let camera = &mut self.project.camera;
+                camera.phi_deg = (camera.phi_deg + delta.x * 0.4).rem_euclid(360.0);
+                camera.theta_deg = (camera.theta_deg + delta.y * 0.4).clamp(1.0, 89.0);
+                self.push_camera();
+                self.request_viewport_render();
+            }
+            ViewportTool::Pan => self.pan_target(delta.x, delta.y),
+            ViewportTool::Zoom => self.zoom_camera(1.0 - delta.y * 0.004),
         }
     }
 
@@ -2657,11 +3044,32 @@ impl StudioApp {
             Action::ZoomIn => self.zoom_camera(1.25),
             Action::ZoomOut => self.zoom_camera(0.8),
             Action::FitView => self.fit_view(),
-            Action::CameraTop => self.set_view(135.0, 88.0),
-            Action::CameraFront => self.set_view(180.0, 12.0),
-            Action::CameraRight => self.set_view(90.0, 12.0),
-            Action::CameraIso => self.set_view(135.0, 45.0),
-            Action::CameraReset => self.reset_camera(),
+            // U3: presets and the gizmo share one mapping (viewport.rs), so
+            // the angles cannot drift — and the old hard-coded values were
+            // inverted against the engine's polar convention (theta 0 is
+            // top-down, 90 the horizon).
+            Action::CameraTop => self.apply_camera_preset(Action::CameraTop),
+            Action::CameraFront => self.apply_camera_preset(Action::CameraFront),
+            Action::CameraRight => self.apply_camera_preset(Action::CameraRight),
+            Action::CameraIso => self.apply_camera_preset(Action::CameraIso),
+            Action::CameraReset => self.apply_camera_preset(Action::CameraReset),
+            Action::ToolOrbit | Action::ToolPan | Action::ToolZoom => {
+                if let Some(tool) = crate::ui::viewport::ViewportTool::from_action(action) {
+                    self.viewport_tool = tool;
+                    self.set_status(tool.label());
+                }
+            }
+            Action::ToggleSafeFrame => {
+                self.show_safe_frame = !self.show_safe_frame;
+            }
+            Action::ToggleCompare => {
+                self.compare_mode = !self.compare_mode;
+                if self.compare_mode && self.compare_texture.is_none() {
+                    self.set_status(
+                        "Compare needs an exported frame — use File \u{25b8} Export PNG first",
+                    );
+                }
+            }
             Action::LayoutDefault => self.set_layout(LayoutPreset::Default),
             Action::LayoutCartography => self.set_layout(LayoutPreset::Cartography),
             Action::LayoutModeling => self.set_layout(LayoutPreset::Modeling),
@@ -2811,15 +3219,6 @@ impl StudioApp {
     }
 
     /// Named camera direction (phi = orbit azimuth, theta = elevation).
-    fn set_view(&mut self, phi_deg: f32, theta_deg: f32) {
-        if self.project.terrain.is_none() {
-            return;
-        }
-        self.project.camera.phi_deg = phi_deg.clamp(0.0, 360.0);
-        self.project.camera.theta_deg = theta_deg.clamp(1.0, 89.0);
-        self.push_camera();
-    }
-
     /// Re-fit the orbit radius to the loaded dataset, keeping the angles.
     fn fit_view(&mut self) {
         let Some(terrain) = &self.project.terrain else {
@@ -2835,17 +3234,130 @@ impl StudioApp {
         self.invalidate_viewport();
     }
 
+    /// Materialize an unresolved git-LFS fixture in the background and open
+    /// the pending example when it lands. The user is told this is a
+    /// download: the status bar names the command being run.
+    fn materialize_lfs_asset(&mut self, path: PathBuf) {
+        if self.lfs_fetch.is_some() {
+            self.push_error(
+                "Examples gallery",
+                "an asset fetch is already running; try again when it finishes",
+            );
+            return;
+        }
+        let rel = resolve_repo_path(&path); // absolute now
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let include = rel
+            .strip_prefix(&root)
+            .map(|p| p.to_path_buf())
+            .unwrap_or(rel.clone());
+        self.set_status(format!(
+            "Fetching engine fixture {} (git lfs pull — this downloads the file)…",
+            include.display()
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.lfs_fetch = Some(rx);
+        std::thread::Builder::new()
+            .name("studio-lfs-fetch".to_owned())
+            .spawn(move || {
+                let output = std::process::Command::new("git")
+                    .args(["lfs", "pull", "--include"])
+                    .arg(&include)
+                    .current_dir(&root)
+                    .output();
+                let _ = tx.send(output.map(|o| o.status.success()));
+            })
+            .ok();
+    }
+
+    /// Poll a running LFS fetch; when it finishes, retry the pending example
+    /// or surface the failure with the exact remedy.
+    fn poll_lfs_fetch(&mut self) {
+        let done = match &self.lfs_fetch {
+            Some(rx) => rx.try_recv().ok(),
+            None => None,
+        };
+        if let Some(result) = done {
+            self.lfs_fetch = None;
+            match result {
+                Ok(true) => {
+                    self.set_status("Engine fixture fetched; opening example…");
+                    if let Some(path) = self
+                        .pending_example
+                        .as_ref()
+                        .and_then(|entry| entry.scene.as_ref())
+                        .and_then(|scene| scene.get("dem"))
+                        .and_then(|dem| dem.as_str())
+                        .map(PathBuf::from)
+                    {
+                        if path.is_file() && !is_lfs_pointer(&path) {
+                            self.apply_pending_example();
+                            return;
+                        }
+                    }
+                    self.push_error(
+                        "Examples gallery",
+                        "git lfs pull reported success but the fixture is still not materialized",
+                    );
+                    self.pending_example = None;
+                }
+                Ok(false) => {
+                    self.push_error(
+                        "Examples gallery",
+                        "git lfs pull failed. Materialize the fixture manually:                          `git lfs pull --include=<asset>` in the repository root.",
+                    );
+                    self.pending_example = None;
+                }
+                Err(err) => {
+                    self.push_error(
+                        "Examples gallery",
+                        format!(
+                            "could not run `git lfs pull` ({err}). Materialize the fixture                              manually with `git lfs pull` in the repository root."
+                        ),
+                    );
+                    self.pending_example = None;
+                }
+            }
+        }
+    }
+
     /// Open one gallery entry: load its dataset (async) and apply the scene.
     fn open_example(&mut self, entry: crate::ui::examples::ExampleEntry) {
         let Some(scene) = entry.scene.clone() else {
             return;
         };
         self.set_status(format!("Opening example '{}'…", entry.title));
+        let mut entry = entry;
+        if let Some(scene) = entry.scene.as_mut() {
+            // Gallery scenes reference repo-root-relative fixtures; resolve
+            // them before anything touches the filesystem.
+            for key in ["dem", "raster"] {
+                if let Some(raw) = scene.get(key).and_then(|v| v.as_str()) {
+                    scene[key] = serde_json::json!(resolve_repo_path(Path::new(raw)));
+                }
+            }
+        }
         self.pending_example = Some(entry);
         let dem = scene
             .get("dem")
             .and_then(|dem| dem.as_str())
             .map(PathBuf::from);
+        if let Some(path) = &dem {
+            if path.is_file() && is_lfs_pointer(path) {
+                self.materialize_lfs_asset(path.clone());
+                return;
+            }
+            if !path.exists() {
+                let hint = format!(
+                    "Example dataset '{}' is missing. Engine fixtures live in git LFS —                      run `git lfs pull --include={}` in the repository, or pick another example.",
+                    path.display(),
+                    path.display()
+                );
+                self.push_error("Examples gallery", hint);
+                self.pending_example = None;
+                return;
+            }
+        }
         let needs_load = match (&dem, &self.project.terrain) {
             (Some(path), Some(terrain)) => terrain.path != *path,
             (Some(_), None) => true,
@@ -2917,6 +3429,7 @@ impl StudioApp {
                         theta_deg: number(camera, "theta_deg", self.project.camera.theta_deg),
                         radius,
                         fov_deg: number(camera, "fov_deg", self.project.camera.fov_deg),
+                        ..self.project.camera
                     };
                 }
                 if let Some(sun) = scene.get("sun") {
@@ -3077,6 +3590,7 @@ impl eframe::App for StudioApp {
         self.sync_window_title(ctx);
         self.handle_shortcuts(ctx);
         self.poll_engine_events(ctx);
+        self.poll_lfs_fetch();
         self.tick_playback(ctx);
 
         self.top_panel(ctx);

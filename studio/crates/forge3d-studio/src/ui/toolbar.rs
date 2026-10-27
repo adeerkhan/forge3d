@@ -6,11 +6,15 @@ use crate::actions::Action;
 use crate::icons::Icons;
 
 /// Draw the toolbar; returns the action the user clicked, if any.
+///
+/// `is_active` highlights checkable actions (viewport tools, view toggles)
+/// so the toolbar shows state, Blender-style.
 pub fn toolbar(
     ui: &mut Ui,
     icons: &Icons,
     icon_size: f32,
     enabled: impl Fn(Action) -> bool,
+    is_active: impl Fn(Action) -> bool,
 ) -> Option<Action> {
     let mut chosen = None;
     ui.horizontal(|ui| {
@@ -27,14 +31,15 @@ pub fn toolbar(
                 Some(shortcut) => format!("{} ({shortcut})", action.label()),
                 None => action.label().to_owned(),
             };
+            let mut button = egui::Button::image(
+                Image::new(&texture).fit_to_exact_size(egui::vec2(icon_size, icon_size)),
+            )
+            .frame(false);
+            if is_active(*action) {
+                button = button.fill(egui::Color32::from_white_alpha(30));
+            }
             let response = ui
-                .add_enabled(
-                    enabled(*action),
-                    egui::Button::image(
-                        Image::new(&texture).fit_to_exact_size(egui::vec2(icon_size, icon_size)),
-                    )
-                    .frame(false),
-                )
+                .add_enabled(enabled(*action), button)
                 .on_hover_text(tooltip);
             if response.clicked() {
                 chosen = Some(*action);
@@ -76,7 +81,7 @@ mod tests {
             let _ = ctx.run(Default::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     assert!(
-                        toolbar(ui, &icons, 16.0, |_| true).is_none(),
+                        toolbar(ui, &icons, 16.0, |_| true, |_| false).is_none(),
                         "no click, no action"
                     );
                 });

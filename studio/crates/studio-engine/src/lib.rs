@@ -746,8 +746,12 @@ def _op_terrain_render(p):
     if not os.path.exists(hdr_path):
         _write_default_hdr(hdr_path)
     _ensure_session(hdr_path)
-    camera = p["camera"]
+    camera = dict(p["camera"])
     sun = p["sun"]
+    # Pan offset lives on the ground plane; the engine's cam_target is the
+    # full 3D orbit centre (x, y, z) — keep y at 0 for screen-mode terrain.
+    if "target" in camera and len(camera["target"]) == 3:
+        camera["cam_target"] = camera.pop("target")
     domain = p.get("domain") or [_domain[0], _domain[1]]
     overlay = _ensure_overlay(p.get("colormap"), domain)
     span = float(p.get("terrain_span") or max(domain[1] - domain[0], 1.0) * 6.0)
@@ -767,7 +771,7 @@ def _op_terrain_render(p):
         "cam_phi_deg": float(camera["phi_deg"]),
         "cam_theta_deg": float(camera["theta_deg"]),
         "fov_y_deg": float(camera["fov_deg"]),
-        "cam_target": (0.0, 0.0, 0.0),
+        "cam_target": tuple(camera.get("cam_target", (0.0, 0.0, 0.0))),
         "camera_mode": "screen",
         "light_azimuth_deg": float(sun["azimuth_deg"]),
         "light_elevation_deg": float(sun["elevation_deg"]),
@@ -1575,6 +1579,8 @@ impl WorkerState {
             theta_deg: 58.0,
             radius: span * 1.65,
             fov_deg: 54.0,
+            target_x: 0.0,
+            target_z: 0.0,
         }
     }
 }
@@ -1889,6 +1895,7 @@ fn render_terrain_png(
                 "theta_deg": engine.camera.theta_deg,
                 "radius": engine.camera.radius,
                 "fov_deg": engine.camera.fov_deg,
+                "target": [engine.camera.target_x, 0.0, engine.camera.target_z],
             },
             "sun": {
                 "azimuth_deg": engine.sun.azimuth_deg,

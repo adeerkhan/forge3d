@@ -61,6 +61,12 @@ pub struct CameraParams {
     pub theta_deg: f32,
     pub radius: f32,
     pub fov_deg: f32,
+    /// Pan offset on the ground plane (engine `cam_target` x/z). The terrain
+    /// shader orbits this point; defaults keep projects v2-compatible.
+    #[serde(default)]
+    pub target_x: f32,
+    #[serde(default)]
+    pub target_z: f32,
 }
 
 impl Default for CameraParams {
@@ -70,6 +76,8 @@ impl Default for CameraParams {
             theta_deg: 45.0,
             radius: 1000.0,
             fov_deg: 55.0,
+            target_x: 0.0,
+            target_z: 0.0,
         }
     }
 }
@@ -480,6 +488,8 @@ mod tests {
             height_max: 500.5,
         });
         project.camera.phi_deg = 42.0;
+        project.camera.target_x = 12.5;
+        project.camera.target_z = -3.25;
         project.sun.elevation_deg = 60.0;
 
         let dir = std::env::temp_dir().join("studio-project-test");

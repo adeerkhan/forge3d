@@ -2,7 +2,7 @@
 ## A Photoshop × QGIS × Blender-class desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests. Pushes go to `fork` (`adeerkhan/forge3d`); `origin` stays the upstream engine and is fetch-only.
-**Status header last updated:** 2026-10-27 (UI refactor plan adopted; engine bridge through M4-core already landed).
+**Status header last updated:** 2026-10-27 (U0–U1 landed; U3 landed with the viewport gizmo/HUD/tools; U2 in progress; gallery scenes resolve repo-relative paths and materialize LFS fixtures with disclosure).
 **Knowledge graph:** `.ua/knowledge-graph.json` covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (51 verification harnesses), and `studio/` (the app).
 
 ---
@@ -345,8 +345,8 @@ Engine surface: `viewer.py`, `viewer_ipc.py`, `viewer_contract.py`, `_viewer_bin
 | Dock slots with tab groups, layout presets, persisted layout, collapsible rails | U0 *(landed)* |
 | Document model v3 + Layers panel (tree, groups, drag reorder, eye/lock/opacity, rename, context menu, multi-select) | U1 *(landed)* |
 | Undo/redo command stack over the document (snapshot per gesture) | U1 *(landed)* |
-| Selection-driven Inspector per layer kind; M4 parameter pages re-homed | U2 |
-| Viewport tools, 3D navigation gizmo, HUD (zoom, coords, scale bar, safe frame), compare mode | U3 |
+| Selection-driven Inspector per layer kind; M4 parameter pages re-homed | U2 *(in progress)* |
+| Viewport tools, 3D navigation gizmo, HUD (zoom, scale bar, safe frame), compare mode *(landed 2026-10-27 — gizmo maths unit-tested, presets+gizmo share one mapping, inverted camera-preset convention fixed; cursor world-coords and geodesic measure arrive with engine pick/measure ops)* | U3 *(landed)* |
 | Bottom dock: timeline, console, certificates, statistics | U0 (tabs) / M5 (content) |
 | Examples gallery with tiers and one-click scenes | U4 |
 

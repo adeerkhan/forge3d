@@ -83,6 +83,12 @@ icon_set![
     (Trash, "trash"),
     (Copy, "copy"),
     (GripVertical, "grip-vertical"),
+    (Move, "move"),
+    (MousePointer, "mouse-pointer-2"),
+    (ZoomIn, "zoom-in"),
+    (Frame, "frame"),
+    (Columns2, "columns-2"),
+    (Ruler, "ruler"),
 ];
 
 /// Rasterized icon set keyed by [`Icon`].

@@ -205,6 +205,19 @@ Milestones from GUI.md section 12:
       engine registries; ingest metadata + rig bakes + preset payloads
       asserted against the engine's own Python API;
       device-lane-dependent golden gate behind `FORGE3D_STUDIO_GOLDEN_STRICT`.
+- [x] **U3. Viewport tools + gizmo + HUD** — Blender-style navigation gizmo
+      (six axis handles + isometric ball, click-snap + drag-orbit, maths
+      unit-tested), tool group (orbit/pan/zoom with middle-drag-pan and
+      wheel-zoom always), camera-target pan through the engine's
+      `cam_target`, HUD (zoom %, approximate target-plane scale bar, frame
+      time), safe-frame overlay, A/B compare against the last export;
+      camera presets now share the gizmo mapping (fixing an inverted
+      top/front convention).
+- [x] **Gallery robustness** — example scenes resolve repo-relative dataset
+      paths against the checkout (not the process CWD); unresolved git-LFS
+      fixtures are materialized with a disclosed `git lfs pull` background
+      fetch, and missing fixtures surface the exact remedy instead of a
+      raw engine error.
 - [ ] **5. Embedded viewport** — current viewport is a CPU readback of the
       engine's render (~100–300 ms/frame, on-demand, not continuous).
       True embedding = repairing the native `TerrainScene` drift or sharing
