@@ -23,15 +23,6 @@ pub enum ViewportTool {
 }
 
 impl ViewportTool {
-    /// The action that selects this tool, for the toolbar toggle group.
-    pub fn action(self) -> Action {
-        match self {
-            ViewportTool::Orbit => Action::ToolOrbit,
-            ViewportTool::Pan => Action::ToolPan,
-            ViewportTool::Zoom => Action::ToolZoom,
-        }
-    }
-
     pub fn from_action(action: Action) -> Option<Self> {
         match action {
             Action::ToolOrbit => Some(ViewportTool::Orbit),

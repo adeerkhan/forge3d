@@ -63,6 +63,10 @@ enum SceneMode {
 enum PendingJob {
     MapSceneTemplate,
     MapSceneRender,
+    /// U2: document -> SceneRecipe compilation.
+    SceneCompile {
+        render_after: bool,
+    },
     MapSceneValidate,
     ColormapsList,
     PresetsList,
@@ -203,6 +207,13 @@ struct ImportPreview {
 #[derive(Debug, Clone, Default)]
 struct MapScenePanel {
     template: String,
+    /// U2: scene camera (compiles into the recipe).
+    camera_distance: f64,
+    camera_azimuth: f64,
+    camera_elevation: f64,
+    camera_fov: f64,
+    /// U2: diagnostics from the last `scene.compile`.
+    compile_diagnostics: Vec<serde_json::Value>,
     raster_path: Option<PathBuf>,
     label_text: String,
     recipe_json: Option<serde_json::Value>,
@@ -362,6 +373,10 @@ impl StudioApp {
             scene_mode: SceneMode::Terrain,
             mapscene: MapScenePanel {
                 template: "terrain".to_owned(),
+                camera_distance: 1.2,
+                camera_azimuth: 25.0,
+                camera_elevation: 45.0,
+                camera_fov: 45.0,
                 ..Default::default()
             },
             pending_jobs: std::collections::HashMap::new(),
@@ -661,8 +676,9 @@ impl StudioApp {
                     self.project.scene_recipe_json =
                         Some(serde_json::to_string(recipe).unwrap_or_default());
                     self.project_dirty = true;
+                    self.sync_document_from_recipe(recipe);
                     self.set_status(format!(
-                        "MapScene recipe built from template '{op}' ({} layers)",
+                        "MapScene scene built from template '{op}' ({} layers) —                  the Layers panel now drives it",
                         recipe
                             .get("layers")
                             .and_then(|l| l.as_array())
@@ -671,10 +687,36 @@ impl StudioApp {
                     ));
                     if self.render_after_recipe {
                         self.render_after_recipe = false;
-                        self.render_mapscene();
+                        self.compile_and_stage_recipe(true);
                     }
                 }
                 None => self.push_error("MapScene template", "no recipe in result"),
+            },
+            Some(PendingJob::SceneCompile { render_after }) => match result.get("recipe") {
+                Some(recipe) => {
+                    self.mapscene.recipe_json = Some(recipe.clone());
+                    self.project.scene_recipe_json =
+                        Some(serde_json::to_string(recipe).unwrap_or_default());
+                    self.project_dirty = true;
+                    let diagnostics = result
+                        .get("diagnostics")
+                        .and_then(|d| d.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    self.mapscene.compile_diagnostics = diagnostics;
+                    if render_after {
+                        self.render_mapscene();
+                    } else {
+                        self.set_status(format!(
+                            "Scene compiled ({} recipe layer(s))",
+                            result
+                                .get("layer_count")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                        ));
+                    }
+                }
+                None => self.push_error("Scene compile", "no recipe in result"),
             },
             Some(PendingJob::MapSceneRender) => {
                 let png = result
@@ -1840,6 +1882,17 @@ impl StudioApp {
                     self.invalidate_viewport();
                 }
             }
+            LayersCommand::SetStyle(id, style) => {
+                self.edit_document(|project| {
+                    if let Some(layer) = project.document.layer_mut(id) {
+                        layer.style = style;
+                    }
+                });
+                // A style edit can change the compiled recipe.
+                if self.scene_mode == SceneMode::MapScene && self.mapscene.recipe_json.is_some() {
+                    self.compile_and_stage_recipe(false);
+                }
+            }
             LayersCommand::SetExpanded(id, expanded) => self.edit_document(|project| {
                 if let Some(layer) = project.document.layer_mut(id) {
                     layer.expanded = expanded;
@@ -2074,13 +2127,31 @@ impl StudioApp {
                 }
                 ui.checkbox(&mut self.mapscene_certificate, "Sign render certificate");
                 ui.horizontal(|ui| {
-                    if ui.button("Render").clicked() {
-                        self.render_mapscene();
+                    if ui.button("Compile & render scene").clicked() {
+                        self.compile_and_stage_recipe(true);
+                    }
+                    if ui.button("Compile only").clicked() {
+                        self.compile_and_stage_recipe(false);
                     }
                     if ui.button("Validate").clicked() {
                         self.validate_mapscene();
                     }
                 });
+                // U2: compile diagnostics (per-layer honesty from scene.compile).
+                for diag in &self.mapscene.compile_diagnostics {
+                    let severity = diag.get("severity").and_then(|v| v.as_str()).unwrap_or("?");
+                    let code = diag.get("code").and_then(|v| v.as_str()).unwrap_or("?");
+                    let message = diag.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                    ui.label(
+                        egui::RichText::new(format!("{severity}/{code}: {message}"))
+                            .small()
+                            .color(if severity == "error" {
+                                ui.visuals().error_fg_color
+                            } else {
+                                ui.visuals().warn_fg_color
+                            }),
+                    );
+                }
                 if let Some(sha) = self
                     .mapscene
                     .last_metadata
@@ -2187,12 +2258,85 @@ impl StudioApp {
         if ui.checkbox(&mut locked, "Locked").changed() {
             self.apply_layers_command(LayersCommand::SetLocked(id, locked));
         }
-        if layer.kind == LayerKind::Terrain {
-            ui.add_space(4.0);
-            if ui.button("Edit render parameters").clicked() {
-                self.dock.right_tab = 1;
+        match layer.kind {
+            LayerKind::Terrain => {
+                ui.add_space(4.0);
+                if ui.button("Edit render parameters").clicked() {
+                    self.dock.right_tab = 1;
+                }
+                ui.weak("Sun, camera and output sit under Scene below.");
             }
-            ui.weak("Sun, camera and output sit under Scene below.");
+            LayerKind::RasterOverlay => {
+                ui.add_space(4.0);
+                ui.label(theme::group_label("Raster overlay"));
+                let crs = layer
+                    .style
+                    .get("crs")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("inherits terrain")
+                    .to_owned();
+                ui.label(theme::meta(format!("CRS: {crs}")));
+                if let Some(path) = &layer.source {
+                    ui.label(theme::meta(path.to_string()))
+                        .on_hover_text(path.to_string());
+                }
+                ui.weak("Opacity feeds the compiled RasterOverlay.");
+            }
+            LayerKind::Vector => {
+                ui.add_space(4.0);
+                ui.label(theme::group_label("Vector line"));
+                let mut color = layer
+                    .style
+                    .pointer("/mapbox/layers/0/paint/line-color")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("#ffffff")
+                    .to_owned();
+                ui.horizontal(|ui| {
+                    ui.label("Stroke");
+                    if ui.text_edit_singleline(&mut color).changed()
+                        && color.starts_with('#')
+                        && color.len() == 7
+                    {
+                        let mut style = layer.style.clone();
+                        if style.get("mapbox").is_none() {
+                            style["mapbox"] = serde_json::json!({
+                                "version": 8,
+                                "layers": [{"id": layer.name, "type": "line",
+                                            "paint": {"line-color": color}}]
+                            });
+                        } else {
+                            style["mapbox"]["layers"][0]["paint"]["line-color"] =
+                                serde_json::json!(color);
+                        }
+                        self.apply_layers_command(LayersCommand::SetStyle(id, style));
+                    }
+                });
+                ui.weak("Features and Mapbox paint compile into the VectorOverlay.");
+            }
+            LayerKind::Labels => {
+                ui.add_space(4.0);
+                ui.label(theme::group_label("Labels"));
+                let mut text = layer
+                    .style
+                    .pointer("/labels/0/text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                if ui
+                    .add_sized(
+                        [ui.available_width().max(80.0), 20.0],
+                        egui::TextEdit::singleline(&mut text).hint_text("Label text"),
+                    )
+                    .lost_focus()
+                    && !text.is_empty()
+                {
+                    let mut style = layer.style.clone();
+                    style["labels"][0]["text"] = serde_json::json!(text);
+                    self.apply_layers_command(LayersCommand::SetStyle(id, style));
+                }
+                ui.weak("Label candidates compile into the LabelLayer.");
+            }
+            _ => {}
         }
     }
 
@@ -3317,6 +3461,92 @@ impl StudioApp {
                     );
                     self.pending_example = None;
                 }
+            }
+        }
+    }
+
+    /// U2: serialize the document (plus environment) for `scene.compile`.
+    fn document_compile_params(&self) -> serde_json::Value {
+        let layers = serde_json::to_value(&self.project.document.layers)
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let terrain = self.project.terrain.as_ref();
+        serde_json::json!({
+            "document": { "layers": layers },
+            "environment": {
+                "camera": {
+                    "distance": self.mapscene.camera_distance,
+                    "azimuth_deg": self.mapscene.camera_azimuth,
+                    "elevation_deg": self.mapscene.camera_elevation,
+                    "fov_deg": self.mapscene.camera_fov,
+                },
+                "lighting": { "name": "daylight", "intensity": 1.1 },
+                "output": {
+                    "width": self.project.export.width,
+                    "height": self.project.export.height,
+                },
+                "_terrain_present": terrain.is_some(),
+            },
+        })
+    }
+
+    /// U2: compile the document into a recipe (and optionally render it).
+    /// This is the only path to a MapScene render in Studio: the document is
+    /// the source of truth, the recipe is compiled, never hand-edited.
+    fn compile_and_stage_recipe(&mut self, render_after: bool) {
+        if self.scene_mode != SceneMode::MapScene {
+            return;
+        }
+        let params = self.document_compile_params();
+        let job = self.engine.call("scene.compile", params);
+        self.pending_jobs
+            .insert(job, PendingJob::SceneCompile { render_after });
+    }
+
+    /// U2: mirror a template's recipe layers into the document so the Layers
+    /// panel and the inspector drive them. The terrain row already exists
+    /// (the DEM import created it); generated rows are replaced on rebuild.
+    fn sync_document_from_recipe(&mut self, recipe: &serde_json::Value) {
+        use studio_project::document::LayerKind;
+        // Remove previously generated rows (keep the terrain layer).
+        let generated = self
+            .project
+            .document
+            .layers
+            .iter()
+            .filter(|l| l.kind != LayerKind::Terrain)
+            .map(|l| l.id)
+            .collect::<Vec<_>>();
+        for id in generated {
+            self.project.document.remove(id);
+        }
+        self.selection.clear();
+        if let Some(layers) = recipe.get("layers").and_then(|l| l.as_array()) {
+            for layer in layers {
+                let kind_str = layer
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .unwrap_or("reference");
+                let kind = LayerKind::from_recipe_type(kind_str);
+                let name = layer
+                    .get("layer_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(kind_str)
+                    .to_owned();
+                let source = layer.get("path").and_then(|v| v.as_str()).map(String::from);
+                let mut style = serde_json::json!({});
+                if let Some(features) = layer.get("features") {
+                    style["features"] = features.clone();
+                }
+                if let Some(mapbox) = layer.get("style") {
+                    style["mapbox"] = mapbox.clone();
+                }
+                if let Some(labels) = layer.get("labels") {
+                    style["labels"] = labels.clone();
+                }
+                style["crs"] = layer.get("crs").cloned().unwrap_or(serde_json::Value::Null);
+                self.project
+                    .document
+                    .push_detailed(kind, name, true, source, style, None);
             }
         }
     }

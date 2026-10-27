@@ -112,9 +112,9 @@ impl LayerKind {
         match kind {
             "terrain" => LayerKind::Terrain,
             "raster" => LayerKind::RasterOverlay,
-            "vector" | "vector_lines" => LayerKind::Vector,
+            "vector" | "vector_lines" | "vector_overlay" => LayerKind::Vector,
             "buildings" => LayerKind::Buildings,
-            "labels" | "label" => LayerKind::Labels,
+            "labels" | "label" | "label_layer" => LayerKind::Labels,
             "points" | "pointcloud" => LayerKind::PointCloud,
             "mesh" | "gltf" => LayerKind::Mesh,
             "graticule" | "scale_bar" | "north_arrow" | "legend" | "map_plate" => {

@@ -67,14 +67,22 @@ pub struct LayersView<'a> {
 /// Everything the panel wants done.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayersCommand {
-    Select { ids: Vec<LayerId>, additive: bool },
+    Select {
+        ids: Vec<LayerId>,
+        additive: bool,
+    },
     SetVisible(LayerId, bool),
     SetLocked(LayerId, bool),
     SetOpacity(LayerId, f32),
+    /// U2: replace a layer's engine payload (per-kind inspector edits).
+    SetStyle(LayerId, serde_json::Value),
     SetExpanded(LayerId, bool),
     BeginRename(LayerId),
     Rename(LayerId, String),
-    Move { id: LayerId, spot: DropSpot },
+    Move {
+        id: LayerId,
+        spot: DropSpot,
+    },
     Duplicate(LayerId),
     Delete(Vec<LayerId>),
     Group(Vec<LayerId>),

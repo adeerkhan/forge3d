@@ -386,3 +386,187 @@ fn golden_mapscene_terrain_raster_reference() {
     );
     engine.shutdown();
 }
+
+/// U2: the document compiles to the recipe its example builds.
+///
+/// Compile semantics under test (GUI.md U2 exit criteria): kinds map to the
+/// same engine objects the canonical templates construct, unrenderable kinds
+/// are excluded with an honest diagnostic, invisible layers are skipped, and
+/// a missing terrain is a hard `no_terrain` error — never a fake render.
+#[test]
+fn scene_compile_document_semantics() {
+    let (engine, events) = spawn_ready();
+
+    let dem = fuji_dem();
+    assert!(dem.is_file(), "DEM fixture missing: {}", dem.display());
+    engine.send(Command::LoadTerrain { path: dem.clone() });
+    wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| matches!(e, Event::TerrainLoaded { .. }).then_some(()),
+        "TerrainLoaded",
+    );
+
+    // Fuji's georeferenced bounds; vector geometry lives in the terrain CRS.
+    let dem_str = dem.to_string_lossy().into_owned();
+    let document = serde_json::json!({
+        "layers": [
+            {"id": 1, "parent": null, "kind": "Terrain", "name": "Mount Fuji",
+             "visible": true, "opacity": 1.0, "locked": false,
+             "source": dem_str, "style": {}},
+            {"id": 2, "parent": null, "kind": "RasterOverlay", "name": "ortho",
+             "visible": false, "opacity": 0.8, "locked": false,
+             "source": "unused.png", "style": {}},
+            {"id": 3, "parent": null, "kind": "Vector", "name": "lines",
+             "visible": true, "opacity": 1.0, "locked": false,
+             "source": null,
+             "style": {
+                 "crs": "EPSG:4326",
+                 "features": [
+                     {"id": "line-1", "geometry": {"type": "LineString",
+                      "coordinates": [[138.7, 35.3], [138.8, 35.4]]},
+                      "properties": {"class": "primary"}}
+                 ],
+                 "mapbox": {"version": 8, "layers": [
+                     {"id": "lines", "type": "line", "paint": {"line-color": "#ff0000"}}]}
+             }},
+            {"id": 4, "parent": null, "kind": "Labels", "name": "labels",
+             "visible": true, "opacity": 1.0, "locked": false,
+             "source": null,
+             "style": {
+                 "labels": [
+                     {"id": "peak", "kind": "point", "text": "Fuji",
+                      "geometry": {"type": "Point", "coordinates": [138.73, 35.36, 0.0]},
+                      "priority_class": "cities"}
+                 ]
+             }},
+            {"id": 5, "parent": null, "kind": "Buildings", "name": "city",
+             "visible": true, "opacity": 1.0, "locked": false,
+             "source": null, "style": {}}
+        ]
+    });
+    let params = serde_json::json!({
+        "document": document,
+        "environment": {
+            "camera": {"distance": 1.2, "azimuth_deg": 25.0,
+                       "elevation_deg": 45.0, "fov_deg": 45.0},
+            "lighting": {"name": "daylight", "intensity": 1.1},
+            "output": {"width": 160, "height": 120},
+        },
+    });
+
+    let job = engine.call("scene.compile", params.clone());
+    let (recipe, diagnostics) = wait_for(
+        &events,
+        Duration::from_secs(300),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => Some((
+                result.get("recipe").cloned(),
+                result.get("diagnostics").cloned(),
+            )),
+            Event::JobFailed {
+                job: done, message, ..
+            } if *done == job => {
+                panic!("scene.compile failed: {message}");
+            }
+            _ => None,
+        },
+        "scene.compile",
+    );
+    let recipe = recipe.expect("compile returns a recipe");
+    let diagnostics = diagnostics.unwrap_or(serde_json::Value::Array(vec![]));
+    let diagnostics = diagnostics.as_array().cloned().unwrap_or_default();
+
+    // The invisible raster layer is skipped; buildings are excluded with an
+    // honest diagnostic; vector + labels compile with the terrain CRS.
+    let layers = recipe
+        .get("layers")
+        .and_then(|l| l.as_array())
+        .expect("layers");
+    let kinds: Vec<&str> = layers
+        .iter()
+        .filter_map(|l| l.get("kind").and_then(|k| k.as_str()))
+        .collect();
+    assert_eq!(kinds.len(), 2, "vector + labels compile; got {kinds:?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.get("code").and_then(|c| c.as_str()) == Some("layer_unrenderable")),
+        "buildings layer must be reported as registered-only: {diagnostics:?}"
+    );
+    let vector = layers
+        .iter()
+        .find(|l| l.get("kind").and_then(|k| k.as_str()) == Some("vector_overlay"))
+        .expect("vector layer");
+    assert_eq!(
+        vector.get("crs").and_then(|c| c.as_str()),
+        Some("EPSG:4326"),
+        "layers inherit the terrain CRS"
+    );
+
+    // The compiled recipe validates and renders through the certified path.
+    let out = std::env::temp_dir().join("studio-compile-render.png");
+    let _ = std::fs::remove_file(&out);
+    let job = engine.call(
+        "mapscene.render",
+        serde_json::json!({
+            "recipe_json": recipe.to_string(),
+            "out_png": out.to_string_lossy(),
+        }),
+    );
+    let png = wait_for(
+        &events,
+        Duration::from_secs(600),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result
+                .get("png")
+                .and_then(|p| p.as_str())
+                .map(PathBuf::from),
+            Event::JobFailed {
+                job: done, message, ..
+            } if *done == job => {
+                panic!("compiled-recipe render failed: {message}");
+            }
+            _ => None,
+        },
+        "mapscene.render(compiled)",
+    );
+    let bytes = std::fs::read(&png).expect("rendered png exists");
+    assert_eq!(&bytes[0..4], b"\x89PNG");
+    std::fs::remove_file(&png).ok();
+
+    // No visible terrain: the honest hard error, never a fake recipe.
+    let empty = serde_json::json!({
+        "document": {"layers": [
+            {"id": 1, "parent": null, "kind": "Vector", "name": "lines",
+             "visible": true, "opacity": 1.0, "locked": false, "source": null,
+             "style": {}}
+        ]},
+        "environment": {},
+    });
+    let job = engine.call("scene.compile", empty);
+    let diagnostics = wait_for(
+        &events,
+        Duration::from_secs(120),
+        |e| match e {
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("diagnostics").cloned(),
+            _ => None,
+        },
+        "scene.compile(no terrain)",
+    );
+    let diagnostics = diagnostics.as_array().cloned().unwrap_or_default();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.get("code").and_then(|c| c.as_str()) == Some("no_terrain")),
+        "no visible terrain must be a no_terrain error: {diagnostics:?}"
+    );
+
+    engine.shutdown();
+}

@@ -921,6 +921,170 @@ def _op_mapscene_template(p):
     return {"recipe": scene.to_dict()["recipe"]}
 
 
+
+def _op_scene_compile(p):
+    """U2: compile the Studio document (layers) into a SceneRecipe.
+
+    The document is the source of truth in the UI; the recipe is always
+    compiled from it and never hand-edited. Construction reuses the same
+    engine classes the canonical examples use, per layer kind:
+
+    - terrain          -> TerrainSource (first visible terrain layer)
+    - raster_overlay   -> RasterOverlay (path, crs, layer opacity)
+    - vector           -> VectorOverlay (features + Mapbox style from `style`)
+    - labels           -> LabelLayer (labels from `style`)
+    - group            -> recursed (visible children only)
+    - other kinds      -> honest "registered, not renderable" diagnostic
+
+    Terrain CRS resolution: style.crs override, else the dataset's own
+    georeferencing via io.load_dem; layers inherit the terrain CRS.
+    """
+    document = p.get("document") or {}
+    env = p.get("environment") or {}
+    layers_flat = document.get("layers") or []
+    diagnostics = []
+
+    # Nest the flat parent-pointer list into group trees (the Rust Document
+    # stores one ordered Vec with `parent` ids).
+    def _nest(flat):
+        by_parent = {}
+        for layer in flat:
+            by_parent.setdefault(layer.get("parent"), []).append(layer)
+        def build(parent):
+            out = []
+            for layer in by_parent.get(parent, []):
+                if str(layer.get("kind")) == "Group":
+                    merged = dict(layer)
+                    merged["children"] = build(layer.get("id"))
+                    out.append(merged)
+                else:
+                    out.append(layer)
+            return out
+        return build(None)
+
+    layers_in = _nest(layers_flat)
+
+    dem_path = None
+    for layer in layers_in:
+        if str(layer.get("kind")) == "Terrain" and layer.get("visible", True) and layer.get("source"):
+            dem_path = layer["source"]
+            break
+    if dem_path is None:
+        return {
+            "recipe": None,
+            "diagnostics": [
+                {"severity": "error", "code": "no_terrain",
+                 "message": "Scene has no visible terrain layer; MapScene needs one DEM."}
+            ],
+        }
+
+    bounds = None
+    try:
+        dem = f3d.io.load_dem(dem_path)
+        tw, th = int(dem.data.shape[1]), int(dem.data.shape[0])
+        crs_default = dem.crs
+        bounds = getattr(dem, "bounds", None)
+    except Exception:
+        arr = np.load(dem_path)
+        tw, th = int(arr.shape[1]), int(arr.shape[0])
+        crs_default = None
+
+    def compile_layers(items, parent_crs):
+        out = []
+        for layer in items:
+            kind = str(layer.get("kind"))
+            name = str(layer.get("name") or kind)
+            if not layer.get("visible", True):
+                continue
+            style = layer.get("style") or {}
+            if not isinstance(style, dict):
+                style = {}
+            if kind == "Group":
+                out.extend(compile_layers(layer.get("children") or [], parent_crs))
+                continue
+            if kind == "Terrain":
+                continue  # the terrain source is emitted once, below
+            if kind == "RasterOverlay":
+                out.append(f3d.RasterOverlay(
+                    layer_id=name,
+                    path=str(layer.get("source")),
+                    crs=style.get("crs") or parent_crs,
+                    opacity=float(layer.get("opacity", 1.0)),
+                    metadata={"source_id": f"studio:{name}"},
+                ))
+            elif kind == "Vector":
+                features = style.get("features")
+                if not features:
+                    diagnostics.append({
+                        "severity": "warning", "code": "vector_no_features",
+                        "message": f"Vector layer '{name}' has no features yet.",
+                    })
+                    continue
+                out.append(f3d.VectorOverlay(
+                    layer_id=name,
+                    crs=style.get("crs") or parent_crs,
+                    features=features,
+                    style=style.get("mapbox") or {"version": 8, "layers": [
+                        {"id": name, "type": "line", "paint": {"line-color": "#ffffff"}}]},
+                    metadata={"source_id": f"studio:{name}"},
+                ))
+            elif kind == "Labels":
+                labels = style.get("labels")
+                if not labels:
+                    diagnostics.append({
+                        "severity": "warning", "code": "labels_no_candidates",
+                        "message": f"Labels layer '{name}' has no labels yet.",
+                    })
+                    continue
+                out.append(f3d.LabelLayer(
+                    layer_id=name,
+                    labels=labels,
+                    metadata={"source_id": f"studio:{name}"},
+                ))
+            else:
+                diagnostics.append({
+                    "severity": "warning", "code": "layer_unrenderable",
+                    "message": f"Layer '{name}' ({kind}) is registered but Studio cannot "
+                               "render this kind yet — it is excluded from the recipe.",
+                })
+        return out
+
+    layers_out = compile_layers(layers_in, crs_default)
+    terrain = f3d.TerrainSource(
+        path=str(dem_path),
+        crs=crs_default,
+        metadata={"width": tw, "height": th, "source_id": "studio-terrain"},
+    )
+    camera = env.get("camera") or {}
+    lighting = env.get("lighting") or {}
+    output = env.get("output") or {}
+    scene = f3d.MapScene(
+        terrain=terrain,
+        camera=f3d.OrbitCamera(
+            target=(0.0, 0.0, 0.0),
+            distance=float(camera.get("distance", 1.2)),
+            azimuth_deg=float(camera.get("azimuth_deg", 25.0)),
+            elevation_deg=float(camera.get("elevation_deg", 45.0)),
+            fov_deg=float(camera.get("fov_deg", 45.0)),
+        ),
+        lighting=f3d.LightingPreset(
+            name=str(lighting.get("name", "daylight")),
+            intensity=float(lighting.get("intensity", 1.1)),
+        ),
+        output=f3d.OutputSpec(
+            width=int(output.get("width", 640)),
+            height=int(output.get("height", 420)),
+            format="png",
+        ),
+        layers=layers_out,
+        reproducibility_profile=f3d.ReproducibilityProfile(seed=404),
+    )
+    return {
+        "recipe": scene.to_dict()["recipe"],
+        "diagnostics": diagnostics,
+        "layer_count": len(layers_out),
+    }
+
 def _op_mapscene_render(p):
     """Render a recipe JSON through MapScene.render (the certified path)."""
     recipe_data = json.loads(p["recipe_json"])
@@ -1429,6 +1593,7 @@ _OPS = {
     "terrain.clear": _op_terrain_clear,
     "terrain.params_schema": _op_terrain_params_schema,
     "terrain.params_validate": _op_terrain_params_validate,
+    "scene.compile": _op_scene_compile,
     "mapscene.templates": _op_mapscene_templates,
     "mapscene.template": _op_mapscene_template,
     "mapscene.render": _op_mapscene_render,

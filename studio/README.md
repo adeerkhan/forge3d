@@ -128,6 +128,16 @@ Milestones from GUI.md section 12:
       recipe validation and rendering through `MapScene.render` (the
       certified `gpu_terrain` path); recipe camera sliders; project format
       v2 stores the serialized `SceneRecipe` verbatim.
+- [x] **U2. Inspector per kind + `scene.compile`** — the document is the
+      recipe source: `scene.compile` (bridge op) compiles the layer tree
+      into the canonical `SceneRecipe` with the example-identical
+      construction (terrain/raster/vector/labels; groups recurse; unrenderable
+      kinds are excluded with an honest `layer_unrenderable` diagnostic; a
+      missing terrain is a hard `no_terrain` error). Templates materialize
+      document rows; renders always compile first; the inspector edits
+      per-kind style (vector stroke, label text) through undoable
+      `SetStyle` commands feeding the next compile. Parity-locked by
+      `scene_compile_document_semantics`.
 - [x] **W1 ring: colormap picker** — terrain rendering accepts any
       registered forge3d colormap (engine registry via `colormaps.list`);
       project v2 persists the selection.
