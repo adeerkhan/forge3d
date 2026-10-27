@@ -50,6 +50,10 @@ pub struct ExampleEntry {
     /// The scene Studio applies when the card is opened (absent for B/C).
     #[serde(default)]
     pub scene: Option<serde_json::Value>,
+    /// U4: repo-relative path to a committed engine reference render used as
+    /// the card art (only when the example IS that render's producer).
+    #[serde(default)]
+    pub thumbnail: Option<String>,
 }
 
 impl ExampleEntry {
@@ -109,8 +113,8 @@ fn category_icon(category: &str) -> Icon {
 pub struct GalleryState {
     pub open: bool,
     category: Option<String>,
-    thumbnails: HashMap<String, egui::TextureHandle>,
-    failed: HashMap<String, bool>,
+    pub thumbnails: HashMap<String, egui::TextureHandle>,
+    pub failed: HashMap<String, bool>,
 }
 
 impl GalleryState {
@@ -122,7 +126,10 @@ impl GalleryState {
         if self.failed.contains_key(&entry.id) {
             return None;
         }
-        let path = output_dir().join(format!("{}.png", entry.id));
+        let path = match &entry.thumbnail {
+            Some(rel) => crate::app::resolve_repo_path(std::path::Path::new(rel)),
+            None => output_dir().join(format!("{}.png", entry.id)),
+        };
         let image = match image::open(&path) {
             Ok(image) => image,
             Err(_) => {
@@ -329,6 +336,13 @@ fn card(
         format!(
             "{}\n\n{}\nOpen: apply this scene through Studio",
             entry.example, entry.description
+        )
+    } else if entry.tier == "C" {
+        format!(
+            "{}\n\n{}\nRequires downloading external data — Studio cannot fetch it yet.\nUnlocks with {}.",
+            entry.example,
+            entry.description,
+            entry.unlock.as_deref().unwrap_or("a later milestone")
         )
     } else {
         format!(

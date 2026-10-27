@@ -320,7 +320,7 @@ pub struct StudioApp {
 /// the checkout, never the process CWD (which depends on how the binary was
 /// launched). Absolute paths pass through untouched; missing relative paths
 /// are returned unchanged so the engine's own error text stays honest.
-fn resolve_repo_path(path: &Path) -> PathBuf {
+pub(crate) fn resolve_repo_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
         return path.to_path_buf();
     }
@@ -335,7 +335,7 @@ fn resolve_repo_path(path: &Path) -> PathBuf {
 
 /// True when a file exists but is an unresolved git-LFS pointer rather than
 /// its content (the fixture was not materialized with `git lfs pull`).
-fn is_lfs_pointer(path: &Path) -> bool {
+pub(crate) fn is_lfs_pointer(path: &Path) -> bool {
     use std::io::Read;
     let Ok(mut file) = std::fs::File::open(path) else {
         return false;
@@ -3333,7 +3333,10 @@ impl StudioApp {
                     );
                 }
             }
-            Action::ShowExamples => self.gallery.open = true,
+            Action::ShowExamples => {
+                self.gallery.open = true;
+                self.prefetch_gallery_thumbnails();
+            }
             Action::ShowShortcuts => self.shortcuts_open = true,
             Action::ShowAbout => self.set_status(format!(
                 "Forge3D Studio {} — embedded forge3d engine, bridge v2 (17 operations)",
@@ -3376,6 +3379,48 @@ impl StudioApp {
         self.project_dirty = true;
         self.engine.send(Command::SetCamera(self.project.camera));
         self.invalidate_viewport();
+    }
+
+    /// U4: materialize committed golden thumbnails before the gallery shows.
+    /// One batched `git lfs pull` for every missing reference render; the
+    /// status bar discloses that this downloads files.
+    fn prefetch_gallery_thumbnails(&mut self) {
+        if self.lfs_fetch.is_some() {
+            return;
+        }
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        let missing: Vec<PathBuf> = crate::ui::examples::entries()
+            .iter()
+            .filter_map(|entry| entry.thumbnail.as_deref())
+            .map(|rel| crate::app::resolve_repo_path(Path::new(rel)))
+            .filter(|path| !path.exists() || is_lfs_pointer(path))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        let includes = missing
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.set_status(format!(
+            "Fetching {} reference render(s) for the gallery (git lfs pull — this downloads files)…",
+            missing.len()
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.lfs_fetch = Some(rx);
+        std::thread::Builder::new()
+            .name("studio-lfs-thumbs".to_owned())
+            .spawn(move || {
+                let output = std::process::Command::new("git")
+                    .args(["lfs", "pull", "--include"])
+                    .arg(&includes)
+                    .current_dir(&root)
+                    .output();
+                let _ = tx.send(output.map(|o| o.status.success()));
+            })
+            .ok();
     }
 
     /// Materialize an unresolved git-LFS fixture in the background and open
@@ -3423,6 +3468,7 @@ impl StudioApp {
         };
         if let Some(result) = done {
             self.lfs_fetch = None;
+            self.gallery.failed.clear();
             match result {
                 Ok(true) => {
                     self.set_status("Engine fixture fetched; opening example…");
