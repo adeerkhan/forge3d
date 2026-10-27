@@ -167,6 +167,20 @@ Milestones from GUI.md section 12:
       today, and a registered-only layer says so in its row tooltip, the
       Inspector and the status bar. `scene.compile` (document → `SceneRecipe`)
       is scheduled with U2's per-kind editors.
+- [x] **U4 core: examples gallery** — `studio/examples/index.json` indexes
+      every one of the repository's 50 `examples/*.py` scripts with a tier
+      (**A** runs today, **B/C** name the milestone that unlocks them), and
+      `examples_gallery.rs` renders every Tier-A scene through the same bridge
+      the app uses, writing the gallery's thumbnails to
+      `studio/target/example-output/`. Open `Help ▸ Examples gallery` in the
+      app: Tier-A cards are clickable and apply their scene (DEM, camera, sun,
+      render params, rig or MapScene template) with one click; B/C cards state
+      why they are not yet runnable instead of pretending. Two bugs this work
+      uncovered are fixed on the way: the viewport's colormap overlay was
+      missing the terrain's height **domain** (every frame rendered washed-out
+      grey — now locked by a chroma gate), and the camera-rig default orbit
+      radius put the eye outside the DEM bounds, which the engine correctly
+      rejects. Parity: `examples_gallery.rs`.
 - [x] **M4 core: full `TerrainRenderParams` property pages** —
       `terrain.params_schema` introspects `make_terrain_params_config`
       and every nested settings dataclass (21 root params, 26 settings
@@ -214,6 +228,8 @@ Milestones from GUI.md section 12:
 - Only the terrain layer and groups render today; imported datasets are
   registered as reference layers, and the rest of the layer kinds appear in
   `Scene ▸ Add layer` with their renderers (U2/U3).
+- The gallery's Tier-A set is five scenes; the other 45 examples are listed
+  with their unlock milestone (U2/U3/M5-M11) rather than rendered.
 - The layer document does not yet compile to a `SceneRecipe`
   (`scene.compile`), so MapScene still builds its recipe from a template in
   the Scene tab.

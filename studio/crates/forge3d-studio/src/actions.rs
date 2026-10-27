@@ -157,6 +157,7 @@ pub enum Action {
     // Render
     RenderFrame,
     // Help
+    ShowExamples,
     ShowShortcuts,
     ShowAbout,
     // Palette-only
@@ -504,6 +505,15 @@ pub const ACTIONS: &[ActionDef] = &[
         need: Need::Nothing,
     },
     // ---------------------------------------------------------------- Help
+    ActionDef {
+        action: Action::ShowExamples,
+        label: "Examples gallery",
+        icon: Some(Icon::Layers),
+        shortcut: None,
+        menu: Some(Menu::Help),
+        checkable: false,
+        need: Need::Nothing,
+    },
     ActionDef {
         action: Action::ShowShortcuts,
         label: "Keyboard shortcuts",

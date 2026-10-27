@@ -352,7 +352,7 @@ Engine surface: `viewer.py`, `viewer_ipc.py`, `viewer_contract.py`, `_viewer_bin
 
 ### W10 — Examples port
 
-The gallery (3.7) plus the index contract. Every example enters the index with a tier; Tier-A examples get a parity test that opens the scene through the document path and renders it. Tier-B/C entries are the roadmap the user can see inside the app.
+The gallery (3.7) plus the index contract — **landed as a core**: all 50 examples are indexed with a tier, `examples_gallery.rs` renders every Tier-A scene through the bridge (and produces the gallery's thumbnails), and B/C entries name their milestone instead of pretending. Remaining: one-click open through the *document* path once `scene.compile` lands in U2, and thumbnails for the not-yet-runnable cards.
 
 ---
 
@@ -391,7 +391,7 @@ Each milestone ends with: build green, `cargo fmt --check`, `clippy -D warnings`
 | **U1** | **Document v3 + Layers panel** *(landed)* | `studio-project::document` (ordered layer tree, groups, visibility/opacity/lock, 10 kinds), v2→v3 migration on load, snapshot undo/redo, panel with painted rows, drag reorder (before/after/into-group), collapse, eye/lock/opacity, inline rename, context menu, multi-select, Edit/Layer/Scene menus, selection-driven Inspector header, project v3 persistence | **Landed:** reorder/group/ungroup/duplicate/undo/migration unit tests (30 in `studio-project`, 33 in the app), a 100-layer document lays out headlessly, layer order and ids are stable across save/load. **Deferred to U2:** `scene.compile` (document → `SceneRecipe`) lands with the per-kind editors, because compiling a layer Studio cannot yet author or render would be a promise the UI cannot keep. | L |
 | **U2** | **Inspector per kind** | Selection-driven inspector; M4 render pages re-homed under `Render`; raster/vector/buildings/labels style editors; inline engine validation everywhere | Each kind's editor produces a document that compiles to the recipe its example builds (parity per kind); invalid values show the engine's message and never reach a render | L |
 | **U3** | **Viewport tools + 3D gizmo** | Tool group, zoom/pan/fit/presets, gizmo (6 snap zones + orbit drag + reset), HUD (zoom, coords, scale bar, safe frame), compare mode, selection highlight | Gizmo maths unit-tested (projection + snap inverse); one render per gesture end (debounce test); keyboard presets change the camera exactly once | M |
-| **U4** | **Examples gallery** | `studio/examples/index.json` over all 51 examples, category chips, thumbnails, tiers, one-click open, `Help ▸ Examples gallery` | Index contract tests pass; two Tier-A scenes (`mapscene_terrain_raster`, `terrain_demo`) open from the gallery and render through the document path matching their existing parity goldens | M |
+| **U4** | **Examples gallery** *(core landed)* | `studio/examples/index.json` over all 50 examples, category chips, tiers, one-click open, `Help ▸ Examples gallery`; harness renders every Tier-A scene and writes the cards' thumbnails | **Landed:** index contract tests + `examples_gallery.rs` render all 5 Tier-A scenes through the bridge (866 KB–1 MB PNGs, chroma-locked). **Remaining:** thumbnails for cards whose examples are not yet Tier A, and one-click open for the MapScene document path once `scene.compile` lands (U2). | M |
 
 ### Engine-facing milestones (after the shell)
 

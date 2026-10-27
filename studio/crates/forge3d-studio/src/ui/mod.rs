@@ -7,6 +7,7 @@
 //! so they can be rendered headlessly.
 
 pub mod dock;
+pub mod examples;
 pub mod menu;
 pub mod palette;
 pub mod panels;

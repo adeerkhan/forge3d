@@ -168,7 +168,9 @@ impl Default for RigSpec {
             phi_start_deg: 0.0,
             phi_end_deg: 360.0,
             theta_start_deg: 45.0,
-            radius_rel: 1.0,
+            // The baked eye must stay inside the DEM bounds (the engine
+            // validates this); 1.0 put it outside on every real dataset.
+            radius_rel: 0.32,
             path_text: "0.15,0.15\n0.5,0.5\n0.85,0.85".to_owned(),
             samples_per_second: 12,
             keyframes: Vec::new(),
@@ -282,6 +284,14 @@ pub struct StudioApp {
     /// U1: the layer whose opacity is being dragged, so one gesture is one
     /// undo step instead of one per frame.
     opacity_edit: Option<LayerId>,
+    /// U4: the examples gallery window + its thumbnails.
+    gallery: crate::ui::examples::GalleryState,
+    /// U4: the gallery entry waiting for its dataset to load.
+    pending_example: Option<crate::ui::examples::ExampleEntry>,
+    /// U4: camera override for the next MapScene template build.
+    pending_mapscene_camera: Option<serde_json::Value>,
+    /// U4: render the MapScene recipe as soon as the template job returns.
+    render_after_recipe: bool,
 }
 
 impl StudioApp {
@@ -342,6 +352,10 @@ impl StudioApp {
             layers_ui: LayersState::default(),
             history: DocHistory::new(HISTORY_LIMIT),
             opacity_edit: None,
+            gallery: crate::ui::examples::GalleryState::default(),
+            pending_example: None,
+            pending_mapscene_camera: None,
+            render_after_recipe: false,
         }
     }
 
@@ -464,6 +478,9 @@ impl StudioApp {
                     self.layers_ui = LayersState::default();
                     self.request_viewport_render();
                     self.set_status(format!("Loaded {} ({}×{})", path.display(), width, height));
+                    if self.pending_example.is_some() {
+                        self.apply_pending_example();
+                    }
                 }
                 Event::TerrainCleared => {
                     self.project.terrain = None;
@@ -604,6 +621,10 @@ impl StudioApp {
                             .map(|a| a.len())
                             .unwrap_or(0)
                     ));
+                    if self.render_after_recipe {
+                        self.render_after_recipe = false;
+                        self.render_mapscene();
+                    }
                 }
                 None => self.push_error("MapScene template", "no recipe in result"),
             },
@@ -889,7 +910,7 @@ impl StudioApp {
             self.push_error("MapScene template", "load a DEM dataset first");
             return;
         };
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "template": self.mapscene.template,
             "dem_path": terrain.path.to_string_lossy(),
             "width": self.project.export.width,
@@ -897,6 +918,16 @@ impl StudioApp {
             "raster_path": self.mapscene.raster_path.as_ref().map(|p| p.to_string_lossy()),
             "label_text": self.mapscene.label_text,
         });
+        // A gallery scene pins the recipe camera it was verified with.
+        if let Some(camera) = self.pending_mapscene_camera.take() {
+            if let Some(map) = params.as_object_mut() {
+                for key in ["distance", "azimuth_deg", "elevation_deg", "fov_deg"] {
+                    if let Some(value) = camera.get(key) {
+                        map.insert(key.to_owned(), value.clone());
+                    }
+                }
+            }
+        }
         let job = self.engine.call("mapscene.template", params);
         self.pending_jobs.insert(job, PendingJob::MapSceneTemplate);
         self.set_status("Building MapScene recipe from template…");
@@ -2750,6 +2781,7 @@ impl StudioApp {
                     );
                 }
             }
+            Action::ShowExamples => self.gallery.open = true,
             Action::ShowShortcuts => self.shortcuts_open = true,
             Action::ShowAbout => self.set_status(format!(
                 "Forge3D Studio {} — embedded forge3d engine, bridge v2 (17 operations)",
@@ -2801,6 +2833,128 @@ impl StudioApp {
         self.project_dirty = true;
         self.engine.send(Command::SetCamera(self.project.camera));
         self.invalidate_viewport();
+    }
+
+    /// Open one gallery entry: load its dataset (async) and apply the scene.
+    fn open_example(&mut self, entry: crate::ui::examples::ExampleEntry) {
+        let Some(scene) = entry.scene.clone() else {
+            return;
+        };
+        self.set_status(format!("Opening example '{}'…", entry.title));
+        self.pending_example = Some(entry);
+        let dem = scene
+            .get("dem")
+            .and_then(|dem| dem.as_str())
+            .map(PathBuf::from);
+        let needs_load = match (&dem, &self.project.terrain) {
+            (Some(path), Some(terrain)) => terrain.path != *path,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if needs_load {
+            if let Some(path) = dem {
+                self.engine.send(Command::LoadTerrain { path });
+            }
+            return;
+        }
+        self.apply_pending_example();
+    }
+
+    /// Finish an example once its dataset is available.
+    fn apply_pending_example(&mut self) {
+        let Some(entry) = self.pending_example.take() else {
+            return;
+        };
+        let Some(scene) = entry.scene.clone() else {
+            return;
+        };
+        let kind = scene
+            .get("kind")
+            .and_then(|kind| kind.as_str())
+            .unwrap_or("terrain");
+        match kind {
+            "mapscene" => {
+                self.scene_mode = SceneMode::MapScene;
+                self.project.scene_mode = studio_project::SCENE_MODE_MAPSCENE.to_owned();
+                self.mapscene.template = scene
+                    .get("template")
+                    .and_then(|template| template.as_str())
+                    .unwrap_or("terrain")
+                    .to_owned();
+                self.mapscene.raster_path = scene
+                    .get("raster")
+                    .and_then(|raster| raster.as_str())
+                    .map(PathBuf::from);
+                if let Some(text) = scene.get("label_text").and_then(|text| text.as_str()) {
+                    self.mapscene.label_text = text.to_owned();
+                }
+                self.pending_mapscene_camera = scene.get("camera").cloned();
+                self.render_after_recipe = true;
+                self.dock.left_tab = 1;
+                self.build_mapscene_template();
+            }
+            _ => {
+                self.scene_mode = SceneMode::Terrain;
+                self.project.scene_mode = studio_project::SCENE_MODE_TERRAIN.to_owned();
+                if let Some(camera) = scene.get("camera") {
+                    // Scenes express distance relative to the terrain span so a
+                    // framing survives a dataset change; the engine's world is
+                    // (domain span × 6) wide (see `_op_terrain_render`).
+                    let span = self
+                        .project
+                        .terrain
+                        .as_ref()
+                        .map(|terrain| {
+                            (terrain.height_max - terrain.height_min).abs().max(1.0) * 6.0
+                        })
+                        .unwrap_or(1.0);
+                    let radius = match camera.get("radius_rel").and_then(|rel| rel.as_f64()) {
+                        Some(relative) => span * relative as f32,
+                        None => number(camera, "radius", self.project.camera.radius),
+                    };
+                    self.project.camera = CameraParams {
+                        phi_deg: number(camera, "phi_deg", self.project.camera.phi_deg),
+                        theta_deg: number(camera, "theta_deg", self.project.camera.theta_deg),
+                        radius,
+                        fov_deg: number(camera, "fov_deg", self.project.camera.fov_deg),
+                    };
+                }
+                if let Some(sun) = scene.get("sun") {
+                    self.project.sun = SunParams {
+                        azimuth_deg: number(sun, "azimuth_deg", self.project.sun.azimuth_deg),
+                        elevation_deg: number(sun, "elevation_deg", self.project.sun.elevation_deg),
+                        intensity: number(sun, "intensity", self.project.sun.intensity),
+                    };
+                }
+                if let Some(params) = scene.get("params") {
+                    self.project.terrain_params = params.clone();
+                    self.schedule_params_validate();
+                }
+                self.sync_engine_state();
+                self.dock.left_tab = 0;
+                if kind == "terrain_rig" {
+                    if let Some(rig) = scene.get("rig") {
+                        self.rig.kind = rig
+                            .get("kind")
+                            .and_then(|kind| kind.as_str())
+                            .unwrap_or("orbit")
+                            .to_owned();
+                        self.rig.duration = number(rig, "duration", self.rig.duration);
+                        self.rig.radius_rel = number(rig, "radius_rel", self.rig.radius_rel);
+                        self.rig.phi_start_deg =
+                            number(rig, "phi_start_deg", self.rig.phi_start_deg);
+                        self.rig.phi_end_deg = number(rig, "phi_end_deg", self.rig.phi_end_deg);
+                        self.rig.theta_start_deg =
+                            number(rig, "theta_start_deg", self.rig.theta_start_deg);
+                    }
+                    self.dock.bottom_tab = 0;
+                    self.bake_rig();
+                } else {
+                    self.invalidate_viewport();
+                }
+                self.set_status(format!("Example '{}' applied", entry.title));
+            }
+        }
     }
 
     /// The primary selected layer, if it still exists.
@@ -2936,6 +3090,11 @@ impl eframe::App for StudioApp {
             self.run_action(ctx, action);
         }
         shortcuts::window(ctx, &mut self.shortcuts_open);
+        if let Some(entry) =
+            crate::ui::examples::window(ctx, &mut self.gallery, &self.icons, &self.tokens)
+        {
+            self.open_example(entry);
+        }
 
         // Persist layout changes (splitter drags included) once they settle.
         let (width, height) = (ctx.screen_rect().width(), ctx.screen_rect().height());
@@ -2964,6 +3123,15 @@ impl eframe::App for StudioApp {
         self.flush_params_validate();
         self.flush_pending_render();
     }
+}
+
+/// Read a number from a scene spec, falling back to the current value.
+fn number(value: &serde_json::Value, key: &str, fallback: f32) -> f32 {
+    value
+        .get(key)
+        .and_then(|number| number.as_f64())
+        .map(|number| number as f32)
+        .unwrap_or(fallback)
 }
 
 fn sanitize_name(name: &str) -> String {

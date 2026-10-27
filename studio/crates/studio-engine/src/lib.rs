@@ -277,10 +277,18 @@ def _write_default_hdr(path):
         fh.write(bytes([200, 210, 235, 136]) * 32)
 
 
-def _ensure_overlay(cmap_name):
-    """Build (and memoize) the colormap overlay used for terrain frames."""
+def _ensure_overlay(cmap_name, domain=None):
+    """Build (and memoize) the colormap overlay used for terrain frames.
+
+    `domain` is the terrain's raw height range, and it is not optional in
+    practice: without it the overlay samples the ramp in normalised space, so
+    every terrain above that range clamps to the top colour and the viewport
+    renders washed out. The canonical demo passes `domain` for the same reason
+    (`terrain_demo._build_params`).
+    """
     global _overlay, _overlay_cmap_key
-    key = cmap_name or "__default__"
+    span = None if domain is None else (float(domain[0]), float(domain[1]))
+    key = (cmap_name or "__default__", span)
     if _overlay is not None and _overlay_cmap_key == key:
         return _overlay
     if cmap_name:
@@ -293,7 +301,10 @@ def _ensure_overlay(cmap_name):
     else:
         stops = _DEFAULT_CMAP_STOPS
     cmap1d = f3d.Colormap1D.from_stops(stops=stops, domain=(0.0, 1.0))
-    _overlay = f3d.OverlayLayer.from_colormap1d(cmap1d, strength=1.0)
+    options = {"strength": 1.0}
+    if span is not None:
+        options["domain"] = span
+    _overlay = f3d.OverlayLayer.from_colormap1d(cmap1d, **options)
     _overlay_cmap_key = key
     return _overlay
 
@@ -735,10 +746,10 @@ def _op_terrain_render(p):
     if not os.path.exists(hdr_path):
         _write_default_hdr(hdr_path)
     _ensure_session(hdr_path)
-    overlay = _ensure_overlay(p.get("colormap"))
     camera = p["camera"]
     sun = p["sun"]
     domain = p.get("domain") or [_domain[0], _domain[1]]
+    overlay = _ensure_overlay(p.get("colormap"), domain)
     span = float(p.get("terrain_span") or max(domain[1] - domain[0], 1.0) * 6.0)
     # Project params first, then the Studio defaults for anything unset, and
     # last the values the viewport pipeline owns (geometry, camera, sun,
@@ -804,10 +815,12 @@ def _op_mapscene_template(p):
 
     # Terrain world metadata. GeoTIFF goes through the engine's own loader;
     # .npy terrain sources (which MapScene accepts natively) load via numpy.
+    bounds = None
     try:
         dem = f3d.io.load_dem(dem_path)
         tw, th = int(dem.data.shape[1]), int(dem.data.shape[0])
         crs_default = dem.crs
+        bounds = getattr(dem, "bounds", None)
     except Exception:
         arr = np.load(dem_path)
         tw, th = int(arr.shape[1]), int(arr.shape[0])
@@ -846,10 +859,26 @@ def _op_mapscene_template(p):
             )
         ]
     elif name == "terrain_vector_labels":
+        # Vector and label geometry must be expressed in the terrain's CRS. A
+        # georeferenced DEM gives its bounds; an un-georeferenced source (a raw
+        # .npy grid) falls back to pixel space. Pixel coordinates on a
+        # lon/lat terrain are off-terrain and every label gets rejected, which
+        # is exactly the bug this branch used to have.
+        if bounds is not None:
+            left, bottom, right, top = (float(v) for v in bounds)
+            cx = (left + right) / 2.0
+            cy = (bottom + top) / 2.0
+            line = [
+                [left + (right - left) * 0.15, bottom + (top - bottom) * 0.25],
+                [left + (right - left) * 0.85, bottom + (top - bottom) * 0.75],
+            ]
+        else:
+            cx, cy = tw * 0.5, th * 0.5
+            line = [[tw * 0.1, th * 0.2], [tw * 0.9, th * 0.75]]
         features = p.get("features") or [
             {
                 "id": "line-1",
-                "geometry": {"type": "LineString", "coordinates": [[0.1, 0.2], [0.9, 0.75]]},
+                "geometry": {"type": "LineString", "coordinates": line},
                 "properties": {"class": "primary"},
             }
         ]
@@ -858,7 +887,7 @@ def _op_mapscene_template(p):
                 "id": "label-1",
                 "kind": "point",
                 "text": str(p.get("label_text", "Label")),
-                "geometry": {"type": "Point", "coordinates": [tw * 0.5, th * 0.5, 0.0]},
+                "geometry": {"type": "Point", "coordinates": [cx, cy, 0.0]},
                 "priority_class": "cities",
             }
         ]
