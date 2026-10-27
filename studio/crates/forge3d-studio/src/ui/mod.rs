@@ -9,6 +9,7 @@
 pub mod dock;
 pub mod menu;
 pub mod palette;
+pub mod panels;
 pub mod shortcuts;
 pub mod status;
 pub mod theme;

@@ -22,7 +22,7 @@ pub fn toolbar(
                 ui.separator();
             }
             let Some(icon) = action.icon() else { continue };
-            let texture = icons.get(ui.ctx(), icon);
+            let texture = icons.texture(ui.ctx(), icon);
             let tooltip = match action.shortcut_label() {
                 Some(shortcut) => format!("{} ({shortcut})", action.label()),
                 None => action.label().to_owned(),

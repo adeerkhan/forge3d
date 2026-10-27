@@ -109,7 +109,7 @@ Menus are the primary surface; the toolbar exposes only the six most-used action
 | **Tools** | Determinism check…, Detail-normal bake…, Benchmark…, Import diagnostics… |
 | **Help** | Keyboard shortcuts, Examples gallery, About Forge3D Studio |
 
-**One registry.** Every menu item and toolbar button is an `Action` value with an id, label, shortcut, icon, enabled-predicate and handler. Consequences, all test-locked:
+**One registry.** Every menu item and toolbar button is an `Action` value with an id, label, shortcut, icon, enabled-predicate and handler. Entries appear when their handler exists — `Add layer` lists only the layer kinds Studio can actually create, and grows as each kind's renderer lands. Consequences, all test-locked:
 
 - No dead entries: an action that is not implemented is *absent*, never a disabled stub (except while a predicate says "no selection" / "job running", which the UI explains on hover).
 - One shortcut table: duplicates are a test failure.
@@ -125,6 +125,7 @@ The layer tree *is* the scene document. Photoshop's ordering and toggles, QGIS's
 - **Reorder** by dragging (with a drop indicator line); **grouping** into folders that carry their own visibility/opacity; **rename** on double-click or F2.
 - **Context menu:** Duplicate, Delete, Group/Ungroup, Move to top/bottom, Zoom to layer, Layer properties…, Copy style / Paste style.
 - **Kind icons and colour coding:** terrain, raster overlay, vector, buildings, labels, point cloud, mesh, furniture — one glyph per kind, reused everywhere.
+- **What can be added today:** a terrain layer (import) and empty groups; imported datasets land as their detected kind. The rest of the kinds appear in `Add layer` when their renderer lands, so the menu never offers a layer that cannot draw — a registered-only row says so in the Inspector and the status bar.
 - **Smart affordances:** a raster overlay row shows its colormap swatch; a terrain row shows its height range; a vector row shows its stroke colour; a broken source path shows a warning badge (the engine's own validation text on hover).
 - **Layer kinds** (each maps to an existing engine surface — no invented concepts):
 
@@ -339,11 +340,11 @@ Engine surface: `viewer.py`, `viewer_ipc.py`, `viewer_contract.py`, `_viewer_bin
 
 | Capability | Delivered in |
 |---|---|
-| Module split, design tokens, extended icon set | U0 |
-| Action registry + full menu bar + toolbar + shortcuts window + command palette | U0 |
-| Dock slots with tab groups, layout presets, persisted layout, collapsible rails | U0 |
-| Document model v3 + Layers panel (tree, groups, drag reorder, eye/lock/opacity, rename, context menu, multi-select) | U1 |
-| Undo/redo command stack over the document | U1 |
+| Module split, design tokens, 35-glyph typed icon set | U0 *(landed)* |
+| Action registry + full menu bar + toolbar + shortcuts window + command palette | U0 *(landed)* |
+| Dock slots with tab groups, layout presets, persisted layout, collapsible rails | U0 *(landed)* |
+| Document model v3 + Layers panel (tree, groups, drag reorder, eye/lock/opacity, rename, context menu, multi-select) | U1 *(landed)* |
+| Undo/redo command stack over the document (snapshot per gesture) | U1 *(landed)* |
 | Selection-driven Inspector per layer kind; M4 parameter pages re-homed | U2 |
 | Viewport tools, 3D navigation gizmo, HUD (zoom, coords, scale bar, safe frame), compare mode | U3 |
 | Bottom dock: timeline, console, certificates, statistics | U0 (tabs) / M5 (content) |
@@ -387,7 +388,7 @@ Each milestone ends with: build green, `cargo fmt --check`, `clippy -D warnings`
 | # | Milestone | Contents | Exit criteria (testable) | Size |
 |---|---|---|---|---|
 | **U0** | **Shell, tokens, actions, docks** | Module split; `theme.rs` tokens + dark/light; icon set extended to ~35 glyphs; `Action` registry with the full menu tree, toolbar, shortcuts window, command palette; four dock slots with tab groups, layout presets, persisted layout; new status bar | Every `Action` has exactly one handler and one shortcut (tests); every menu path resolves to an `Action`; no unreachable action; layout round-trips through config; panels render headlessly without panic; existing engine behaviour unchanged (all parity tests still green) | M |
-| **U1** | **Document v3 + Layers panel** | `doc/` model, migration v2→v3, `scene.compile` op; Layers tree with groups, drag reorder, eye/lock/opacity, rename, context menu, multi-select; undo/redo stack; project v3 save/load | Reorder/group/undo unit tests; v2 project opens and re-saves as v3 with a warning list; compiled recipe for the `mapscene_terrain_raster` document equals the existing template JSON byte-for-byte; a 100-layer document renders headlessly | L |
+| **U1** | **Document v3 + Layers panel** *(landed)* | `studio-project::document` (ordered layer tree, groups, visibility/opacity/lock, 10 kinds), v2→v3 migration on load, snapshot undo/redo, panel with painted rows, drag reorder (before/after/into-group), collapse, eye/lock/opacity, inline rename, context menu, multi-select, Edit/Layer/Scene menus, selection-driven Inspector header, project v3 persistence | **Landed:** reorder/group/ungroup/duplicate/undo/migration unit tests (30 in `studio-project`, 33 in the app), a 100-layer document lays out headlessly, layer order and ids are stable across save/load. **Deferred to U2:** `scene.compile` (document → `SceneRecipe`) lands with the per-kind editors, because compiling a layer Studio cannot yet author or render would be a promise the UI cannot keep. | L |
 | **U2** | **Inspector per kind** | Selection-driven inspector; M4 render pages re-homed under `Render`; raster/vector/buildings/labels style editors; inline engine validation everywhere | Each kind's editor produces a document that compiles to the recipe its example builds (parity per kind); invalid values show the engine's message and never reach a render | L |
 | **U3** | **Viewport tools + 3D gizmo** | Tool group, zoom/pan/fit/presets, gizmo (6 snap zones + orbit drag + reset), HUD (zoom, coords, scale bar, safe frame), compare mode, selection highlight | Gizmo maths unit-tested (projection + snap inverse); one render per gesture end (debounce test); keyboard presets change the camera exactly once | M |
 | **U4** | **Examples gallery** | `studio/examples/index.json` over all 51 examples, category chips, thumbnails, tiers, one-click open, `Help ▸ Examples gallery` | Index contract tests pass; two Tier-A scenes (`mapscene_terrain_raster`, `terrain_demo`) open from the gallery and render through the document path matching their existing parity goldens | M |

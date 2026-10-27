@@ -2,7 +2,7 @@
 
 use egui::{Color32, Image, RichText, Ui};
 
-use crate::icons::Icons;
+use crate::icons::{Icon, Icons};
 
 /// Everything the status bar shows, passed by value so it stays a pure widget.
 #[derive(Default)]
@@ -24,7 +24,7 @@ pub fn status_bar(ui: &mut Ui, icons: &Icons, parts: &StatusParts<'_>) -> bool {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         if let Some(adapter) = parts.adapter {
-            let icon = icons.get(ui.ctx(), "cpu");
+            let icon = icons.texture(ui.ctx(), Icon::Cpu);
             ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(12.0, 12.0)));
             let label = match parts.backend {
                 Some(backend) if parts.software => format!("{adapter} ({backend}, software)"),
@@ -61,7 +61,7 @@ pub fn status_bar(ui: &mut Ui, icons: &Icons, parts: &StatusParts<'_>) -> bool {
                 {
                     clear = true;
                 }
-                let icon = icons.get(ui.ctx(), "circle-alert");
+                let icon = icons.texture(ui.ctx(), Icon::CircleAlert);
                 ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(12.0, 12.0)));
                 ui.label(
                     RichText::new(error)
@@ -71,7 +71,7 @@ pub fn status_bar(ui: &mut Ui, icons: &Icons, parts: &StatusParts<'_>) -> bool {
                 .on_hover_text(error);
             } else if let Some(status) = parts.status {
                 ui.label(RichText::new(status).size(11.5).weak());
-                let icon = icons.get(ui.ctx(), "circle-check");
+                let icon = icons.texture(ui.ctx(), Icon::CircleCheck);
                 ui.add(Image::new(&icon).fit_to_exact_size(egui::vec2(12.0, 12.0)));
             }
         });

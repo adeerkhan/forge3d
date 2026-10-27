@@ -8,8 +8,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod document;
+
+pub use document::{DocHistory, Document, Layer, LayerId, LayerKind, Row};
+
 /// Format version written by this build of the application.
-pub const CURRENT_FORMAT_VERSION: u32 = 2;
+///
+/// v3 adds the scene document ([`Document`]) — the ordered layer tree the
+/// Layers panel edits. v1/v2 files are migrated on load in memory.
+pub const CURRENT_FORMAT_VERSION: u32 = 3;
 
 /// Scene mode: direct terrain rendering or a MapScene recipe scene.
 pub const SCENE_MODE_TERRAIN: &str = "terrain";
@@ -161,6 +168,10 @@ pub struct Project {
     /// means "engine defaults"; unknown keys are rejected on load into the
     /// engine rather than silently dropped.
     pub terrain_params: serde_json::Value,
+    /// v3: the scene document — the ordered layer tree the Layers panel edits.
+    /// Migrated from the v2 fields (terrain reference, dataset list, serialized
+    /// recipe) when absent.
+    pub document: Document,
 }
 
 impl Default for Project {
@@ -179,6 +190,7 @@ impl Default for Project {
             datasets: Vec::new(),
             camera_rig_json: None,
             terrain_params: serde_json::Value::Object(serde_json::Map::new()),
+            document: Document::default(),
         }
     }
 }
@@ -190,7 +202,12 @@ impl Project {
     }
 
     /// Save the project as pretty-printed JSON at `path`.
-    pub fn save(&self, path: &Path) -> Result<(), ProjectError> {
+    ///
+    /// The document is normalized first, so a project built in memory (imports
+    /// added without touching the layer tree) is written consistently: the file
+    /// always carries the layer rows its own fields imply.
+    pub fn save(&mut self, path: &Path) -> Result<(), ProjectError> {
+        self.normalize();
         let json = serde_json::to_string_pretty(self).map_err(|source| ProjectError::Json {
             path: path.to_path_buf(),
             source,
@@ -220,7 +237,103 @@ impl Project {
                 supported: CURRENT_FORMAT_VERSION,
             });
         }
+        let mut project = project;
+        project.normalize();
         Ok(project)
+    }
+
+    /// Migrate whatever the file carried into the v3 [`Document`], in memory.
+    ///
+    /// Idempotent: on a project that already has layers it only re-syncs the
+    /// terrain layer's mirror of `terrain_visible`. Nothing is discarded — the
+    /// legacy fields stay readable so an older build can still open the file.
+    pub fn normalize(&mut self) {
+        self.format_version = CURRENT_FORMAT_VERSION;
+        if !self.document.is_empty() {
+            self.sync_terrain_layer();
+            return;
+        }
+        // Recipe layers sit above the terrain. Recipe order is bottom→top, and
+        // the document is topmost-first, so they are pushed in reverse: the
+        // first recipe layer ends up lowest.
+        if let Some(json) = self.scene_recipe_json.clone() {
+            if let Ok(recipe) = serde_json::from_str::<serde_json::Value>(&json) {
+                if let Some(layers) = recipe.get("layers").and_then(|l| l.as_array()) {
+                    for layer in layers.iter().rev() {
+                        let kind = LayerKind::from_recipe_type(
+                            layer.get("type").and_then(|t| t.as_str()).unwrap_or(""),
+                        );
+                        let name = layer
+                            .get("name")
+                            .and_then(|n| n.as_str())
+                            .or_else(|| layer.get("id").and_then(|n| n.as_str()))
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| kind.label().to_owned());
+                        let visible = layer
+                            .get("visible")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        let source = layer
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| layer.get("path").and_then(|v| v.as_str()))
+                            .map(str::to_owned);
+                        self.document.push_detailed(
+                            kind,
+                            name,
+                            visible,
+                            source,
+                            layer.clone(),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        let datasets = self.datasets.clone();
+        for dataset in datasets {
+            self.document.push_detailed(
+                LayerKind::from_dataset_kind(&dataset.kind),
+                dataset.label,
+                true,
+                Some(dataset.path.display().to_string()),
+                serde_json::Value::Null,
+                None,
+            );
+        }
+        self.sync_terrain_layer();
+    }
+
+    /// Create, update or drop the terrain layer so it matches [`Self::terrain`]
+    /// and [`Self::terrain_visible`]. The terrain is the bottom of the stack.
+    pub fn sync_terrain_layer(&mut self) {
+        let Some(terrain) = self.terrain.clone() else {
+            if let Some(id) = self.document.terrain_layer().map(|layer| layer.id) {
+                self.document.remove(id);
+            }
+            return;
+        };
+        let name = terrain
+            .path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Terrain".to_owned());
+        let source = terrain.path.display().to_string();
+        let visible = self.terrain_visible;
+        if let Some(layer) = self.document.terrain_layer_mut() {
+            layer.name = name;
+            layer.source = Some(source);
+            layer.visible = visible;
+            return;
+        }
+        self.document.push_detailed(
+            LayerKind::Terrain,
+            name,
+            visible,
+            Some(source),
+            serde_json::Value::Null,
+            None,
+        );
     }
 
     /// Non-fatal validation warnings, e.g. datasets that no longer exist.
@@ -270,6 +383,89 @@ mod tests {
         let parsed: Project = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(project, parsed);
         assert_eq!(parsed.format_version, CURRENT_FORMAT_VERSION);
+    }
+
+    #[test]
+    fn v2_project_migrates_into_the_layer_document() {
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("legacy-v2.forge3d");
+        let recipe = serde_json::json!({
+            "layers": [
+                { "type": "raster", "name": "Hillshade", "visible": true },
+                { "type": "labels", "name": "Place names" }
+            ]
+        })
+        .to_string();
+        let json = serde_json::json!({
+            "format_version": 2,
+            "name": "legacy",
+            "terrain": {
+                "path": "/tmp/dem.tif", "width": 8, "height": 8,
+                "height_min": 0.0, "height_max": 1.0
+            },
+            "datasets": [
+                { "path": "/tmp/tiles.json", "kind": "tileset", "label": "City" }
+            ],
+            "scene_recipe_json": recipe
+        });
+        std::fs::write(&path, json.to_string()).expect("write");
+
+        let project = Project::load(&path).expect("load");
+        std::fs::remove_file(&path).ok();
+
+        let kinds: Vec<LayerKind> = project
+            .document
+            .layers
+            .iter()
+            .map(|layer| layer.kind)
+            .collect();
+        // Topmost first: the recipe's last layer, then the raster, then the
+        // registered tileset, and the terrain at the bottom of the stack.
+        assert_eq!(
+            kinds,
+            vec![
+                LayerKind::Labels,
+                LayerKind::RasterOverlay,
+                LayerKind::Buildings,
+                LayerKind::Terrain
+            ]
+        );
+        assert_eq!(
+            project.format_version, CURRENT_FORMAT_VERSION,
+            "loading migrates the version in memory"
+        );
+        // The recipe payload is kept verbatim for the U2 compiler.
+        assert_eq!(project.document.layers[0].style["type"], "labels");
+        assert_eq!(project.document.layers[1].name, "Hillshade");
+        assert_eq!(
+            project.document.layers[2].source.as_deref(),
+            Some("/tmp/tiles.json")
+        );
+    }
+
+    #[test]
+    fn terrain_visibility_mirrors_into_its_layer() {
+        let mut project = Project {
+            terrain: Some(TerrainRef {
+                path: PathBuf::from("/tmp/dem.tif"),
+                width: 8,
+                height: 8,
+                height_min: 0.0,
+                height_max: 1.0,
+            }),
+            terrain_visible: false,
+            ..Project::default()
+        };
+        project.normalize();
+        let layer = project.document.terrain_layer().expect("terrain layer");
+        assert!(!layer.visible);
+        assert_eq!(layer.name, "dem");
+
+        // Dropping the terrain drops its row too.
+        project.terrain = None;
+        project.normalize();
+        assert!(project.document.terrain_layer().is_none());
     }
 
     #[test]

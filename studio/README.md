@@ -152,6 +152,21 @@ Milestones from GUI.md section 12:
       timeline, and "render sequence" exports `frame_%04d.png` frames
       (center-locked replay; target-carrying playback is M4/M10).
       Parity: `parity_ingest.rs`.
+- [x] **U1: document v3 + Layers panel** — the scene is now an ordered layer
+      tree (`studio-project::document`): groups, visibility/opacity/lock,
+      ten layer kinds, stable ids, contiguous subtrees, and snapshot
+      undo/redo (one step per gesture). The Layers panel paints its rows
+      instead of stacking widgets: drag to reorder (before/after/into a
+      group), disclosure to collapse, eye/lock hit targets, inline rename,
+      a context menu, multi-select with shift ranges, and an opacity control
+      that belongs to the selection. `Edit`, `Layer` and `Scene` menus drive
+      the same operations through the action registry; the Inspector follows
+      the selection. v2 projects migrate on load: terrain, imported datasets
+      and serialized recipe layers become rows, and saving writes v3.
+      Capability honesty is built in — only the terrain and groups render
+      today, and a registered-only layer says so in its row tooltip, the
+      Inspector and the status bar. `scene.compile` (document → `SceneRecipe`)
+      is scheduled with U2's per-kind editors.
 - [x] **M4 core: full `TerrainRenderParams` property pages** —
       `terrain.params_schema` introspects `make_terrain_params_config`
       and every nested settings dataclass (21 root params, 26 settings
@@ -196,6 +211,12 @@ Milestones from GUI.md section 12:
 
 ### Known limitations
 
+- Only the terrain layer and groups render today; imported datasets are
+  registered as reference layers, and the rest of the layer kinds appear in
+  `Scene ▸ Add layer` with their renderers (U2/U3).
+- The layer document does not yet compile to a `SceneRecipe`
+  (`scene.compile`), so MapScene still builds its recipe from a template in
+  the Scene tab.
 - Viewport renders on demand (camera/sun changes), not continuously.
 - One terrain dataset per scene; no mesh/point-cloud layers yet.
 - No cancel support for in-flight renders (GUI.md 8: they are never

@@ -13,12 +13,14 @@ use egui::{
     Color32, ColorImage, Context, Response, Sense, Slider, TextureHandle, TextureOptions, Ui,
 };
 use studio_engine::{Command, EngineHandle, Event};
-use studio_project::{CameraParams, Project, SunParams};
+use studio_project::document::{DocHistory, LayerId, LayerKind};
+use studio_project::{CameraParams, Layer, Project, SunParams};
 
 use crate::actions::Action;
 use crate::icons::Icons;
 use crate::ui::dock::{self, DockState, LayoutPreset};
 use crate::ui::palette::Palette;
+use crate::ui::panels::layers::{self, LayersCommand, LayersState, LayersView};
 use crate::ui::status::StatusParts;
 use crate::ui::theme::{self, Tokens};
 use crate::ui::{menu, shortcuts, status, toolbar};
@@ -30,6 +32,8 @@ const PARAMS_VALIDATE_DEBOUNCE: Duration = Duration::from_millis(700);
 const MAX_STATUS_ERRORS: usize = 4;
 /// Console history kept in the bottom dock.
 const MAX_LOG_LINES: usize = 500;
+/// Undo depth for document edits (whole-document snapshots).
+const HISTORY_LIMIT: usize = 200;
 
 struct GpuInfo {
     adapter: String,
@@ -268,6 +272,16 @@ pub struct StudioApp {
     log: VecDeque<LogEntry>,
     /// Last renderer preset applied to the scene (shown in the Inspector).
     applied_preset: Option<String>,
+    /// U1: the selected layers (topmost-first order, like the panel) and the
+    /// primary one the Inspector edits.
+    selection: Vec<LayerId>,
+    /// U1: transient Layers-panel state (drag, inline rename).
+    layers_ui: LayersState,
+    /// U1: undo/redo over the document.
+    history: DocHistory,
+    /// U1: the layer whose opacity is being dragged, so one gesture is one
+    /// undo step instead of one per frame.
+    opacity_edit: Option<LayerId>,
 }
 
 impl StudioApp {
@@ -324,6 +338,10 @@ impl StudioApp {
             shortcuts_open: false,
             log: VecDeque::new(),
             applied_preset: None,
+            selection: Vec::new(),
+            layers_ui: LayersState::default(),
+            history: DocHistory::new(HISTORY_LIMIT),
+            opacity_edit: None,
         }
     }
 
@@ -435,12 +453,24 @@ impl StudioApp {
                     self.project.sun = sun;
                     self.project_dirty = true;
                     self.last_frame_ms = None;
+                    self.project.sync_terrain_layer();
+                    self.selection = self
+                        .project
+                        .document
+                        .terrain_layer()
+                        .map(|layer| vec![layer.id])
+                        .unwrap_or_default();
+                    self.history.clear();
+                    self.layers_ui = LayersState::default();
                     self.request_viewport_render();
                     self.set_status(format!("Loaded {} ({}×{})", path.display(), width, height));
                 }
                 Event::TerrainCleared => {
                     self.project.terrain = None;
                     self.project.terrain_visible = true;
+                    self.project.sync_terrain_layer();
+                    self.selection.clear();
+                    self.history.clear();
                     self.project_dirty = true;
                     self.set_status("Terrain unloaded");
                 }
@@ -986,10 +1016,22 @@ impl StudioApp {
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| preview.path.display().to_string());
+        let source = preview.path.display().to_string();
+        let layer_kind = LayerKind::from_dataset_kind(&kind);
         self.project.datasets.push(studio_project::DatasetRef {
             path: preview.path,
             kind,
-            label,
+            label: label.clone(),
+        });
+        self.edit_document(|project| {
+            project.document.push_detailed(
+                layer_kind,
+                label,
+                true,
+                Some(source),
+                serde_json::Value::Null,
+                None,
+            );
         });
         self.project_dirty = true;
         self.set_status("Dataset added to project");
@@ -1246,6 +1288,9 @@ impl StudioApp {
             play_t0: 0.0,
         };
         self.sequence = None;
+        self.selection.clear();
+        self.history.clear();
+        self.layers_ui = LayersState::default();
         self.params_validation = None;
         self.params_validate_due = None;
         self.param_drafts.clear();
@@ -1294,6 +1339,14 @@ impl StudioApp {
                 self.project_path = Some(path);
                 self.project_dirty = false;
                 // M4: the newly opened params replace the old pages' state.
+                self.selection = self
+                    .project
+                    .document
+                    .terrain_layer()
+                    .map(|layer| vec![layer.id])
+                    .unwrap_or_default();
+                self.history.clear();
+                self.layers_ui = LayersState::default();
                 self.params_validation = None;
                 self.params_validate_due = None;
                 self.param_drafts.clear();
@@ -1461,22 +1514,33 @@ impl StudioApp {
         }
     }
 
-    /// Whether an action can run right now. Actions that only need the app
-    /// (not a dataset) stay enabled; ones that need a terrain are disabled and
-    /// explain themselves on hover via the status bar.
+    /// Whether an action can run right now, driven by the registry's [`Need`]
+    /// so the menus, the toolbar and the panel all agree.
     fn action_enabled(&self, action: Action) -> bool {
-        match action {
-            Action::ExportPng | Action::RenderFrame | Action::FitView => {
-                self.project.terrain.is_some()
-            }
-            Action::CameraTop
-            | Action::CameraFront
-            | Action::CameraRight
-            | Action::CameraIso
-            | Action::CameraReset
-            | Action::ZoomIn
-            | Action::ZoomOut => self.project.terrain.is_some(),
-            _ => true,
+        match action.need() {
+            crate::actions::Need::Nothing => match action {
+                Action::ExportPng
+                | Action::RenderFrame
+                | Action::FitView
+                | Action::ZoomIn
+                | Action::ZoomOut
+                | Action::CameraTop
+                | Action::CameraFront
+                | Action::CameraRight
+                | Action::CameraIso
+                | Action::CameraReset => self.project.terrain.is_some(),
+                _ => true,
+            },
+            crate::actions::Need::Layers => !self.project.document.is_empty(),
+            crate::actions::Need::Selection => self.selection.first().is_some_and(|id| {
+                self.project
+                    .document
+                    .layer(*id)
+                    .map(|layer| !layer.locked)
+                    .unwrap_or(false)
+            }),
+            crate::actions::Need::Undo => self.history.can_undo(),
+            crate::actions::Need::Redo => self.history.can_redo(),
         }
     }
 
@@ -1519,7 +1583,7 @@ impl StudioApp {
                 egui::ScrollArea::vertical()
                     .id_source("left_dock_scroll")
                     .show(ui, |ui| match self.dock.left_tab {
-                        0 => self.terrain_section(ui),
+                        0 => self.layers_tab(ui),
                         1 => self.scene_section(ui),
                         _ => self.assets_section(ui),
                     });
@@ -1611,79 +1675,213 @@ impl StudioApp {
             });
     }
 
-    fn terrain_section(&mut self, ui: &mut Ui) {
-        ui.label(theme::group_label("Scene layers"));
-        let terrain_present = self.project.terrain.is_some();
-        // Visibility is app-side for now: a hidden layer shows the
-        // empty-state message instead of the last rendered frame.
-        if ui
-            .add_enabled(
-                terrain_present,
-                egui::Checkbox::new(&mut self.project.terrain_visible, "Terrain"),
-            )
-            .changed()
-        {
-            self.project_dirty = true;
+    /// Layers tab: the scene document, edited as rows (GUI.md III.3).
+    ///
+    /// The panel draws and reports; every mutation happens in
+    /// [`Self::apply_layers_command`] so undo recording is uniform.
+    fn layers_tab(&mut self, ui: &mut Ui) {
+        let view = LayersView {
+            document: &self.project.document,
+            selected: &self.selection,
+            primary: self.selection.first().copied(),
+            icons: &self.icons,
+            tokens: &self.tokens,
+        };
+        let commands = layers::panel(ui, &mut self.layers_ui, &view);
+        for command in commands {
+            self.apply_layers_command(command);
         }
-        if !terrain_present {
-            ui.weak("No terrain loaded");
-        }
-        ui.add_space(8.0);
+    }
 
-        ui.label(theme::group_label("Datasets"));
-        match &self.project.terrain {
-            Some(terrain) => {
-                egui::Grid::new("dataset_info")
-                    .num_columns(2)
-                    .show(ui, |ui| {
-                        ui.label("File");
-                        ui.label(terrain.path.display().to_string())
-                            .on_hover_text(terrain.path.display().to_string());
-                        ui.label("Size");
-                        ui.label(format!("{} × {}", terrain.width, terrain.height));
-                        ui.label("Height");
-                        ui.label(format!(
-                            "{:.1} … {:.1}",
-                            terrain.height_min, terrain.height_max
-                        ));
+    /// Apply one Layers-panel command, recording undo for real edits.
+    fn apply_layers_command(&mut self, command: LayersCommand) {
+        // Dragging opacity emits a command per frame; one gesture is one step.
+        let continuing_opacity =
+            matches!(&command, LayersCommand::SetOpacity(id, _) if self.opacity_edit == Some(*id));
+        if !continuing_opacity {
+            self.opacity_edit = None;
+        }
+        match command {
+            LayersCommand::Select { ids, additive } => {
+                if additive {
+                    for id in ids {
+                        match self.selection.iter().position(|selected| *selected == id) {
+                            Some(index) => {
+                                self.selection.remove(index);
+                            }
+                            None => self.selection.push(id),
+                        }
+                    }
+                } else {
+                    self.selection = ids;
+                }
+                self.selection
+                    .retain(|id| self.project.document.layer(*id).is_some());
+            }
+            LayersCommand::SetVisible(id, visible) => {
+                self.edit_document(|project| {
+                    if let Some(layer) = project.document.layer_mut(id) {
+                        layer.visible = visible;
+                    }
+                    if project.document.terrain_layer().map(|layer| layer.id) == Some(id) {
+                        project.terrain_visible = visible;
+                    }
+                });
+                if self.is_terrain(id) {
+                    self.invalidate_viewport();
+                }
+            }
+            LayersCommand::SetLocked(id, locked) => self.edit_document(|project| {
+                if let Some(layer) = project.document.layer_mut(id) {
+                    layer.locked = locked;
+                }
+            }),
+            LayersCommand::SetOpacity(id, opacity) => {
+                if continuing_opacity {
+                    if let Some(layer) = self.project.document.layer_mut(id) {
+                        layer.opacity = opacity.clamp(0.0, 1.0);
+                    }
+                    self.project_dirty = true;
+                } else {
+                    self.edit_document(|project| {
+                        if let Some(layer) = project.document.layer_mut(id) {
+                            layer.opacity = opacity.clamp(0.0, 1.0);
+                        }
                     });
-                if ui.button("Remove from scene").clicked() {
-                    self.engine.send(Command::ClearTerrain);
+                    self.opacity_edit = Some(id);
+                }
+                if self.is_terrain(id) {
+                    self.invalidate_viewport();
                 }
             }
-            None => {
-                ui.weak("Import a GeoTIFF / F3DZ / NPY / COG dataset:");
-                if ui.button("Import Dataset…").clicked() {
-                    self.import_dataset();
+            LayersCommand::SetExpanded(id, expanded) => self.edit_document(|project| {
+                if let Some(layer) = project.document.layer_mut(id) {
+                    layer.expanded = expanded;
+                }
+            }),
+            LayersCommand::BeginRename(id) => {
+                if let Some(layer) = self.project.document.layer(id) {
+                    let name = layer.name.clone();
+                    self.layers_ui.begin_rename(id, &name);
                 }
             }
-        }
-
-        if !self.project.datasets.is_empty() {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Imported datasets").strong());
-            let mut remove_idx = None;
-            for (index, dataset) in self.project.datasets.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.weak(&dataset.kind);
-                    ui.label(&dataset.label)
-                        .on_hover_text(dataset.path.display().to_string());
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("Remove from project")
-                        .clicked()
-                    {
-                        remove_idx = Some(index);
+            LayersCommand::Rename(id, name) => self.edit_document(|project| {
+                if let Some(layer) = project.document.layer_mut(id) {
+                    layer.name = name;
+                }
+            }),
+            LayersCommand::Move { id, spot } => {
+                self.dock.left_tab = 0;
+                self.edit_document(|project| match spot {
+                    layers::DropSpot::Before(target) => {
+                        project.document.move_beside(id, target, false);
+                    }
+                    layers::DropSpot::After(target) => {
+                        project.document.move_beside(id, target, true);
+                    }
+                    layers::DropSpot::Into(target) => {
+                        project.document.move_into(id, target);
                     }
                 });
             }
-            if let Some(index) = remove_idx {
-                self.project.datasets.remove(index);
-                self.project_dirty = true;
+            LayersCommand::Duplicate(id) => {
+                let mut copy = None;
+                self.edit_document(|project| {
+                    copy = project.document.duplicate(id);
+                });
+                if let Some(copy) = copy {
+                    self.selection = vec![copy];
+                }
             }
-            if ui.button("Import Dataset…").clicked() {
-                self.import_dataset();
+            LayersCommand::Delete(ids) => self.delete_layers(&ids),
+            LayersCommand::Group(ids) => {
+                let mut group = None;
+                self.edit_document(|project| {
+                    group = project.document.group(&ids, "Group");
+                });
+                if let Some(group) = group {
+                    self.selection = vec![group];
+                }
             }
+            LayersCommand::Ungroup(id) => {
+                self.edit_document(|project| {
+                    project.document.ungroup(id);
+                });
+                self.selection.clear();
+            }
+            LayersCommand::MoveUp(id) => self.edit_document(|project| {
+                project.document.move_by(id, 1);
+            }),
+            LayersCommand::MoveDown(id) => self.edit_document(|project| {
+                project.document.move_by(id, -1);
+            }),
+            LayersCommand::ZoomTo(id) => {
+                if self.is_terrain(id) {
+                    self.fit_view();
+                } else {
+                    self.set_status(
+                        "Zoom to layer needs the layer's bounds; only the terrain has them today",
+                    );
+                }
+            }
+            LayersCommand::AddTerrain | LayersCommand::ImportDataset => self.import_dataset(),
+        }
+    }
+
+    /// Remove layers (and the project state they own), with undo.
+    fn delete_layers(&mut self, ids: &[LayerId]) {
+        let mut cleared_terrain = false;
+        let mut removed_dataset = false;
+        let mut removed = false;
+        let before = self.project.document.clone();
+        for id in ids {
+            let Some(layer) = self.project.document.layer(*id).cloned() else {
+                continue;
+            };
+            if layer.kind == LayerKind::Terrain {
+                self.project.terrain = None;
+                self.project.terrain_visible = true;
+                self.engine.send(Command::ClearTerrain);
+                cleared_terrain = true;
+            }
+            if let Some(source) = &layer.source {
+                let path = std::path::PathBuf::from(source);
+                let before_len = self.project.datasets.len();
+                self.project.datasets.retain(|dataset| dataset.path != path);
+                removed_dataset |= self.project.datasets.len() != before_len;
+            }
+            removed |= !self.project.document.remove(*id).is_empty();
+        }
+        if self.project.document != before {
+            self.history.record(before);
+            self.project_dirty = true;
+        }
+        self.selection.clear();
+        if removed || cleared_terrain || removed_dataset {
+            self.set_status(format!(
+                "Removed {} layer(s){}",
+                ids.len(),
+                if cleared_terrain {
+                    " and unloaded the terrain"
+                } else {
+                    ""
+                }
+            ));
+        }
+    }
+
+    fn is_terrain(&self, id: LayerId) -> bool {
+        self.project.document.terrain_layer().map(|layer| layer.id) == Some(id)
+    }
+
+    /// Mutate the project with undo recording: nothing is recorded when the
+    /// document did not actually change.
+    fn edit_document(&mut self, edit: impl FnOnce(&mut Project)) {
+        let before = self.project.document.clone();
+        edit(&mut self.project);
+        if self.project.document != before {
+            self.history.record(before);
+            self.project_dirty = true;
         }
     }
 
@@ -1837,6 +2035,13 @@ impl StudioApp {
     /// selectable layers, the selection is the scene itself (camera, sun,
     /// output), which is exactly what the old "Properties" column mixed in.
     fn inspector_tab(&mut self, ui: &mut Ui) {
+        if let Some(id) = self.selection.first().copied() {
+            self.layer_inspector(ui, id);
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+        }
+        ui.label(theme::group_label("Scene"));
         match self.scene_mode {
             SceneMode::Terrain => {
                 self.camera_section(ui);
@@ -1847,6 +2052,62 @@ impl StudioApp {
         }
         ui.add_space(10.0);
         self.export_section(ui);
+    }
+
+    /// Properties of the selected layer. Kind-specific editors arrive with U2;
+    /// what exists today is real and says which layer kinds render.
+    fn layer_inspector(&mut self, ui: &mut Ui, id: LayerId) {
+        let Some(layer) = self.project.document.layer(id).cloned() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            let texture = self.icons.texture(ui.ctx(), layers::layer_icon(layer.kind));
+            ui.add(egui::Image::new(&texture).fit_to_exact_size(egui::vec2(16.0, 16.0)));
+            ui.label(egui::RichText::new(&layer.name).strong());
+        });
+        ui.label(theme::meta(format!(
+            "{} layer{}",
+            layer.kind.label(),
+            if layer.kind.renders() {
+                ""
+            } else {
+                " · registered only"
+            }
+        )));
+        if let Some(source) = &layer.source {
+            ui.label(theme::meta(source.clone()))
+                .on_hover_text(source.clone());
+        }
+        if !layer.kind.renders() && !layer.kind.is_group() {
+            ui.weak(
+                "Referenced by the project, but Studio has no renderer for this kind yet —                  the gallery and this panel say so instead of pretending.",
+            );
+        }
+        ui.add_space(6.0);
+        let mut visible = layer.visible;
+        if ui.checkbox(&mut visible, "Visible").changed() {
+            self.apply_layers_command(LayersCommand::SetVisible(id, visible));
+        }
+        if !layer.kind.is_group() {
+            let mut opacity = layer.opacity;
+            if ui
+                .add(egui::Slider::new(&mut opacity, 0.0..=1.0).text("Opacity"))
+                .changed()
+            {
+                self.apply_layers_command(LayersCommand::SetOpacity(id, opacity));
+            }
+        }
+        let mut locked = layer.locked;
+        if ui.checkbox(&mut locked, "Locked").changed() {
+            self.apply_layers_command(LayersCommand::SetLocked(id, locked));
+        }
+        if layer.kind == LayerKind::Terrain {
+            ui.add_space(4.0);
+            if ui.button("Edit render parameters").clicked() {
+                self.dock.right_tab = 1;
+            }
+            ui.weak("Sun, camera and output sit under Scene below.");
+        }
     }
 
     /// Bottom dock: the rig timeline and the console. Collapses to one row.
@@ -1949,6 +2210,16 @@ impl StudioApp {
 
     /// Label describing the current selection for the status bar.
     fn selection_label(&self) -> Option<String> {
+        if let Some(layer) = self.primary_layer() {
+            let mut label = format!("{} · {}", layer.name, layer.kind.label());
+            if !layer.kind.renders() && !layer.kind.is_group() {
+                label.push_str(" · registered only");
+            }
+            if self.selection.len() > 1 {
+                label.push_str(&format!(" +{}", self.selection.len() - 1));
+            }
+            return Some(label);
+        }
         match self.scene_mode {
             SceneMode::Terrain => self.project.terrain.as_ref().map(|terrain| {
                 let name = terrain
@@ -2370,6 +2641,105 @@ impl StudioApp {
             }
             Action::ThemeDark => self.apply_theme(ctx, true),
             Action::ThemeLight => self.apply_theme(ctx, false),
+            Action::Undo => {
+                let mut current = std::mem::take(&mut self.project.document);
+                let moved = self.history.undo(&mut current);
+                self.project.document = current;
+                if moved {
+                    self.after_document_history();
+                }
+            }
+            Action::Redo => {
+                let mut current = std::mem::take(&mut self.project.document);
+                let moved = self.history.redo(&mut current);
+                self.project.document = current;
+                if moved {
+                    self.after_document_history();
+                }
+            }
+            Action::DuplicateLayer => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::Duplicate(id));
+                }
+            }
+            Action::DeleteLayer => {
+                let ids = self.selection.clone();
+                self.apply_layers_command(LayersCommand::Delete(ids));
+            }
+            Action::GroupLayers => {
+                let ids = self.selection.clone();
+                self.apply_layers_command(LayersCommand::Group(ids));
+            }
+            Action::UngroupLayer => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::Ungroup(id));
+                }
+            }
+            Action::RenameLayer => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::BeginRename(id));
+                    self.dock.left_tab = 0;
+                }
+            }
+            Action::SelectAllLayers => {
+                self.selection = self
+                    .project
+                    .document
+                    .layers
+                    .iter()
+                    .map(|layer| layer.id)
+                    .collect();
+            }
+            Action::AddTerrainLayer => self.import_dataset(),
+            Action::AddGroup => {
+                let mut created = None;
+                self.edit_document(|project| {
+                    created = Some(project.document.push(LayerKind::Group, "Group", None));
+                });
+                if let Some(id) = created {
+                    self.selection = vec![id];
+                    self.set_status("Group added — drag layers into it");
+                }
+            }
+            Action::ZoomToLayer => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::ZoomTo(id));
+                }
+            }
+            Action::ToggleLayerVisibility => {
+                if let Some(layer) = self.primary_layer() {
+                    self.apply_layers_command(LayersCommand::SetVisible(layer.id, !layer.visible));
+                }
+            }
+            Action::ToggleLayerLock => {
+                if let Some(layer) = self.primary_layer() {
+                    self.apply_layers_command(LayersCommand::SetLocked(layer.id, !layer.locked));
+                }
+            }
+            Action::LayerMoveUp => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::MoveUp(id));
+                }
+            }
+            Action::LayerMoveDown => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.apply_layers_command(LayersCommand::MoveDown(id));
+                }
+            }
+            Action::LayerToTop => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.edit_document(|project| {
+                        project.document.move_to_edge(id, true);
+                    });
+                }
+            }
+            Action::LayerToBottom => {
+                if let Some(id) = self.selection.first().copied() {
+                    self.edit_document(|project| {
+                        project.document.move_to_edge(id, false);
+                    });
+                }
+            }
             Action::RenderFrame => {
                 if self.project.terrain.is_some() {
                     self.invalidate_viewport();
@@ -2430,6 +2800,28 @@ impl StudioApp {
     fn push_camera(&mut self) {
         self.project_dirty = true;
         self.engine.send(Command::SetCamera(self.project.camera));
+        self.invalidate_viewport();
+    }
+
+    /// The primary selected layer, if it still exists.
+    fn primary_layer(&self) -> Option<&Layer> {
+        self.selection
+            .first()
+            .and_then(|id| self.project.document.layer(*id))
+    }
+
+    /// After an undo/redo: prune dead selection, keep the file dirty, and
+    /// re-sync engine-facing state the document mirrors.
+    fn after_document_history(&mut self) {
+        self.project_dirty = true;
+        self.selection
+            .retain(|id| self.project.document.layer(*id).is_some());
+        self.project.terrain_visible = self
+            .project
+            .document
+            .terrain_layer()
+            .map(|layer| layer.visible)
+            .unwrap_or(true);
         self.invalidate_viewport();
     }
 
