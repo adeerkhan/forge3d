@@ -118,7 +118,8 @@ Milestones from GUI.md section 12:
       in the embedded interpreter; `Command::Call`/`Event::JobDone/JobFailed`
       job protocol; terrain load/render migrated onto it. Ops: `probe`,
       `terrain.load/info/render/clear`, `mapscene.templates/template/
-      render/validate`, `colormaps.list`, `presets.list`, `datasets.list`.
+      render/validate`, `colormaps.list`, `presets.list`, `datasets.list`,
+      `dataset.inspect`, `presets.get`, `rig.bake`.
 - [x] **M2. MapScene in Studio (W2 ring 1)** — scene-mode switch (Terrain ⇄
       MapScene); recipe templates built with the canonical example call
       sequences (`terrain`, `terrain_raster`, `terrain_vector_labels`);
@@ -131,9 +132,29 @@ Milestones from GUI.md section 12:
 - [x] **W5 ring: render certificates** — MapScene renders can request a
       signed RenderCertificate (`certificate_payload_sha256` shown in the
       scene panel).
+- [x] **M3 ring: unified import (W3 ingest)** — `dataset.inspect` bridge op
+      previews honest per-format metadata (GeoTIFF/COG, NPY, F3DZ, LAZ/
+      COPC/EPT, 3D Tiles, OBJ/glTF, GeoJSON-family vectors; STL reported
+      unsupported — export-only in the engine). Only DEM-like sources claim
+      the terrain slot (`terrain_loadable: true`); everything else
+      registers as a project dataset reference (path + kind + label, never
+      pixel data). `terrain.load` now accepts `.npy` and `.f3dz`/`.f3z`
+      directly. Parity: `parity_ingest.rs`.
+- [x] **W1 depth: presets dropdown + camera rigs + timeline** —
+      `presets.get` returns full preset payloads; the terrain sun maps the
+      preset's first directional light (az/el, intensity ×0.5 clamped
+      0–10), MapScene mode patches the certified
+      `LightingPreset(name=…)` recipe path. `rig.bake` bakes orbit/rail/
+      follow rigs from a loaded DEM (scatter-source units rescaled to
+      renderer units), the camera panel scrubs/plays the keyframe
+      timeline, and "render sequence" exports `frame_%04d.png` frames
+      (center-locked replay; target-carrying playback is M4/M10).
+      Parity: `parity_ingest.rs`.
 - [x] **Part IV harness** — `tests/harness_registry.json` + parity tests
-      (`parity_mapscene.rs`): every template validates and renders through
-      the engine; catalog ops asserted against the engine registries;
+      (`parity_mapscene.rs`, `parity_ingest.rs`): every template validates
+      and renders through the engine; catalog ops asserted against the
+      engine registries; ingest metadata + rig bakes + preset payloads
+      asserted against the engine's own Python API;
       device-lane-dependent golden gate behind `FORGE3D_STUDIO_GOLDEN_STRICT`.
 - [ ] **5. Embedded viewport** — current viewport is a CPU readback of the
       engine's render (~100–300 ms/frame, on-demand, not continuous).

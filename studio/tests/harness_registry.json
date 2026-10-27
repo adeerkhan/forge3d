@@ -42,8 +42,56 @@
       "milestone": "M4",
       "engine_surface": ["presets.available", "presets.get", "LightingPreset"],
       "examples": ["examples/mapscene_offline_quality.py"],
-      "studio_ops": ["presets.list"],
-      "parity_test": "studio::engine::tests::parity_mapscene::catalog_ops_list_registered_entries"
+      "studio_ops": ["presets.list", "presets.get"],
+      "parity_test": "studio::engine::tests::parity_ingest::presets_get_matches_list_and_carries_directional_light"
+    },
+    {
+      "capability": "unified-import",
+      "workstream": "W3",
+      "milestone": "M3",
+      "engine_surface": [
+        "gis.read_raster_info",
+        "gis.vector_crs",
+        "pointcloud.CopcDataset",
+        "pointcloud.LasDataset",
+        "pointcloud.EptDataset",
+        "tiles3d.load_tileset",
+        "io.import_gltf",
+        "codec.decompress_dem"
+      ],
+      "examples": [
+        "examples/mapscene_vector_labels.py",
+        "examples/vector_line_drape.py",
+        "examples/pointcloud_viewer_interactive.py",
+        "examples/mapscene_p1_assets_bundle_showcase.py"
+      ],
+      "studio_ops": ["dataset.inspect"],
+      "parity_test": "studio::engine::tests::parity_ingest::dataset_inspect_reports_honest_per_format_metadata",
+      "notes": "Non-terrain formats (point cloud, tileset, mesh, vector) preview honest metadata with terrain_loadable=false; only DEM-like sources (GeoTIFF/COG/NPY/F3DZ) may claim the terrain slot. STL is export-only and reported unsupported."
+    },
+    {
+      "capability": "terrain-load-npy-f3dz",
+      "workstream": "W1",
+      "milestone": "M3",
+      "engine_surface": ["codec.decompress_dem", "numpy.load"],
+      "examples": ["examples/terrain_demo.py"],
+      "studio_ops": ["terrain.load"],
+      "parity_test": "studio::engine::tests::parity_ingest::terrain_load_accepts_npy_and_f3dz"
+    },
+    {
+      "capability": "camera-rig-bake",
+      "workstream": "W1",
+      "milestone": "M4",
+      "engine_surface": [
+        "camera_rigs.TerrainOrbitRig",
+        "camera_rigs.TerrainRailRig",
+        "camera_rigs.TerrainTargetFollowRig",
+        "terrain_scatter.TerrainScatterSource"
+      ],
+      "examples": ["examples/terrain_camera_rigs_demo.py", "examples/camera_animation_demo.py"],
+      "studio_ops": ["rig.bake"],
+      "parity_test": "studio::engine::tests::parity_ingest::rig_bake_orbit_yields_monotonic_renderer_keyframes",
+      "notes": "Bakes in scatter-source units then rescales keyframe radii by terrain_span / source.terrain_width into renderer units; timeline replays a center-locked orbit camera (target-carrying playback lands with M4/M10)."
     }
   ]
 }

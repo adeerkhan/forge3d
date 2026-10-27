@@ -76,13 +76,19 @@ fn engine_loads_dem_and_renders_frames() {
     assert!(loaded.0.radius > 0.0);
     assert!(loaded.1.elevation_deg > 0.0);
 
-    engine.send(Command::RenderFrame { width: 320, height: 240 });
+    engine.send(Command::RenderFrame {
+        width: 320,
+        height: 240,
+    });
     let (w, h, rgba) = wait_for(
         &events,
         Duration::from_secs(300),
         |e| match e {
             Event::FrameReady {
-                width, height, rgba, ..
+                width,
+                height,
+                rgba,
+                ..
             } => Some((*width, *height, rgba.clone())),
             _ => None,
         },

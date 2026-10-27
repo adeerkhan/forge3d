@@ -78,7 +78,9 @@ fn bridge_renders_example_mapscene_templates() {
         &events,
         Duration::from_secs(120),
         |e| match e {
-            Event::JobDone { job: done, result, .. } if *done == job => result
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result
                 .get("templates")
                 .and_then(|t| t.as_array())
                 .map(|a| a.len()),
@@ -104,20 +106,17 @@ fn bridge_renders_example_mapscene_templates() {
             // renders a small DEM by design.
             let raster = std::env::temp_dir().join("studio-parity-overlay.png");
             image::RgbImage::from_fn(32, 24, |x, y| {
-                image::Rgb([
-                    (x * 255 / 31) as u8,
-                    (y * 255 / 23) as u8,
-                    128,
-                ])
+                image::Rgb([(x * 255 / 31) as u8, (y * 255 / 23) as u8, 128])
             })
-            .write_to(&mut std::fs::File::create(&raster).expect("create overlay"), image::ImageFormat::Png)
+            .write_to(
+                &mut std::fs::File::create(&raster).expect("create overlay"),
+                image::ImageFormat::Png,
+            )
             .expect("write overlay fixture");
             params["raster_path"] = serde_json::json!(raster.to_string_lossy());
-            params["dem_path"] = serde_json::json!(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../python/forge3d/data/mini_dem.npy")
-                    .to_string_lossy()
-            );
+            params["dem_path"] = serde_json::json!(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../python/forge3d/data/mini_dem.npy")
+                .to_string_lossy());
             params["crs"] = serde_json::json!("EPSG:32610");
         }
         let job = engine.call("mapscene.template", params.clone());
@@ -125,10 +124,12 @@ fn bridge_renders_example_mapscene_templates() {
             &events,
             Duration::from_secs(300),
             |e| match e {
-                Event::JobDone { job: done, result, .. } if *done == job => {
-                    result.get("recipe").cloned()
-                }
-                Event::JobFailed { job: done, message, .. } if *done == job => {
+                Event::JobDone {
+                    job: done, result, ..
+                } if *done == job => result.get("recipe").cloned(),
+                Event::JobFailed {
+                    job: done, message, ..
+                } if *done == job => {
                     panic!("template {template} failed: {message}");
                 }
                 _ => None,
@@ -162,15 +163,17 @@ fn bridge_renders_example_mapscene_templates() {
             &events,
             Duration::from_secs(300),
             |e| match e {
-                Event::JobDone { job: done, result, .. } if *done == job => {
-                    Some(
-                        result
-                            .get("status")
-                            .and_then(|s| s.as_str())
-                            .map(String::from),
-                    )
-                }
-                Event::JobFailed { job: done, message, .. } if *done == job => {
+                Event::JobDone {
+                    job: done, result, ..
+                } if *done == job => Some(
+                    result
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(String::from),
+                ),
+                Event::JobFailed {
+                    job: done, message, ..
+                } if *done == job => {
                     panic!("validate {template} failed: {message}");
                 }
                 _ => None,
@@ -193,8 +196,13 @@ fn bridge_renders_example_mapscene_templates() {
             &events,
             Duration::from_secs(600),
             |e| match e {
-                Event::JobDone { job: done, result, .. } if *done == job => Some((
-                    result.get("png").and_then(|p| p.as_str()).map(PathBuf::from),
+                Event::JobDone {
+                    job: done, result, ..
+                } if *done == job => Some((
+                    result
+                        .get("png")
+                        .and_then(|p| p.as_str())
+                        .map(PathBuf::from),
                     result
                         .get("status")
                         .and_then(|s| s.as_str())
@@ -206,7 +214,9 @@ fn bridge_renders_example_mapscene_templates() {
                         .unwrap_or("?")
                         .to_owned(),
                 )),
-                Event::JobFailed { job: done, message, .. } if *done == job => {
+                Event::JobFailed {
+                    job: done, message, ..
+                } if *done == job => {
                     panic!("render {template} failed: {message}");
                 }
                 _ => None,
@@ -216,7 +226,11 @@ fn bridge_renders_example_mapscene_templates() {
         println!("template {template}: status={status} backend={backend}");
         let png = png.expect("render result must name the png");
         let bytes = std::fs::read(&png).expect("rendered png must exist");
-        assert_eq!(&bytes[0..4], b"\x89PNG", "render must be a real PNG ({template})");
+        assert_eq!(
+            &bytes[0..4],
+            b"\x89PNG",
+            "render must be a real PNG ({template})"
+        );
 
         let img = image::open(&png).expect("decode rendered png");
         let rgba = img.to_rgba8();
@@ -250,30 +264,34 @@ fn catalog_ops_list_registered_entries() {
         &events,
         Duration::from_secs(120),
         |e| match e {
-            Event::JobDone { job: done, result, .. } if *done == job => {
-                result.get("colormaps").and_then(|c| c.as_array()).cloned()
-            }
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("colormaps").and_then(|c| c.as_array()).cloned(),
             _ => None,
         },
         "colormaps.list",
     );
     assert!(colormaps.len() >= 3, "core palettes must be registered");
-    assert!(colormaps.iter().any(|c| c.as_str() == Some("forge3d:viridis")));
+    assert!(colormaps
+        .iter()
+        .any(|c| c.as_str() == Some("forge3d:viridis")));
 
     let job = engine.call("presets.list", serde_json::json!({}));
     let presets = wait_for(
         &events,
         Duration::from_secs(120),
         |e| match e {
-            Event::JobDone { job: done, result, .. } if *done == job => {
-                result.get("presets").and_then(|c| c.as_array()).cloned()
-            }
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("presets").and_then(|c| c.as_array()).cloned(),
             _ => None,
         },
         "presets.list",
     );
     assert!(presets.len() >= 5, "upstream ships five renderer presets");
-    assert!(presets.iter().any(|c| c.as_str() == Some("rainiershowcase")));
+    assert!(presets
+        .iter()
+        .any(|c| c.as_str() == Some("rainiershowcase")));
 
     // Unknown ops fail with a structured error, never a panic.
     let job = engine.call("no.such.op", serde_json::json!({}));
@@ -281,9 +299,11 @@ fn catalog_ops_list_registered_entries() {
         &events,
         Duration::from_secs(60),
         |e| match e {
-            Event::JobFailed { job: done, op, message } if *done == job => {
-                Some((op.clone(), message.contains("unknown op")))
-            }
+            Event::JobFailed {
+                job: done,
+                op,
+                message,
+            } if *done == job => Some((op.clone(), message.contains("unknown op"))),
             _ => None,
         },
         "unknown-op failure",
@@ -321,9 +341,9 @@ fn golden_mapscene_terrain_raster_reference() {
         &events,
         Duration::from_secs(300),
         |e| match e {
-            Event::JobDone { job: done, result, .. } if *done == job => {
-                result.get("recipe").cloned()
-            }
+            Event::JobDone {
+                job: done, result, ..
+            } if *done == job => result.get("recipe").cloned(),
             _ => None,
         },
         "template",
@@ -354,12 +374,15 @@ fn golden_mapscene_terrain_raster_reference() {
         .map(|(x, y)| {
             x.0.iter()
                 .zip(y.0.iter())
-                .map(|(p, q)| (i64::from(*p) - i64::from(*q)).unsigned_abs() as u64)
+                .map(|(p, q)| (i64::from(*p) - i64::from(*q)).unsigned_abs())
                 .sum::<u64>()
         })
         .sum();
     let mean_abs = diff as f64 / (a.width() as f64 * a.height() as f64 * 4.0);
     println!("mean abs diff vs committed golden: {mean_abs:.3}");
-    assert!(mean_abs <= 2.0, "golden parity gate exceeded: {mean_abs:.3}");
+    assert!(
+        mean_abs <= 2.0,
+        "golden parity gate exceeded: {mean_abs:.3}"
+    );
     engine.shutdown();
 }

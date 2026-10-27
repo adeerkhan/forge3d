@@ -1202,6 +1202,7 @@ dependencies = [
  "pyo3-build-config",
  "resvg",
  "rfd",
+ "serde",
  "serde_json",
  "studio-engine",
  "studio-project",

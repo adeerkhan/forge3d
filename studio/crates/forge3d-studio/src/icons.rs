@@ -199,7 +199,13 @@ fn usvg_options() -> usvg::Options<'static> {
 }
 
 fn hex_color(color: Color32) -> String {
-    format!("#{:02x}{:02x}{:02x}{:02x}", color.r(), color.g(), color.b(), color.a())
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        color.r(),
+        color.g(),
+        color.b(),
+        color.a()
+    )
 }
 
 // resvg re-exports usvg and tiny-skia; pin callers to the same versions.

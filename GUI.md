@@ -2,7 +2,7 @@
 ## Building the complete desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests.
-**Status header last updated:** 2026-10-26 (after knowledge-graph inventory of the feature surface).
+**Status header last updated:** 2026-10-27 (after the M3 unified-import + W1-depth rings landed in `studio/`).
 **Knowledge graph:** `.ua/knowledge-graph.json` (2,372 nodes) covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (verification harnesses), and `studio/` (the app).
 
 ---
@@ -36,12 +36,16 @@ Implemented and tested (see `studio/README.md` for details):
 
 - egui/eframe shell: menu + Lucide-icon toolbar, scene tree, viewport (drag-orbit / scroll-zoom), properties (camera/sun/export), status bar, dark/light themes.
 - Engine integration: worker embeds Python, loads a DEM (GeoTIFF decoded in Rust), maintains a persistent `Session(window=False)` + `TerrainRenderer`, renders through `render_terrain_pbr_pom` with camera/sun/colormap overlays, exports PNG at arbitrary size.
-- Project persistence v1: dataset reference, camera, sun, export settings; version-gated loader with validation warnings.
-- Automated verification: `cargo test` in `studio/` — project-format round-trip/version tests + an integration test doing real DEM → render → export with non-flat-pixel assertions (RTX 5060, Vulkan).
+- Bridge v2 (M1): a generic `studio_dispatch` JSON-op dispatcher with a job protocol (`Command::Call` → `Event::JobDone`/`JobFailed`); every capability below rides it.
+- MapScene (M2, W2 ring 1): scene-mode switch (Terrain ⇄ MapScene), recipe templates built from the canonical examples, validation, certified `gpu_terrain` rendering, signed render certificates (W5).
+- Unified import (M3, W3 ring 1): `dataset.inspect` previews honest per-format metadata (GeoTIFF/COG, NPY, F3DZ, LAZ/COPC/EPT, 3D Tiles, OBJ/glTF, GeoJSON-family); only DEM-like sources claim the terrain slot, others register as project dataset references. `terrain.load` accepts `.npy` and `.f3dz` directly.
+- Terrain depth (W1): colormap picker, renderer presets dropdown (`presets.get` → sun / MapScene lighting), camera rigs (`rig.bake` orbit/rail/follow) with a keyframe timeline scrubber + playback, and sequence render to `frame_%04d.png`.
+- Project persistence v2: dataset references, camera, sun, colormap/preset selection, serialized `SceneRecipe`, camera-rig JSON; version-gated loader with validation warnings.
+- Part IV harness: `tests/harness_registry.json` + parity tests (`parity_mapscene.rs`, `parity_ingest.rs`) asserting Studio's bridge reproduces what the engine's own API reports/renders, plus a device-lane-dependent golden gate.
 
 What is NOT yet exposed (the rest of this document plans exactly that):
 
-Everything else in the inventory below — MapScene cartography, labels, vector/building layers, GIS ingestion (COG/COPC/3D Tiles), path tracing, atmosphere/astro, smoke, splats, SDF, provenance/certificates, bundles, camera rigs/animation, analysis tools, and the interactive viewer.
+Vector/building layer *authoring* (import currently records metadata only), COG-over-HTTP streaming, path tracing, atmosphere/astro, smoke, splats, SDF, bundles, analysis tools, target-carrying rig playback, and the interactive (continuous) viewer.
 
 ---
 

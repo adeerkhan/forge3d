@@ -116,6 +116,20 @@ pub struct TerrainRef {
     pub height_max: f32,
 }
 
+/// Reference to an imported dataset that is not (yet) the terrain slot:
+/// point clouds, 3D Tiles tilesets, meshes, and vectors inspected through
+/// the unified import dialog (M3). Only the path, the detected kind, and the
+/// display label are stored — never pixel data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetRef {
+    pub path: PathBuf,
+    /// Engine-detected kind: `raster`, `terrain`, `pointcloud`, `tileset`,
+    /// `mesh`, or `vector` (from `dataset.inspect`).
+    pub kind: String,
+    /// Human-readable label shown in the scene panel.
+    pub label: String,
+}
+
 /// A Forge3D Studio project document.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -135,6 +149,12 @@ pub struct Project {
     pub scene_recipe_json: Option<String>,
     /// v2: named colormap for terrain rendering (forge3d registry key).
     pub colormap: Option<String>,
+    /// v2 (additive): datasets imported through the unified import dialog
+    /// that are not the terrain slot (see [`DatasetRef`]).
+    pub datasets: Vec<DatasetRef>,
+    /// v2 (additive): the serialized camera-rig spec + baked renderer-unit
+    /// keyframes from the W1 animation timeline, as returned by `rig.bake`.
+    pub camera_rig_json: Option<String>,
 }
 
 impl Default for Project {
@@ -150,6 +170,8 @@ impl Default for Project {
             scene_mode: SCENE_MODE_TERRAIN.to_owned(),
             scene_recipe_json: None,
             colormap: None,
+            datasets: Vec::new(),
+            camera_rig_json: None,
         }
     }
 }
@@ -179,12 +201,11 @@ impl Project {
             path: path.to_path_buf(),
             source,
         })?;
-        let project: Project = serde_json::from_slice(&bytes).map_err(|source| {
-            ProjectError::Json {
+        let project: Project =
+            serde_json::from_slice(&bytes).map_err(|source| ProjectError::Json {
                 path: path.to_path_buf(),
                 source,
-            }
-        })?;
+            })?;
         if project.format_version > CURRENT_FORMAT_VERSION {
             return Err(ProjectError::UnsupportedVersion {
                 path: path.to_path_buf(),
@@ -204,6 +225,20 @@ impl Project {
                 warnings.push(format!(
                     "Terrain dataset not found: {}",
                     terrain.path.display()
+                ));
+            }
+        }
+        for dataset in &self.datasets {
+            // Remote references (COG URLs) are never probed here.
+            let is_url = {
+                let s = dataset.path.to_string_lossy().to_lowercase();
+                s.starts_with("http://") || s.starts_with("https://")
+            };
+            if !is_url && !dataset.path.is_file() {
+                warnings.push(format!(
+                    "Imported dataset not found ({}): {}",
+                    dataset.kind,
+                    dataset.path.display()
                 ));
             }
         }
@@ -256,9 +291,7 @@ mod tests {
     #[test]
     fn future_format_version_is_rejected() {
         let future = CURRENT_FORMAT_VERSION + 1;
-        let json = format!(
-            r#"{{ "format_version": {future}, "name": "from the future" }}"#
-        );
+        let json = format!(r#"{{ "format_version": {future}, "name": "from the future" }}"#);
         let dir = std::env::temp_dir().join("studio-project-test");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("future.forge3d");
@@ -285,11 +318,7 @@ mod tests {
         let dir = std::env::temp_dir().join("studio-project-test");
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("v1.forge3d");
-        std::fs::write(
-            &path,
-            r#"{ "format_version": 1, "name": "legacy" }"#,
-        )
-        .expect("write");
+        std::fs::write(&path, r#"{ "format_version": 1, "name": "legacy" }"#).expect("write");
         let project = Project::load(&path).expect("v1 must load");
         std::fs::remove_file(&path).ok();
         assert_eq!(project.name, "legacy");
@@ -340,5 +369,85 @@ mod tests {
             panic!("expected LoadIo, got {err:?}");
         };
         assert_eq!(path, PathBuf::from("/nonexistent/no-such.forge3d"));
+    }
+
+    #[test]
+    fn imported_datasets_and_camera_rig_round_trip() {
+        let mut project = Project::new();
+        project.datasets = vec![
+            DatasetRef {
+                path: PathBuf::from("/tmp/scan.copc.laz"),
+                kind: "pointcloud".to_owned(),
+                label: "scan.copc.laz".to_owned(),
+            },
+            DatasetRef {
+                path: PathBuf::from("https://example.com/dem.tif"),
+                kind: "raster".to_owned(),
+                label: "remote dem".to_owned(),
+            },
+        ];
+        let rig = serde_json::json!({
+            "kind": "orbit",
+            "duration": 8.0,
+            "keyframes": [{"t": 0.0, "phi_deg": 0.0, "theta_deg": 45.0, "radius": 900.0, "fov_deg": 55.0}]
+        });
+        project.camera_rig_json = Some(rig.to_string());
+
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("datasets.forge3d");
+        project.save(&path).expect("save");
+        let loaded = Project::load(&path).expect("load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(project, loaded);
+        assert_eq!(loaded.datasets.len(), 2);
+        assert_eq!(loaded.datasets[0].kind, "pointcloud");
+        assert_eq!(
+            loaded.camera_rig_json.as_deref(),
+            Some(rig.to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn missing_imported_dataset_produces_warning_but_remote_urls_do_not() {
+        let mut project = Project::new();
+        project.datasets = vec![
+            DatasetRef {
+                path: PathBuf::from("/nonexistent/scan.laz"),
+                kind: "pointcloud".to_owned(),
+                label: "scan".to_owned(),
+            },
+            DatasetRef {
+                path: PathBuf::from("https://example.com/cog.tif"),
+                kind: "raster".to_owned(),
+                label: "remote".to_owned(),
+            },
+        ];
+        let warnings = project.validation_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "only the missing local file warns: {warnings:?}"
+        );
+        assert!(warnings[0].contains("scan.laz"));
+    }
+
+    #[test]
+    fn v2_project_without_new_fields_still_loads() {
+        // A v2 file written before datasets/camera_rig existed must load with
+        // the additive fields defaulted.
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("v2-legacy.forge3d");
+        std::fs::write(
+            &path,
+            r#"{ "format_version": 2, "name": "pre-m3", "colormap": "forge3d:viridis" }"#,
+        )
+        .expect("write");
+        let project = Project::load(&path).expect("v2 must load");
+        std::fs::remove_file(&path).ok();
+        assert!(project.datasets.is_empty());
+        assert!(project.camera_rig_json.is_none());
+        assert_eq!(project.colormap.as_deref(), Some("forge3d:viridis"));
     }
 }
