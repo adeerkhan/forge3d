@@ -75,12 +75,24 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .child(live_button(studio, state.live_viewport)),
         )
         .child(
+            // Fixed widths: a readout that changes width would resize the
+            // viewport, which would request another frame, forever.
             h_flex()
                 .gap_2()
                 .text_xs()
                 .text_color(cx.theme().colors.muted_foreground)
-                .child(format!("{} × {}", state.frame_size.0, state.frame_size.1))
-                .child(format!("{frame_ms:.1} ms")),
+                .child(
+                    div()
+                        .w(px(76.))
+                        .text_right()
+                        .child(format!("{} × {}", state.frame_size.0, state.frame_size.1)),
+                )
+                .child(
+                    div()
+                        .w(px(52.))
+                        .text_right()
+                        .child(format!("{frame_ms:.1} ms")),
+                ),
         );
 
     // The body: the frame, or an honest empty state.

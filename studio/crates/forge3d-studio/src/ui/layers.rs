@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -32,6 +32,9 @@ pub enum DropZone {
 /// What a row carries while it is being dragged.
 #[derive(Clone, Debug)]
 pub struct LayerDrag {
+    /// Kept so a drop handler could identify the row; the move itself happens
+    /// in the preview pass, so nothing reads it today.
+    #[allow(dead_code)]
     pub id: LayerId,
 }
 
@@ -198,7 +201,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     .id(format!("layer-disclosure-{}", id.0))
                     .cursor_pointer()
                     .on_click(move |_, _, cx| {
-                        let _ = studio_toggle
+                        studio_toggle
                             .update(cx, |studio, cx| studio.toggle_layer_collapsed(id, cx));
                     })
                     .child(if expanded {
@@ -250,7 +253,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                 let range = modifiers.shift;
                 let additive = modifiers.control || modifiers.platform;
                 let double = event.click_count() >= 2;
-                let _ = studio_click.update(cx, |studio, cx| {
+                studio_click.update(cx, |studio, cx| {
                     if double {
                         studio.begin_rename(id, cx);
                     } else {
@@ -258,12 +261,12 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     }
                 });
             })
-            .on_drag(LayerDrag { id }, move |drag, _, _, cx| {
+            .on_drag(LayerDrag { id }, move |_drag, _, _, cx| {
                 let ghost = LayerDragGhost {
                     name: drag_name.clone(),
                     icon: layer_icon,
                 };
-                let _ = studio_drag_start.update(cx, |studio, cx| studio.begin_layer_drag(id, cx));
+                studio_drag_start.update(cx, |studio, cx| studio.begin_layer_drag(id, cx));
                 cx.new(|_| ghost)
             })
             // Reordering previews live while the pointer is over a target: the
@@ -271,54 +274,52 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
             // step, so one drag is one undo.
             .on_drag_move(move |event: &DragMoveEvent<LayerDrag>, _, cx| {
                 let zone = drop_zone_for(event);
-                let _ = studio_drag_move.update(cx, |studio, cx| studio.preview_drop(id, zone, cx));
+                studio_drag_move.update(cx, |studio, cx| studio.preview_drop(id, zone, cx));
             })
             .context_menu(move |menu, _, _| {
                 let mut menu = menu
                     .item(PopupMenuItem::new("Rename").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio.update(cx, |studio, cx| studio.begin_rename(id, cx));
+                            studio.update(cx, |studio, cx| studio.begin_rename(id, cx));
                         }
                     }))
                     .separator()
                     .item(PopupMenuItem::new("Duplicate").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio.update(cx, |studio, cx| studio.duplicate_layer(cx));
+                            studio.update(cx, |studio, cx| studio.duplicate_layer(cx));
                         }
                     }))
                     .item(PopupMenuItem::new("Delete").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio.update(cx, |studio, cx| studio.delete_layer(cx));
+                            studio.update(cx, |studio, cx| studio.delete_layer(cx));
                         }
                     }))
                     .separator()
                     .item(PopupMenuItem::new("Move up").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio.update(cx, |studio, cx| studio.move_layer(-1, cx));
+                            studio.update(cx, |studio, cx| studio.move_layer(-1, cx));
                         }
                     }))
                     .item(PopupMenuItem::new("Move down").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio.update(cx, |studio, cx| studio.move_layer(1, cx));
+                            studio.update(cx, |studio, cx| studio.move_layer(1, cx));
                         }
                     }))
                     .item(PopupMenuItem::new("To top").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ =
-                                studio.update(cx, |studio, cx| studio.move_layer_to_edge(true, cx));
+                            studio.update(cx, |studio, cx| studio.move_layer_to_edge(true, cx));
                         }
                     }))
                     .item(PopupMenuItem::new("To bottom").on_click({
                         let studio = studio_menu.clone();
                         move |_, _, cx| {
-                            let _ = studio
-                                .update(cx, |studio, cx| studio.move_layer_to_edge(false, cx));
+                            studio.update(cx, |studio, cx| studio.move_layer_to_edge(false, cx));
                         }
                     }));
                 if is_group && has_children {
@@ -327,14 +328,13 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                         .item(PopupMenuItem::new("Ungroup").on_click({
                             let studio = studio_menu.clone();
                             move |_, _, cx| {
-                                let _ =
-                                    studio.update(cx, |studio, cx| studio.ungroup_selection(cx));
+                                studio.update(cx, |studio, cx| studio.ungroup_selection(cx));
                             }
                         }));
                 }
                 menu
             })
-            .child(IconName::from(layer_icon))
+            .child(layer_icon)
             .child(name_el)
             .child(
                 div()
@@ -360,8 +360,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     .xsmall()
                     .ghost()
                     .on_click(move |_, _, cx| {
-                        let _ =
-                            studio_lock.update(cx, |studio, cx| studio.toggle_layer_lock(id, cx));
+                        studio_lock.update(cx, |studio, cx| studio.toggle_layer_lock(id, cx));
                     }),
             )
             .child(
@@ -374,8 +373,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     .xsmall()
                     .ghost()
                     .on_click(move |_, _, cx| {
-                        let _ =
-                            studio_eye.update(cx, |studio, cx| studio.toggle_layer_visible(id, cx));
+                        studio_eye.update(cx, |studio, cx| studio.toggle_layer_visible(id, cx));
                     }),
             );
 
@@ -417,7 +415,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                                 .xsmall()
                                 .ghost()
                                 .on_click(move |_, _, cx| {
-                                    let _ = studio_group
+                                    studio_group
                                         .update(cx, |studio, cx| studio.group_selection(cx));
                                 }),
                         )
@@ -427,7 +425,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                                 .xsmall()
                                 .ghost()
                                 .on_click(move |_, _, cx| {
-                                    let _ = studio_ungroup
+                                    studio_ungroup
                                         .update(cx, |studio, cx| studio.ungroup_selection(cx));
                                 }),
                         ),
@@ -469,7 +467,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                                     .xsmall()
                                     .ghost()
                                     .on_click(move |_, _, cx| {
-                                        let _ = studio_dec.update(cx, |studio, cx| {
+                                        studio_dec.update(cx, |studio, cx| {
                                             studio.step_selection_opacity(-0.1, cx)
                                         });
                                     }),
@@ -487,7 +485,7 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                                     .xsmall()
                                     .ghost()
                                     .on_click(move |_, _, cx| {
-                                        let _ = studio_inc.update(cx, |studio, cx| {
+                                        studio_inc.update(cx, |studio, cx| {
                                             studio.step_selection_opacity(0.1, cx)
                                         });
                                     }),

@@ -1,9 +1,11 @@
 //! The UI shell: one generic panel host, the dock layout, and the panels.
 
+pub mod certificates;
 pub mod layers;
 pub mod panels;
 pub mod params;
 pub mod shell;
+pub mod timeline;
 pub mod viewport;
 
 use std::rc::Rc;
@@ -21,14 +23,17 @@ type PanelContent = dyn Fn(&mut Window, &mut App) -> AnyElement;
 /// The saved dock layout's schema version. Bump when the panel set changes in
 /// a way an old layout cannot express; a saved layout from another version is
 /// ignored and the default layout is built.
-pub const DOCK_LAYOUT_VERSION: usize = 1;
+pub const DOCK_LAYOUT_VERSION: usize = 2;
 
 /// Panel ids, in default-layout order.
 pub const PANEL_IDS: &[&str] = &[
     "studio.layers",
     "studio.inspector",
+    "studio.render",
     "studio.console",
     "studio.statistics",
+    "studio.timeline",
+    "studio.certificates",
     "studio.viewport",
 ];
 
@@ -49,10 +54,46 @@ pub fn panel_spec(id: &str) -> Option<(&'static str, PanelFn)> {
     match id {
         "studio.layers" => Some(("Layers", panels::layers)),
         "studio.inspector" => Some(("Inspector", panels::inspector)),
+        "studio.render" => Some(("Render", render_panel)),
+        "studio.timeline" => Some(("Timeline", timeline_panel)),
+        "studio.certificates" => Some(("Certificates", certificates_panel)),
         "studio.console" => Some(("Console", panels::console)),
         "studio.statistics" => Some(("Statistics", panels::statistics)),
         "studio.viewport" => Some(("Viewport", viewport::viewport_panel)),
         _ => None,
+    }
+}
+
+fn render_panel(
+    studio: &WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => certificates::render(&entity, window, cx),
+        None => div().into_any_element(),
+    }
+}
+
+fn timeline_panel(
+    studio: &WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => timeline::timeline(&entity, window, cx),
+        None => div().into_any_element(),
+    }
+}
+
+fn certificates_panel(
+    studio: &WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => certificates::certificates(&entity, window, cx),
+        None => div().into_any_element(),
     }
 }
 
@@ -168,9 +209,17 @@ pub fn build_dock(
     let statistics = panel("studio.statistics");
     let viewport = panel("studio.viewport");
 
+    let render = panel("studio.render");
+    let timeline = panel("studio.timeline");
+    let certificates_panel = panel("studio.certificates");
+
     let left = DockLayout::tabs().panel_view(panel_handle(layers), cx);
-    let right = DockLayout::tabs().panel_view(panel_handle(inspector), cx);
+    let right = DockLayout::tabs()
+        .panel_view(panel_handle(inspector), cx)
+        .panel_view(panel_handle(render), cx);
     let bottom = DockLayout::tabs()
+        .panel_view(panel_handle(timeline), cx)
+        .panel_view(panel_handle(certificates_panel), cx)
         .panel_view(panel_handle(console), cx)
         .panel_view(panel_handle(statistics), cx);
     let center = DockLayout::tabs().panel_view(panel_handle(viewport), cx);

@@ -34,6 +34,69 @@ pub struct LogEntry {
     pub text: String,
 }
 
+/// One certificate this session produced.
+#[derive(Clone, Debug)]
+pub struct SessionCertificate {
+    pub path: PathBuf,
+    pub source: String,
+    pub payload_sha256: Option<String>,
+    pub verified: Option<bool>,
+}
+
+/// The camera rig (G6). The keyframes are the engine's, rescaled by the bridge
+/// into renderer world units, so replay is exactly what an export renders.
+#[derive(Clone, Debug)]
+pub struct CameraRig {
+    pub kind: String,
+    pub duration: f32,
+    pub radius_rel: f32,
+    pub samples_per_second: u32,
+    pub keyframes: Vec<CameraParams>,
+    pub frame: usize,
+    pub playing: bool,
+}
+
+impl Default for CameraRig {
+    fn default() -> Self {
+        Self {
+            kind: "orbit".to_owned(),
+            duration: 8.0,
+            radius_rel: 0.4,
+            samples_per_second: 12,
+            keyframes: Vec::new(),
+            frame: 0,
+            playing: false,
+        }
+    }
+}
+
+/// A running sequence export.
+#[derive(Clone, Debug)]
+pub struct SequenceRun {
+    pub out_dir: PathBuf,
+    pub total: u32,
+    pub finished: u32,
+}
+
+/// The two-run SHA-256 comparison `determinism.check` reports.
+#[derive(Clone, Debug)]
+pub struct DeterminismReport {
+    pub sha_a: String,
+    pub sha_b: String,
+    pub matched: bool,
+}
+
+/// What a queued bridge job was, so its result can be routed.
+#[derive(Clone, Copy, Debug)]
+pub enum PendingJob {
+    RigBake,
+    DeterminismCheck,
+    CertificateVerify(usize),
+    DiagnosticsSnapshot,
+    Capabilities,
+    SequenceFrame,
+}
+
 /// Interactive viewport drag, held on the state so a drag survives frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewDrag {
@@ -86,6 +149,15 @@ pub struct Studio {
     pub status: String,
     pub busy: bool,
     pub progress: Option<f32>,
+
+    pub certificates: Vec<SessionCertificate>,
+    pub sign_renders: bool,
+    pub offline_caps: Option<serde_json::Value>,
+    pub diagnostics: Option<serde_json::Value>,
+    pub rig: CameraRig,
+    pub sequence: Option<SequenceRun>,
+    pub determinism: Option<DeterminismReport>,
+    pub pending_jobs: std::collections::HashMap<u64, PendingJob>,
 
     pub colormaps: Vec<String>,
     pub params_schema: Option<serde_json::Value>,
@@ -141,6 +213,14 @@ impl Studio {
             status: "Ready".to_owned(),
             busy: false,
             progress: None,
+            certificates: Vec::new(),
+            sign_renders: false,
+            offline_caps: None,
+            diagnostics: None,
+            rig: CameraRig::default(),
+            sequence: None,
+            determinism: None,
+            pending_jobs: std::collections::HashMap::new(),
             colormaps: Vec::new(),
             params_schema: None,
             params_error: None,
@@ -167,6 +247,7 @@ impl Studio {
         studio
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
+        studio.refresh_capabilities(cx);
 
         window.focus(&studio.focus_handle, &mut *cx);
         studio
@@ -437,6 +518,11 @@ impl Studio {
         crate::actions::apply_menus(
             crate::actions::MenuState {
                 live_viewport: self.live_viewport,
+                certificate: self.sign_renders,
+                path_traced: matches!(
+                    self.project.render_quality.mode,
+                    studio_project::RenderMode::PathTraced
+                ),
             },
             cx,
         );
@@ -444,7 +530,28 @@ impl Studio {
     }
 
     /// Render ▸ Render frame: a still at the panel's current size.
+    ///
+    /// In a quality mode the still is the bridge's render (offline accumulation
+    /// or path tracing), because that is what the engine's progress, denoiser
+    /// and certificate provenance describe.
     pub fn request_still(&mut self, cx: &mut Context<Self>) {
+        if self.quality_mode() {
+            let (width, height) =
+                render_size(self.viewport_size.get().0, self.viewport_size.get().1);
+            if width < 2 || height < 2 || self.project.terrain.is_none() {
+                return;
+            }
+            self.busy = true;
+            self.engine.send(Command::RenderFrame {
+                width,
+                height,
+                force: true,
+            });
+            self.viewport_dirty = false;
+            self.set_status("Rendering still…");
+            cx.notify();
+            return;
+        }
         self.viewport_dirty = true;
         self.request_frame(cx, true);
     }
@@ -925,7 +1032,7 @@ impl Studio {
     }
 
     pub fn group_selection(&mut self, cx: &mut Context<Self>) {
-        if self.selection.len() < 1 {
+        if self.selection.is_empty() {
             return;
         }
         let before = self.project.document.clone();
@@ -1006,6 +1113,362 @@ impl Studio {
         }
         self.history.record(before);
         self.project_dirty = true;
+        cx.notify();
+    }
+
+    // ----------------------------------------------------------------- quality
+
+    /// A quality mode is a still: the native viewport stops painting and the
+    /// image comes from the bridge (offline accumulation or path tracing).
+    pub fn quality_mode(&self) -> bool {
+        let quality = &self.project.render_quality;
+        matches!(quality.mode, studio_project::RenderMode::PathTraced) || quality.offline.enabled
+    }
+
+    pub fn set_render_mode(&mut self, mode: studio_project::RenderMode, cx: &mut Context<Self>) {
+        if self.project.render_quality.mode == mode {
+            return;
+        }
+        self.project.render_quality.mode = mode;
+        self.project_dirty = true;
+        self.refresh_menus(cx);
+        self.apply_quality(cx);
+        self.set_status(format!("Render mode: {}", mode.label()));
+        cx.notify();
+    }
+
+    fn apply_quality(&mut self, cx: &mut Context<Self>) {
+        self.engine.send(Command::SetRenderQuality(
+            self.project.render_quality.clone(),
+        ));
+        self.viewport_dirty = true;
+        // A still is worth drawing immediately in a quality mode.
+        if self.quality_mode() {
+            self.request_still(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn set_offline_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.project.render_quality.offline.enabled = enabled;
+        self.project_dirty = true;
+        self.apply_quality(cx);
+    }
+
+    pub fn step_offline_samples(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let samples = self.project.render_quality.offline.samples as i32 + delta;
+        self.project.render_quality.offline.samples = samples.clamp(1, 512) as u32;
+        self.project_dirty = true;
+        self.apply_quality(cx);
+    }
+
+    pub fn set_denoiser(&mut self, denoiser: String, cx: &mut Context<Self>) {
+        self.project.render_quality.offline.denoiser = denoiser;
+        self.project_dirty = true;
+        self.apply_quality(cx);
+    }
+
+    /// Path-trace knobs. `None` leaves a value alone.
+    pub fn step_path_trace(
+        &mut self,
+        spp: i32,
+        frames: i32,
+        variance: f32,
+        env: f32,
+        seed: i32,
+        cx: &mut Context<Self>,
+    ) {
+        let trace = &mut self.project.render_quality.path_trace;
+        if spp != 0 {
+            trace.spp = (trace.spp as i32 + spp).clamp(1, 64) as u32;
+        }
+        if frames != 0 {
+            trace.min_frames = (trace.min_frames as i32 + frames).max(1) as u32;
+            trace.max_frames = trace.max_frames.max(trace.min_frames);
+        }
+        if variance != 1.0 {
+            trace.variance_threshold = (trace.variance_threshold * variance).clamp(1e-6, 1.0);
+        }
+        if env != 1.0 {
+            trace.env_intensity = (trace.env_intensity * env).clamp(0.0, 10.0);
+        }
+        if seed != 0 {
+            trace.seed = (trace.seed as i32 + seed) as u32;
+        }
+        self.project_dirty = true;
+        self.apply_quality(cx);
+    }
+
+    pub fn refresh_capabilities(&mut self, cx: &mut Context<Self>) {
+        let job = self
+            .engine
+            .call("offline.capabilities", serde_json::json!({}));
+        self.pending_jobs.insert(job, PendingJob::Capabilities);
+        cx.notify();
+    }
+
+    pub fn refresh_diagnostics(&mut self, cx: &mut Context<Self>) {
+        let job = self
+            .engine
+            .call("diagnostics.snapshot", serde_json::json!({}));
+        self.pending_jobs
+            .insert(job, PendingJob::DiagnosticsSnapshot);
+        self.set_status("Reading diagnostics…");
+        cx.notify();
+    }
+
+    /// Certificates: sign every render, and verify a produced one.
+    pub fn set_sign_renders(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.sign_renders = enabled;
+        self.refresh_menus(cx);
+        self.engine.send(Command::SetCertificate(enabled));
+        self.set_status(if enabled {
+            "Signing every render"
+        } else {
+            "Certificate signing off"
+        });
+        cx.notify();
+    }
+
+    pub fn verify_certificate(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(certificate) = self.certificates.get(index).cloned() else {
+            return;
+        };
+        let job = self.engine.call(
+            "certificate.verify",
+            serde_json::json!({ "path": certificate.path.to_string_lossy() }),
+        );
+        self.pending_jobs
+            .insert(job, PendingJob::CertificateVerify(index));
+        self.set_status(format!("Verifying {}", certificate.path.display()));
+        cx.notify();
+    }
+
+    fn note_certificate(&mut self, path: PathBuf, source: String) {
+        let payload_sha256 = read_certificate_sha(&path);
+        self.certificates.push(SessionCertificate {
+            path,
+            source,
+            payload_sha256,
+            verified: None,
+        });
+    }
+
+    /// Determinism: two runs, one process, one backend, compared by SHA-256.
+    pub fn run_determinism_check(&mut self, cx: &mut Context<Self>) {
+        if self.project.terrain.is_none() {
+            self.push_error("Determinism", "no terrain loaded");
+            return;
+        }
+        let scratch = std::env::temp_dir();
+        let tag = format!("{}-{}", std::process::id(), self.certificates.len());
+        let camera = self.project.camera;
+        let sun = self.project.sun;
+        let job = self.engine.call(
+            "determinism.check",
+            serde_json::json!({
+                "width": 320,
+                "height": 240,
+                "out_a": scratch.join(format!("det-{tag}-a.png")).to_string_lossy(),
+                "out_b": scratch.join(format!("det-{tag}-b.png")).to_string_lossy(),
+                "camera": {
+                    "phi_deg": camera.phi_deg,
+                    "theta_deg": camera.theta_deg,
+                    "radius": camera.radius,
+                    "fov_deg": camera.fov_deg,
+                },
+                "sun": {
+                    "azimuth_deg": sun.azimuth_deg,
+                    "elevation_deg": sun.elevation_deg,
+                    "intensity": sun.intensity,
+                },
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::DeterminismCheck);
+        self.set_status("Rendering twice for the determinism check…");
+        cx.notify();
+    }
+
+    // -------------------------------------------------------------------- rig
+
+    pub fn set_rig_kind(&mut self, kind: String, cx: &mut Context<Self>) {
+        self.rig.kind = kind;
+        self.rig.keyframes.clear();
+        self.rig.frame = 0;
+        self.set_status("Rig kind changed — bake to sample it");
+        cx.notify();
+    }
+
+    pub fn step_rig_duration(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.rig.duration = (self.rig.duration + delta).clamp(1.0, 60.0);
+        cx.notify();
+    }
+
+    pub fn step_rig_radius(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.rig.radius_rel = (self.rig.radius_rel + delta).clamp(0.05, 0.9);
+        cx.notify();
+    }
+
+    /// Bake the rig through the engine's own `camera_rigs`.
+    pub fn bake_rig(&mut self, cx: &mut Context<Self>) {
+        let Some(terrain) = self.project.terrain.clone() else {
+            self.push_error("Camera rig", "load a DEM dataset first");
+            return;
+        };
+        // The bridge works in scatter-source units (terrain width = max
+        // dimension); the UI's radius slip is relative to that.
+        let extent = terrain.width.max(terrain.height) as f64;
+        let params = match self.rig.kind.as_str() {
+            "orbit" => serde_json::json!({
+                "duration": self.rig.duration,
+                "radius": self.rig.radius_rel as f64 * extent,
+                "phi_start_deg": 0.0,
+                "phi_end_deg": 360.0,
+                "theta_start_deg": 45.0,
+            }),
+            kind => serde_json::json!({
+                "duration": self.rig.duration,
+                if kind == "follow" { "target_path_xz" } else { "path_xz" }: [
+                    [extent * 0.2, extent * 0.8],
+                    [extent * 0.5, extent * 0.5],
+                    [extent * 0.8, extent * 0.2],
+                ],
+            }),
+        };
+        let job = self.engine.call(
+            "rig.bake",
+            serde_json::json!({
+                "kind": self.rig.kind,
+                "params": params,
+                "samples_per_second": self.rig.samples_per_second,
+                "domain": [terrain.height_min, terrain.height_max],
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::RigBake);
+        self.set_status("Baking camera rig…");
+        cx.notify();
+    }
+
+    pub fn scrub_rig(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let count = self.rig.keyframes.len();
+        if count == 0 {
+            return;
+        }
+        let next = (self.rig.frame as i32 + delta).rem_euclid(count as i32) as usize;
+        self.apply_rig_frame(next, cx);
+    }
+
+    fn apply_rig_frame(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(keyframe) = self.rig.keyframes.get(index).copied() else {
+            return;
+        };
+        self.rig.frame = index;
+        self.set_camera(keyframe, cx);
+        self.commit_view();
+        cx.notify();
+    }
+
+    pub fn toggle_rig_playback(&mut self, cx: &mut Context<Self>) {
+        if self.rig.keyframes.is_empty() {
+            self.push_error("Timeline", "bake a camera rig first");
+            return;
+        }
+        self.rig.playing = !self.rig.playing;
+        if self.rig.playing {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(83))
+                    .await;
+                let playing = this
+                    .update(cx, |this, cx| {
+                        if this.rig.playing {
+                            this.scrub_rig(1, cx);
+                        }
+                        this.rig.playing
+                    })
+                    .unwrap_or(false);
+                if !playing {
+                    break;
+                }
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// Export the baked keyframes as `frame_%04d.png` through the bridge.
+    pub fn render_sequence(&mut self, cx: &mut Context<Self>) {
+        if self.sequence.is_some() {
+            self.push_error("Sequence render", "a sequence is already running");
+            return;
+        }
+        if self.rig.keyframes.len() < 2 {
+            self.push_error("Sequence render", "bake a camera rig first");
+            return;
+        }
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose the sequence output folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = first_path(rx.await.ok().and_then(|result| result.ok()));
+            let Some(out_dir) = picked else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.queue_sequence(&out_dir, cx));
+        })
+        .detach();
+    }
+
+    fn queue_sequence(&mut self, out_dir: &Path, cx: &mut Context<Self>) {
+        let total = (self.rig.keyframes.len() as u32).min(240);
+        let width = self.project.export.width;
+        let height = self.project.export.height;
+        let sun = self.project.sun;
+        let colormap = self.project.colormap.clone();
+        for index in 0..total {
+            let keyframe = self.rig.keyframes[index as usize];
+            let path = out_dir.join(format!("frame_{index:04}.png"));
+            let job = self.engine.call(
+                "terrain.render",
+                serde_json::json!({
+                    "width": width,
+                    "height": height,
+                    "camera": {
+                        "phi_deg": keyframe.phi_deg,
+                        "theta_deg": keyframe.theta_deg,
+                        "radius": keyframe.radius,
+                        "fov_deg": keyframe.fov_deg,
+                    },
+                    "sun": {
+                        "azimuth_deg": sun.azimuth_deg,
+                        "elevation_deg": sun.elevation_deg,
+                        "intensity": sun.intensity,
+                    },
+                    "colormap": colormap,
+                    "out_png": path.to_string_lossy(),
+                    "certificate": self.sign_renders,
+                }),
+            );
+            self.pending_jobs.insert(job, PendingJob::SequenceFrame);
+        }
+        if (self.rig.keyframes.len() as u32) > total {
+            self.push_log(
+                true,
+                format!(
+                    "Sequence capped at {total} frames (baked {})",
+                    self.rig.keyframes.len()
+                ),
+            );
+        }
+        self.sequence = Some(SequenceRun {
+            out_dir: out_dir.to_path_buf(),
+            total,
+            finished: 0,
+        });
+        self.set_status(format!("Rendering {total} frames to {}", out_dir.display()));
         cx.notify();
     }
 
@@ -1200,7 +1663,7 @@ impl Studio {
         // With the live viewport off, a drag only marks the view dirty; the
         // gesture end (or Ctrl+R) draws it.
         let dragging_without_live = self.drag.is_some() && !self.live_viewport;
-        if self.project.terrain.is_some() && !dragging_without_live {
+        if self.project.terrain.is_some() && !dragging_without_live && !self.quality_mode() {
             let (width, height) = self.viewport_size.get();
             let size = render_size(width, height);
             if width > 1.0
@@ -1371,14 +1834,43 @@ impl Studio {
                 self.frame = None;
                 self.set_status("Terrain cleared");
             }
-            Event::FrameReady { .. } => {
+            Event::FrameReady {
+                width,
+                height,
+                rgba,
+                quality,
+                certificate,
+                ..
+            } => {
                 self.busy = false;
+                self.render_in_flight = false;
+                // A quality still is the bridge's pixels, not the native frame.
+                if quality.is_some() {
+                    self.present_rgba(width, height, rgba);
+                    self.viewport_dirty = false;
+                }
+                if let Some(path) = certificate {
+                    let source = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string());
+                    self.note_certificate(path, source);
+                }
             }
-            Event::ExportFinished { path, .. } => {
+            Event::ExportFinished {
+                path, certificate, ..
+            } => {
                 self.busy = false;
                 self.last_export = Some(path.clone());
                 self.set_status(format!("Exported {}", path.display()));
                 self.push_log(false, format!("Wrote {}", path.display()));
+                if let Some(certificate) = certificate {
+                    let source = certificate
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| certificate.display().to_string());
+                    self.note_certificate(certificate, source);
+                }
             }
             Event::ExportFailed { path, message } => {
                 self.busy = false;
@@ -1392,7 +1884,7 @@ impl Studio {
                 self.progress = fraction;
                 self.set_status(label);
             }
-            Event::JobDone { op, result, .. } => self.handle_job_done(&op, result, cx),
+            Event::JobDone { job, op, result } => self.handle_job_done(job, &op, result, cx),
             Event::JobFailed { op, message, .. } => {
                 self.busy = false;
                 self.push_log(true, format!("{op}: {message}"));
@@ -1415,7 +1907,16 @@ impl Studio {
         }
     }
 
-    fn handle_job_done(&mut self, op: &str, result: serde_json::Value, cx: &mut Context<Self>) {
+    fn handle_job_done(
+        &mut self,
+        job: u64,
+        op: &str,
+        result: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(kind) = self.pending_jobs.remove(&job) {
+            self.route_job(kind, op, &result, cx);
+        }
         match op {
             "probe" => {
                 let adapter = result
@@ -1457,6 +1958,125 @@ impl Studio {
         cx.notify();
     }
 
+    /// Results of the jobs this session queued, by what they were.
+    fn route_job(
+        &mut self,
+        kind: PendingJob,
+        op: &str,
+        result: &serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        match kind {
+            PendingJob::RigBake => {
+                let keyframes = result
+                    .get("keyframes")
+                    .and_then(|value| value.as_array())
+                    .map(|frames| {
+                        frames
+                            .iter()
+                            .filter_map(|frame| {
+                                Some(CameraParams {
+                                    phi_deg: frame.get("phi_deg")?.as_f64()? as f32,
+                                    theta_deg: frame.get("theta_deg")?.as_f64()? as f32,
+                                    radius: frame.get("radius")?.as_f64()? as f32,
+                                    fov_deg: frame
+                                        .get("fov_deg")
+                                        .and_then(|value| value.as_f64())
+                                        .unwrap_or(54.0)
+                                        as f32,
+                                    target_x: 0.0,
+                                    target_z: 0.0,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let count = keyframes.len();
+                if count == 0 {
+                    self.push_error("Camera rig", "the engine baked no keyframes");
+                } else {
+                    self.rig.keyframes = keyframes;
+                    self.rig.frame = 0;
+                    self.set_status(format!("Rig baked: {count} keyframes"));
+                    self.apply_rig_frame(0, cx);
+                }
+            }
+            PendingJob::DeterminismCheck => {
+                let sha_a = result
+                    .get("sha_a")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let sha_b = result
+                    .get("sha_b")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                let matched = result
+                    .get("match")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                self.set_status(if matched {
+                    "Determinism: two runs identical"
+                } else {
+                    "Determinism: runs DIFFER — this needs a look"
+                });
+                self.determinism = Some(DeterminismReport {
+                    sha_a,
+                    sha_b,
+                    matched,
+                });
+            }
+            PendingJob::CertificateVerify(index) => {
+                let valid = result
+                    .get("valid")
+                    .or_else(|| result.get("verified"))
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                if let Some(certificate) = self.certificates.get_mut(index) {
+                    certificate.verified = Some(valid);
+                }
+                self.set_status(if valid {
+                    "Certificate verified"
+                } else {
+                    "Certificate REJECTED by the engine"
+                });
+            }
+            PendingJob::DiagnosticsSnapshot => {
+                self.diagnostics = Some(result.clone());
+                self.set_status("Diagnostics snapshot updated");
+            }
+            PendingJob::Capabilities => {
+                self.offline_caps = Some(result.clone());
+            }
+            PendingJob::SequenceFrame => {
+                if let Some(sequence) = self.sequence.as_mut() {
+                    sequence.finished += 1;
+                    let (finished, total, dir) =
+                        (sequence.finished, sequence.total, sequence.out_dir.clone());
+                    if finished >= total {
+                        self.sequence = None;
+                        self.set_status(format!("Sequence written to {}", dir.display()));
+                    } else {
+                        self.set_status(format!("Sequence {finished}/{total}"));
+                    }
+                }
+            }
+        }
+        let _ = op;
+        cx.notify();
+    }
+
+    /// Present RGBA pixels as the viewport image (a quality still).
+    fn present_rgba(&mut self, width: u32, height: u32, rgba: Vec<u8>) {
+        let buffer = image::RgbaImage::from_raw(width, height, rgba)
+            .unwrap_or_else(|| image::RgbaImage::new(width.max(1), height.max(1)));
+        self.frame_size = (width, height);
+        self.frame = Some(Arc::new(gpui_kit::RenderImage::new(vec![
+            image::Frame::new(buffer),
+        ])));
+    }
+
     // --------------------------------------------------------------- helpers
 
     fn sync_engine_from_project(&mut self, cx: &mut Context<Self>) {
@@ -1487,19 +2107,6 @@ impl Studio {
 
     pub fn primary_layer(&self) -> Option<LayerId> {
         self.selection.last().copied()
-    }
-
-    pub fn select(&mut self, id: LayerId, additive: bool, cx: &mut Context<Self>) {
-        if additive {
-            if let Some(index) = self.selection.iter().position(|other| *other == id) {
-                self.selection.remove(index);
-            } else {
-                self.selection.push(id);
-            }
-        } else {
-            self.selection = vec![id];
-        }
-        cx.notify();
     }
 
     pub fn set_status(&mut self, message: impl Into<String>) {
@@ -1553,6 +2160,17 @@ pub fn terrain_span(height_min: f32, height_max: f32) -> f32 {
 /// Camera distance that frames a terrain of this world span.
 pub fn fit_radius(span: f32) -> f32 {
     (span * 1.65).clamp(60.0, 400_000.0)
+}
+
+/// The certificate's `payload_sha256`, when it carries one.
+fn read_certificate_sha(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    value
+        .get("payload_sha256")
+        .or_else(|| value.get("payload_sha"))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
 }
 
 /// The first path of a file-pick result.

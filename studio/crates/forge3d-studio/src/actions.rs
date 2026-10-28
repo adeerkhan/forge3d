@@ -44,6 +44,14 @@ gpui_kit::actions!(
         ResetCamera,
         RenderFrame,
         ToggleLiveViewport,
+        UseRasterMode,
+        UsePathTracedMode,
+        ToggleCertificate,
+        RenderSequence,
+        DeterminismCheck,
+        RefreshCapabilities,
+        BakeRig,
+        ToggleRigPlayback,
         Shortcuts,
         About,
     ]
@@ -57,6 +65,7 @@ pub enum MenuGroup {
     View,
     Layer,
     Render,
+    Tools,
     Help,
 }
 
@@ -67,6 +76,7 @@ impl MenuGroup {
         MenuGroup::View,
         MenuGroup::Layer,
         MenuGroup::Render,
+        MenuGroup::Tools,
         MenuGroup::Help,
     ];
 
@@ -77,6 +87,7 @@ impl MenuGroup {
             MenuGroup::View => "View",
             MenuGroup::Layer => "Layer",
             MenuGroup::Render => "Render",
+            MenuGroup::Tools => "Tools",
             MenuGroup::Help => "Help",
         }
     }
@@ -118,6 +129,14 @@ macro_rules! studio_action_table {
             ToggleTheme, "Dark / light theme", View, true, None;
             RenderFrame, "Render frame", Render, false, Some("ctrl-r");
             ToggleLiveViewport, "Live viewport", View, true, Some("ctrl-l");
+            UseRasterMode, "Raster (PBR + POM)", Render, true, None;
+            UsePathTracedMode, "Path traced", Render, false, None;
+            ToggleCertificate, "Request render certificate", Render, true, None;
+            RenderSequence, "Render sequence…", Render, false, None;
+            DeterminismCheck, "Determinism check…", Tools, false, None;
+            RefreshCapabilities, "Refresh engine capabilities", Tools, false, None;
+            BakeRig, "Bake camera rig", Tools, false, None;
+            ToggleRigPlayback, "Play / pause rig", Tools, false, None;
             Shortcuts, "Keyboard shortcuts", Help, false, Some("shift-?");
             About, "About Forge3D Studio", Help, true, None;
         }
@@ -370,6 +389,55 @@ impl StudioAction for MoveLayerToBottom {
     }
 }
 
+impl StudioAction for UseRasterMode {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.set_render_mode(studio_project::RenderMode::Raster, cx);
+    }
+}
+
+impl StudioAction for UsePathTracedMode {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.set_render_mode(studio_project::RenderMode::PathTraced, cx);
+    }
+}
+
+impl StudioAction for ToggleCertificate {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        let next = !studio.sign_renders;
+        studio.set_sign_renders(next, cx);
+    }
+}
+
+impl StudioAction for RenderSequence {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.render_sequence(cx);
+    }
+}
+
+impl StudioAction for DeterminismCheck {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.run_determinism_check(cx);
+    }
+}
+
+impl StudioAction for RefreshCapabilities {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.refresh_capabilities(cx);
+    }
+}
+
+impl StudioAction for BakeRig {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.bake_rig(cx);
+    }
+}
+
+impl StudioAction for ToggleRigPlayback {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.toggle_rig_playback(cx);
+    }
+}
+
 impl StudioAction for ToggleLiveViewport {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.toggle_live_viewport(cx);
@@ -399,12 +467,16 @@ impl StudioAction for About {
 #[derive(Debug, Clone, Copy)]
 pub struct MenuState {
     pub live_viewport: bool,
+    pub certificate: bool,
+    pub path_traced: bool,
 }
 
 impl Default for MenuState {
     fn default() -> Self {
         Self {
             live_viewport: true,
+            certificate: false,
+            path_traced: false,
         }
     }
 }
@@ -437,6 +509,18 @@ pub fn build_menus(state: MenuState) -> Vec<Menu> {
         if *group == MenuGroup::View {
             items.push(
                 MenuItem::action("Live viewport", ToggleLiveViewport).checked(state.live_viewport),
+            );
+        }
+        if *group == MenuGroup::Render {
+            items.push(
+                MenuItem::action("Raster (PBR + POM)", UseRasterMode).checked(!state.path_traced),
+            );
+            items.push(
+                MenuItem::action("Path traced", UsePathTracedMode).checked(state.path_traced),
+            );
+            items.push(
+                MenuItem::action("Request render certificate", ToggleCertificate)
+                    .checked(state.certificate),
             );
         }
         menus.push(Menu {
