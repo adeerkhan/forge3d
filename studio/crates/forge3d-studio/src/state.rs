@@ -15,7 +15,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::dock::{DockArea, DockSkin};
+use gpui_kit::component::dock::{DockArea, DockAreaState, DockEvent, DockSkin};
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::component::menu::AppMenuBar;
 use gpui_kit::*;
 use studio_engine::{Command, EngineHandle, Event, ViewportCommand, ViewportEvent, ViewportWorker};
@@ -23,6 +24,7 @@ use studio_project::{CameraParams, DocHistory, LayerId, Project, SunParams};
 
 use crate::actions::*;
 use crate::ui;
+use crate::ui::params::{ParamForm, ParamKind};
 
 /// One line of the engine log.
 #[derive(Clone, Debug)]
@@ -61,6 +63,13 @@ pub struct Studio {
     pub frame_ms: f32,
     /// The frame no longer matches the document (camera, sun, colormap, DEM).
     pub viewport_dirty: bool,
+    /// Interactive rendering on. When off, the viewport draws only on an
+    /// explicit request or when a gesture ends — the escape hatch for a slow
+    /// GPU or a heavy dataset.
+    pub live_viewport: bool,
+    /// A render is on the worker right now. Requests are dropped (not queued)
+    /// while this is set, so a fast orbit can never build a backlog.
+    render_in_flight: bool,
     /// Size the viewport panel reported last paint, shared with the panel so
     /// the paint path never mutates state.
     pub viewport_size: Rc<Cell<(f32, f32)>>,
@@ -80,6 +89,7 @@ pub struct Studio {
     pub colormaps: Vec<String>,
     pub params_schema: Option<serde_json::Value>,
     pub params_error: Option<String>,
+    pub params_form: ParamForm,
 
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
@@ -94,6 +104,8 @@ impl Studio {
 
         // The dock needs a weak handle on this entity, which exists while the
         // constructor runs, so it is built here rather than after `cx.new`.
+        cx.set_global(crate::ui::StudioHandle(cx.entity().downgrade()));
+        crate::ui::register_panels(cx);
         let (dock_area, skin, menu_bar) = ui::build_dock(cx.entity().downgrade(), window, cx);
 
         let mut studio = Self {
@@ -113,6 +125,8 @@ impl Studio {
             frame_size: (0, 0),
             frame_ms: 0.0,
             viewport_dirty: true,
+            live_viewport: true,
+            render_in_flight: false,
             viewport_size: Rc::new(Cell::new((0.0, 0.0))),
             last_requested_size: (0, 0),
             adapter: "starting…".to_owned(),
@@ -126,12 +140,19 @@ impl Studio {
             colormaps: Vec::new(),
             params_schema: None,
             params_error: None,
+            params_form: ParamForm::default(),
             focus_handle,
             drag: None,
             last_export: None,
         };
 
         Self::install_actions(&cx.entity().downgrade(), cx);
+        studio.refresh_menus(cx);
+        studio.restore_layout(window, cx);
+        studio.watch_layout(window, cx);
+        // Write the layout we ended up with, so the first run leaves a file and
+        // a corrupt or stale one is replaced by something valid.
+        studio.save_layout(&studio.dock_area.clone(), cx);
         studio.start_poll(window, cx);
 
         // Ask the engine what it is and what palettes it has. Both are ops the
@@ -184,6 +205,7 @@ impl Studio {
         self.project = Project::default();
         self.selection.clear();
         self.history = DocHistory::new(200);
+        self.params_form.revision += 1;
         self.project_path = None;
         self.project_dirty = false;
         self.frame = None;
@@ -217,6 +239,7 @@ impl Studio {
                 self.project_dirty = false;
                 self.selection.clear();
                 self.history = DocHistory::new(200);
+                self.params_form.revision += 1;
                 let warnings = self.project.validation_warnings();
                 for warning in warnings {
                     self.push_log(true, warning);
@@ -389,6 +412,32 @@ impl Studio {
         }
     }
 
+    /// View ▸ Live viewport: stop or resume rendering while the camera moves.
+    pub fn toggle_live_viewport(&mut self, cx: &mut Context<Self>) {
+        self.live_viewport = !self.live_viewport;
+        self.refresh_menus(cx);
+        if self.live_viewport {
+            self.invalidate_viewport(cx);
+        }
+        self.set_status(if self.live_viewport {
+            "Live viewport on"
+        } else {
+            "Live viewport off — the frame updates when you let go"
+        });
+        cx.notify();
+    }
+
+    /// Rebuild the menu tree so check marks match the current state.
+    pub fn refresh_menus(&mut self, cx: &mut Context<Self>) {
+        crate::actions::apply_menus(
+            crate::actions::MenuState {
+                live_viewport: self.live_viewport,
+            },
+            cx,
+        );
+        self.menu_bar.update(cx, |bar, cx| bar.reload(cx));
+    }
+
     /// Render ▸ Render frame: a still at the panel's current size.
     pub fn request_still(&mut self, cx: &mut Context<Self>) {
         self.viewport_dirty = true;
@@ -540,10 +589,16 @@ impl Studio {
         self.set_camera(camera, cx);
     }
 
-    /// A drag or zoom finished: the next export must match what was shown.
-    pub fn end_gesture(&mut self) {
+    /// A drag or zoom finished: draw the settled view at full size and make
+    /// sure the next export renders what the viewport showed.
+    pub fn end_gesture(&mut self, cx: &mut Context<Self>) {
         self.drag = None;
         self.commit_view();
+        self.viewport_dirty = true;
+        // A release is worth a frame even with the live viewport off.
+        if !self.render_in_flight {
+            self.request_frame(cx, false);
+        }
     }
 
     // ------------------------------------------------------------------ frame
@@ -563,12 +618,29 @@ impl Studio {
         if width < 2.0 || height < 2.0 || self.project.terrain.is_none() {
             return;
         }
-        let size = (width as u32, height as u32);
+        // One render at a time. A pointer drag emits events far faster than a
+        // frame can be drawn; without this gate the queue grows and the image
+        // lags the camera by seconds.
+        if self.render_in_flight {
+            self.viewport_dirty = true;
+            return;
+        }
+        let size = render_size(width, height);
         self.last_requested_size = size;
         self.viewport_dirty = false;
+        // During a live drag the frame is drawn at half resolution: the camera
+        // answers immediately and the release draws the full-size frame.
+        let scale = if self.drag.is_some() && self.live_viewport && !force {
+            0.5
+        } else {
+            1.0
+        };
+        let width = ((size.0 as f32 * scale) as u32).max(2);
+        let height = ((size.1 as f32 * scale) as u32).max(2);
+        self.render_in_flight = true;
         self.viewport.send(ViewportCommand::Render {
-            width: size.0,
-            height: size.1,
+            width,
+            height,
             force,
         });
         cx.notify();
@@ -583,6 +655,226 @@ impl Studio {
         cx.notify();
     }
 
+    // ------------------------------------------------------------------ layout
+
+    /// Where the dock layout lives: the platform config dir, never the project
+    /// (a project must open identically on another machine).
+    pub fn layout_path() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config"))
+            })?;
+        Some(base.join("forge3d-studio").join("layout.json"))
+    }
+
+    /// Restore a saved layout, if its version still matches the panel set.
+    /// Anything else — missing file, older schema, unknown panels — silently
+    /// falls back to the default layout the caller already built.
+    pub fn restore_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = Self::layout_path() else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let Ok(state) = serde_json::from_str::<DockAreaState>(&text) else {
+            self.push_log(
+                true,
+                format!("Ignored unreadable layout: {}", path.display()),
+            );
+            return;
+        };
+        if state.version != Some(crate::ui::DOCK_LAYOUT_VERSION) {
+            self.push_log(
+                false,
+                "Layout from an older version ignored; building the default one".to_owned(),
+            );
+            return;
+        }
+        let area = self.dock_area.clone();
+        match area.update(cx, |area, cx| area.load(state, window, cx)) {
+            Ok(()) => self.push_log(
+                false,
+                format!("Restored dock layout from {}", path.display()),
+            ),
+            Err(error) => self.push_log(true, format!("Could not restore layout: {error:#}")),
+        }
+    }
+
+    /// Persist the layout whenever the user changes it (debounced).
+    fn watch_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let area = self.dock_area.clone();
+        cx.subscribe_in(
+            &area,
+            window,
+            |_this, area, event: &DockEvent, _window, cx| {
+                if matches!(event, DockEvent::LayoutChanged) {
+                    let area = area.clone();
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(600))
+                            .await;
+                        let _ = this.update(cx, |this, cx| this.save_layout(&area, cx));
+                    })
+                    .detach();
+                }
+            },
+        )
+        .detach();
+    }
+
+    fn save_layout(&mut self, area: &Entity<DockArea>, cx: &mut Context<Self>) {
+        let Some(path) = Self::layout_path() else {
+            return;
+        };
+        let state = area.read(cx).dump(cx);
+        let Ok(json) = serde_json::to_string_pretty(&state) else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(error) = std::fs::write(&path, json) {
+            self.push_log(true, format!("Could not save layout: {error}"));
+        }
+    }
+
+    // ------------------------------------------------------------------ params
+
+    /// The committed value of one parameter, falling back to the schema default
+    /// (the value a render would really have used).
+    pub fn param_value(
+        &self,
+        section: &str,
+        key: &str,
+        default: &serde_json::Value,
+    ) -> serde_json::Value {
+        let params = &self.project.terrain_params;
+        let found = if section == "root" {
+            params.get(key)
+        } else {
+            params.get(section).and_then(|entry| entry.get(key))
+        };
+        found.cloned().unwrap_or_else(|| default.clone())
+    }
+
+    /// Apply one edited parameter: project, engine, then a debounced look at
+    /// what the engine thinks of it.
+    pub fn set_param(
+        &mut self,
+        section: &str,
+        key: &str,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        let schema = self
+            .params_schema
+            .clone()
+            .unwrap_or(serde_json::Value::Null);
+        if !self.project.terrain_params.is_object() {
+            self.project.terrain_params = serde_json::Value::Object(serde_json::Map::new());
+        }
+        if section == "root" {
+            if let Some(map) = self.project.terrain_params.as_object_mut() {
+                map.insert(key.to_owned(), value);
+            }
+        } else {
+            let defaults = crate::ui::params::section_defaults(&schema, section);
+            if let Some(map) = self.project.terrain_params.as_object_mut() {
+                let entry = map.entry(section.to_owned()).or_insert(defaults.clone());
+                if !entry.is_object() {
+                    *entry = defaults;
+                }
+                if let Some(section_map) = entry.as_object_mut() {
+                    section_map.insert(key.to_owned(), value);
+                }
+            }
+        }
+        self.project_dirty = true;
+        self.engine.send(Command::SetRenderParams(
+            self.project.terrain_params.clone(),
+        ));
+        self.schedule_params_validate();
+        cx.notify();
+    }
+
+    fn schedule_params_validate(&mut self) {
+        self.params_form.validate_due =
+            Some(std::time::Instant::now() + Duration::from_millis(350));
+    }
+
+    fn flush_params_validate(&mut self) {
+        if let Some(due) = self.params_form.validate_due {
+            if std::time::Instant::now() >= due {
+                self.params_form.validate_due = None;
+                self.engine.call(
+                    "terrain.params_validate",
+                    serde_json::json!({ "params": self.project.terrain_params }),
+                );
+            }
+        }
+    }
+
+    /// The live input for one schema field, created on first use and kept, so
+    /// typing is never interrupted by a re-render.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ensure_param_input(
+        &mut self,
+        section: &str,
+        key: &str,
+        text: &str,
+        kind: ParamKind,
+        nullable: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        let id = format!("{section}.{key}");
+        if let Some(state) = self.params_form.inputs.get(&id) {
+            return state.clone();
+        }
+        let placeholder = if nullable {
+            "default".to_owned()
+        } else {
+            String::new()
+        };
+        let state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(text.to_owned())
+        });
+        self.params_form.kinds.insert(id.clone(), (kind, nullable));
+        self.params_form.inputs.insert(id.clone(), state.clone());
+
+        cx.subscribe_in(
+            &state,
+            window,
+            move |this, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = state.read(cx).value().to_string();
+                    this.on_param_text(&id, &text, cx);
+                }
+            },
+        )
+        .detach();
+        state
+    }
+
+    /// Text changed in a parameter box: commit it only when it is a complete
+    /// value, so a half-typed number never reaches the renderer.
+    fn on_param_text(&mut self, id: &str, text: &str, cx: &mut Context<Self>) {
+        let Some((section, key)) = id.split_once('.') else {
+            return;
+        };
+        let Some((kind, nullable)) = self.params_form.kinds.get(id).copied() else {
+            return;
+        };
+        if let Some(value) = kind.parse(text, nullable) {
+            let (section, key) = (section.to_owned(), key.to_owned());
+            self.set_param(&section, &key, value, cx);
+        }
+    }
+
     // ------------------------------------------------------------------- polls
 
     /// A 20 Hz UI pump: drains both workers, coalesces viewport renders and
@@ -590,7 +882,7 @@ impl Studio {
     fn start_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor()
-                .timer(Duration::from_millis(50))
+                .timer(Duration::from_millis(16))
                 .await;
             let alive = this
                 .update_in(cx, |this, window, cx| this.poll(window, cx))
@@ -614,13 +906,37 @@ impl Studio {
             changed = true;
         }
 
-        // A dirty view or a new panel size asks for exactly one frame per tick,
-        // which rate-limits a drag instead of queueing a render per event.
-        if self.project.terrain.is_some() {
+        self.flush_params_validate();
+        crate::ui::params::sync_inputs(self, window, cx);
+
+        // Dev hook: a scripted orbit, so interaction cadence can be measured
+        // (and compared against a release build) without a human dragging.
+        if let Ok(speed) = std::env::var("FORGE3D_STUDIO_AUTORBIT") {
+            if let Ok(speed) = speed.parse::<f32>() {
+                if speed > 0.0 && self.project.terrain.is_some() {
+                    let mut camera = self.project.camera;
+                    camera.phi_deg = (camera.phi_deg + speed * 0.016).rem_euclid(360.0);
+                    self.drag = Some(ViewDrag::Orbit {
+                        last_x: 0.0,
+                        last_y: 0.0,
+                    });
+                    self.set_camera(camera, cx);
+                    changed = true;
+                }
+            }
+        }
+
+        // A dirty view or a new panel size asks for one frame, but only when
+        // nothing is in flight: throughput, not input rate, sets the cadence.
+        // With the live viewport off, a drag only marks the view dirty; the
+        // gesture end (or Ctrl+R) draws it.
+        let dragging_without_live = self.drag.is_some() && !self.live_viewport;
+        if self.project.terrain.is_some() && !dragging_without_live {
             let (width, height) = self.viewport_size.get();
-            let size = (width as u32, height as u32);
+            let size = render_size(width, height);
             if width > 1.0
                 && height > 1.0
+                && !self.render_in_flight
                 && (self.viewport_dirty || size != self.last_requested_size)
             {
                 self.request_frame(cx, false);
@@ -660,17 +976,31 @@ impl Studio {
                 self.viewport_dirty = true;
             }
             ViewportEvent::Failed { context, message } => {
+                self.render_in_flight = false;
                 self.push_log(true, format!("{context}: {message}"));
                 self.set_status(format!("{context} failed"));
             }
             ViewportEvent::TerrainLoaded => {
+                self.render_in_flight = false;
                 self.viewport_dirty = true;
             }
             ViewportEvent::TerrainCleared => {
+                self.render_in_flight = false;
                 self.frame = None;
             }
             ViewportEvent::Frame(frame) => {
+                self.render_in_flight = false;
                 self.frame_ms = frame.render_ms;
+                if std::env::var_os("FORGE3D_STUDIO_FRAME_LOG").is_some() {
+                    log::info!(
+                        "frame {}x{} in {:.1} ms (live {}, dragging {})",
+                        frame.width,
+                        frame.height,
+                        frame.render_ms,
+                        self.live_viewport,
+                        self.drag.is_some()
+                    );
+                }
                 self.frame_size = (frame.width, frame.height);
                 if let Ok(path) = std::env::var("FORGE3D_STUDIO_DUMP_FRAME") {
                     // Dev/test hook: write the frame the UI is about to show, so
@@ -931,6 +1261,16 @@ impl Focusable for Studio {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+/// The render target size for a panel size, quantized to even pixels.
+///
+/// The HUD prints the frame size and the render time; unquantized bounds turn a
+/// one-pixel text-width change into a new render, which changes the printed
+/// numbers again — a feedback loop that keeps rendering while the app is idle.
+pub fn render_size(width: f32, height: f32) -> (u32, u32) {
+    let quantize = |value: f32| (((value as u32) / 2) * 2).max(2);
+    (quantize(width), quantize(height))
 }
 
 /// World span the engine gives a terrain: six times its elevation range.

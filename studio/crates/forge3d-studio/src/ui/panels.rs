@@ -234,7 +234,7 @@ pub fn layers(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> AnyE
 
 // ---------------------------------------------------------------- inspector
 
-pub fn inspector(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> AnyElement {
+pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
     let Some(studio_entity) = upgrade(studio) else {
         return div().into_any_element();
     };
@@ -465,29 +465,11 @@ pub fn inspector(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> A
             )),
     );
 
-    // Render parameters: the engine schema is already loaded; its pages are the
-    // next milestone, and saying so beats showing stubs.
-    body = body.child(
-        v_flex()
-            .gap_1()
-            .child(group_label("Render parameters", cx))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
-                    .child(match &state.params_schema {
-                        Some(schema) => format!(
-                            "{} root parameters introspected from the engine. The schema-driven pages land in G3.",
-                            schema
-                                .get("root")
-                                .and_then(|root| root.as_object())
-                                .map(|root| root.len())
-                                .unwrap_or(0)
-                        ),
-                        None => "Reading the engine's parameter schema…".to_owned(),
-                    }),
-            ),
-    );
+    // Render parameters: the engine's own schema, rendered field by field.
+    let schema_ready = state.params_schema.is_some();
+    if schema_ready {
+        body = body.child(crate::ui::params::params_pages(&studio_entity, window, cx));
+    }
 
     body.into_any_element()
 }

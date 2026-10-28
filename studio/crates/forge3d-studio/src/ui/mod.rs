@@ -1,6 +1,7 @@
 //! The UI shell: one generic panel host, the dock layout, and the panels.
 
 pub mod panels;
+pub mod params;
 pub mod shell;
 pub mod viewport;
 
@@ -15,6 +16,71 @@ use gpui_kit::*;
 
 /// What a panel draws: a function of application state.
 type PanelContent = dyn Fn(&mut Window, &mut App) -> AnyElement;
+
+/// The saved dock layout's schema version. Bump when the panel set changes in
+/// a way an old layout cannot express; a saved layout from another version is
+/// ignored and the default layout is built.
+pub const DOCK_LAYOUT_VERSION: usize = 1;
+
+/// Panel ids, in default-layout order.
+pub const PANEL_IDS: &[&str] = &[
+    "studio.layers",
+    "studio.inspector",
+    "studio.console",
+    "studio.statistics",
+    "studio.viewport",
+];
+
+/// The `Studio` entity, published as an app global so a restored dock layout can
+/// rebuild its panels: the kit's panel registry is process-wide and rebuilds
+/// panels by name, which needs a way back to application state.
+#[derive(Clone)]
+pub struct StudioHandle(pub WeakEntity<crate::state::Studio>);
+
+impl Global for StudioHandle {}
+
+/// How a panel draws itself, given the app state.
+type PanelFn = fn(&WeakEntity<crate::state::Studio>, &mut Window, &mut App) -> AnyElement;
+
+/// Title and content for a panel id: the single place the default layout and
+/// the restored-layout registry both read.
+pub fn panel_spec(id: &str) -> Option<(&'static str, PanelFn)> {
+    match id {
+        "studio.layers" => Some(("Layers", panels::layers)),
+        "studio.inspector" => Some(("Inspector", panels::inspector)),
+        "studio.console" => Some(("Console", panels::console)),
+        "studio.statistics" => Some(("Statistics", panels::statistics)),
+        "studio.viewport" => Some(("Viewport", viewport::viewport_panel)),
+        _ => None,
+    }
+}
+
+/// Build one panel by id, for the default layout and for a restored one.
+pub fn make_panel(
+    id: &'static str,
+    studio: WeakEntity<crate::state::Studio>,
+    cx: &mut App,
+) -> Option<Entity<PanelHost>> {
+    let (title, draw) = panel_spec(id)?;
+    Some(PanelHost::new(id, title, cx, move |window, cx| {
+        draw(&studio, window, cx)
+    }))
+}
+
+/// Register the panel builders a saved layout needs to come back.
+pub fn register_panels(cx: &mut App) {
+    for id in PANEL_IDS {
+        gpui_kit::component::dock::register_panel(cx, id, move |_context, _window, cx| {
+            let studio = cx
+                .try_global::<StudioHandle>()
+                .map(|handle| handle.0.clone());
+            let panel = studio
+                .and_then(|studio| make_panel(id, studio, cx))
+                .expect("every registered panel id has a spec");
+            panel_handle(panel)
+        });
+    }
+}
 
 /// A dock panel that draws whatever closure it was built with.
 ///
@@ -89,28 +155,17 @@ pub fn build_dock(
     window: &mut Window,
     cx: &mut App,
 ) -> (Entity<DockArea>, Rc<DockSkin>, Entity<AppMenuBar>) {
-    let (dock_area, skin) = DockSkin::dock_area("studio-dock", Some(1), window, cx);
+    let (dock_area, skin) =
+        DockSkin::dock_area("studio-dock", Some(DOCK_LAYOUT_VERSION), window, cx);
 
-    let layers = PanelHost::new("studio.layers", "Layers", cx, {
-        let studio = studio.clone();
-        move |window, cx| panels::layers(&studio, window, cx)
-    });
-    let inspector = PanelHost::new("studio.inspector", "Inspector", cx, {
-        let studio = studio.clone();
-        move |window, cx| panels::inspector(&studio, window, cx)
-    });
-    let console = PanelHost::new("studio.console", "Console", cx, {
-        let studio = studio.clone();
-        move |window, cx| panels::console(&studio, window, cx)
-    });
-    let statistics = PanelHost::new("studio.statistics", "Statistics", cx, {
-        let studio = studio.clone();
-        move |window, cx| panels::statistics(&studio, window, cx)
-    });
-    let viewport = PanelHost::new("studio.viewport", "Viewport", cx, {
-        let studio = studio.clone();
-        move |window, cx| viewport::viewport_panel(&studio, window, cx)
-    });
+    let mut panel = |id: &'static str| {
+        make_panel(id, studio.clone(), cx).expect("every default panel has a spec")
+    };
+    let layers = panel("studio.layers");
+    let inspector = panel("studio.inspector");
+    let console = panel("studio.console");
+    let statistics = panel("studio.statistics");
+    let viewport = panel("studio.viewport");
 
     let left = DockLayout::tabs().panel_view(panel_handle(layers), cx);
     let right = DockLayout::tabs().panel_view(panel_handle(inspector), cx);

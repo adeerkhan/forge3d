@@ -8,6 +8,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::state::{Studio, ViewDrag};
@@ -70,7 +71,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     "Isometric",
                     IconName::Box,
                     |studio, cx| studio.preset_camera(45.0, 35.0, cx),
-                )),
+                ))
+                .child(live_button(studio, state.live_viewport)),
         )
         .child(
             h_flex()
@@ -171,13 +173,13 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         })
         .on_mouse_up(MouseButton::Left, move |_, _, cx| {
             let _ = studio_up_left.update(cx, |studio, cx| {
-                studio.end_gesture();
+                studio.end_gesture(cx);
                 cx.notify();
             });
         })
         .on_mouse_up(MouseButton::Middle, move |_, _, cx| {
             let _ = studio_up_middle.update(cx, |studio, cx| {
-                studio.end_gesture();
+                studio.end_gesture(cx);
                 cx.notify();
             });
         })
@@ -204,6 +206,25 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .size_full()
         .child(tools)
         .child(body)
+        .into_any_element()
+}
+
+/// The live-render switch: the escape hatch for a slow GPU or a heavy DEM.
+fn live_button(studio: StudioRef<'_>, live: bool) -> AnyElement {
+    let studio = studio.clone();
+    Button::new("live-viewport")
+        .icon(if live {
+            IconName::Pause
+        } else {
+            IconName::Play
+        })
+        .label(if live { "Live" } else { "Paused" })
+        .xsmall()
+        .when(live, |button| button.outline())
+        .when(!live, |button| button.ghost())
+        .on_click(move |_, _, cx| {
+            let _ = studio.update(cx, |studio, cx| studio.toggle_live_viewport(cx));
+        })
         .into_any_element()
 }
 

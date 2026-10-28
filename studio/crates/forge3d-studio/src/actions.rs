@@ -35,6 +35,7 @@ gpui_kit::actions!(
         CameraIsometric,
         ResetCamera,
         RenderFrame,
+        ToggleLiveViewport,
         Shortcuts,
         About,
     ]
@@ -100,6 +101,7 @@ macro_rules! studio_action_table {
             ResetCamera, "Reset camera", View, true, None;
             ToggleTheme, "Dark / light theme", View, true, None;
             RenderFrame, "Render frame", Render, false, Some("ctrl-r");
+            ToggleLiveViewport, "Live viewport", View, true, Some("ctrl-l");
             Shortcuts, "Keyboard shortcuts", Help, false, Some("shift-?");
             About, "About Forge3D Studio", Help, true, None;
         }
@@ -300,6 +302,12 @@ impl StudioAction for ResetCamera {
     }
 }
 
+impl StudioAction for ToggleLiveViewport {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.toggle_live_viewport(cx);
+    }
+}
+
 impl StudioAction for RenderFrame {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.request_still(cx);
@@ -318,24 +326,51 @@ impl StudioAction for About {
     }
 }
 
+/// Which menu items carry a check mark. Rebuilt whenever one toggles, so the
+/// menus never show a stale state.
+#[derive(Debug, Clone, Copy)]
+pub struct MenuState {
+    pub live_viewport: bool,
+}
+
+impl Default for MenuState {
+    fn default() -> Self {
+        Self {
+            live_viewport: true,
+        }
+    }
+}
+
 /// Register the keyboard map and the application menus.
 pub fn init(cx: &mut App) {
     cx.bind_keys(keybindings());
 
-    // The kit's menu bar reads the app menus from `GlobalState`; the same list
-    // is handed to the platform (macOS uses it for the real menu bar).
-    cx.set_menus(build_menus());
-    let owned: Vec<gpui_kit::OwnedMenu> =
-        build_menus().into_iter().map(|menu| menu.owned()).collect();
+    apply_menus(MenuState::default(), cx);
+}
+
+/// Publish the menu tree: the kit's menu bar reads it from `GlobalState`, and
+/// the same list is handed to the platform (macOS uses it as the real menu bar).
+pub fn apply_menus(state: MenuState, cx: &mut App) {
+    let menus = build_menus(state);
+    let owned: Vec<gpui_kit::OwnedMenu> = build_menus(state)
+        .into_iter()
+        .map(|menu| menu.owned())
+        .collect();
+    cx.set_menus(menus);
     gpui_kit::component::GlobalState::global_mut(cx).set_app_menus(owned);
 }
 
 /// The menu tree, derived from the action table.
-pub fn build_menus() -> Vec<Menu> {
+pub fn build_menus(state: MenuState) -> Vec<Menu> {
     let mut menus = Vec::new();
     for group in MenuGroup::ALL {
         let mut items = Vec::new();
         push_group_items(*group, &mut items);
+        if *group == MenuGroup::View {
+            items.push(
+                MenuItem::action("Live viewport", ToggleLiveViewport).checked(state.live_viewport),
+            );
+        }
         menus.push(Menu {
             name: group.label().into(),
             items,
@@ -398,7 +433,7 @@ mod tests {
 
     #[test]
     fn menu_tree_covers_every_group() {
-        let menus = build_menus();
+        let menus = build_menus(MenuState::default());
         assert_eq!(menus.len(), MenuGroup::ALL.len());
         for (menu, group) in menus.iter().zip(MenuGroup::ALL) {
             assert_eq!(menu.name.as_ref(), group.label());
