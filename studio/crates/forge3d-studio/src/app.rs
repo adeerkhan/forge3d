@@ -480,7 +480,24 @@ impl NativeViewportState {
             // worker uses a big stack).
             .stack_size(64 * 1024 * 1024)
             .spawn(move || {
-                let result = studio_engine::NativeViewport::new(device, queue, adapter);
+                // `TerrainScene::new` runs a lot of shader compilation and can
+                // panic on a driver that rejects a binding or entry point. A
+                // plain panic would drop `tx` and leave the UI with the
+                // uninformative "thread exited while building the scene"
+                // message, so capture the panic and ship its text instead.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    studio_engine::NativeViewport::new(device, queue, adapter)
+                }))
+                .unwrap_or_else(|panic| {
+                    let message = if let Some(text) = panic.downcast_ref::<&str>() {
+                        (*text).to_owned()
+                    } else if let Some(text) = panic.downcast_ref::<String>() {
+                        text.clone()
+                    } else {
+                        "native viewport panicked (no message)".to_owned()
+                    };
+                    Err(format!("native viewport panicked while building the scene: {message}"))
+                });
                 let _ = tx.send(result);
             });
         if spawned.is_err() {
