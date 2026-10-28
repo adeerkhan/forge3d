@@ -26,7 +26,9 @@ pub use native_viewport::NativeViewport;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};
-use studio_project::{CameraParams, RenderMode, RenderQuality, SunParams};
+use studio_project::{
+    AtmosphereParams, CameraParams, RenderMode, RenderQuality, SmokeParams, SunParams,
+};
 
 /// Command sent from the UI to the engine worker.
 #[derive(Debug, Clone)]
@@ -49,6 +51,22 @@ pub enum Command {
     SetRenderParams(serde_json::Value),
     /// M6: render mode + offline/path-trace quality for the next frames.
     SetRenderQuality(RenderQuality),
+    /// M7: AETHER atmosphere inputs.
+    ///
+    /// The worker does not bake or shade anything itself: it hands these to the
+    /// bridge, which generates the sky at the current sun elevation, writes it
+    /// as a Radiance HDR, and binds that file as the render's IBL. `enabled`
+    /// false restores the engine probe environment.
+    SetAtmosphere(AtmosphereParams),
+    /// M7: smoke volume settings and composite opacity.
+    ///
+    /// The volume itself arrives through the `smoke.load` op (the bridge owns
+    /// the native domain); this command only carries the render settings and
+    /// whether the plate should be composited at all.
+    SetSmoke {
+        params: SmokeParams,
+        opacity: f32,
+    },
     /// Render one terrain frame at the requested size and ship RGBA bytes.
     ///
     /// `force` renders even when nothing changed: quality renders (offline
@@ -110,6 +128,15 @@ pub enum Event {
         /// (offline accumulation or path tracing): samples, frames, denoiser,
         /// convergence. `None` for the plain one-shot raster frame.
         quality: Option<serde_json::Value>,
+        /// M7: the signed certificate written for this render, when signing was
+        /// on and the engine produced one. The path is reported so the UI shows
+        /// the file that exists instead of guessing a name.
+        certificate: Option<PathBuf>,
+        /// M7: the smoke composite report for this frame (`status`, coverage,
+        /// renderer, and the note that the certificate covers the terrain pass
+        /// only). `None` when no plate was composited — either no volume is
+        /// loaded or the smoke layer is off.
+        smoke: Option<serde_json::Value>,
     },
     /// An offline PNG export finished successfully.
     ExportFinished {
@@ -118,6 +145,8 @@ pub enum Event {
         height: u32,
         render_ms: f32,
         quality: Option<serde_json::Value>,
+        certificate: Option<PathBuf>,
+        smoke: Option<serde_json::Value>,
     },
     /// M6: progress of a long render (accumulation batches, path-trace tiles).
     /// `fraction` is `None` when the engine reports no measurable progress.
@@ -860,9 +889,7 @@ def _terrain_params(p, *, aa_samples=None, denoise=None, aov=None):
 def _op_terrain_render(p):
     if _heightmap is None:
         raise RuntimeError("no terrain loaded")
-    _terrain_hdr(p.get("hdr_path") or os.path.join(
-        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
-    ))
+    environment = _prepare_environment(p)
     params, span = _terrain_params(p)
     certificate = p.get("certificate_path")
     frame = _renderer.render_terrain_pbr_pom(
@@ -875,7 +902,11 @@ def _op_terrain_render(p):
         certificate=str(certificate) if certificate else None,
     )
     frame.save(str(p["out_png"]))
-    result = {"png": str(p["out_png"]), "terrain_span": span}
+    result = {
+        "png": str(p["out_png"]),
+        "terrain_span": span,
+        "environment": environment,
+    }
     if certificate:
         result["certificate_path"] = str(certificate)
     return result
@@ -885,6 +916,547 @@ def _op_terrain_clear(p):
     global _heightmap
     _heightmap = None
     return {"cleared": True}
+
+
+# --- environment: AETHER atmosphere (M7) -------------------------------------
+# The viewport's image-based light is exactly one HDR: either the tiny probe
+# gradient the Rust worker writes at start-up, or an AETHER equirectangular
+# environment generated for the project's physical inputs at the current sun
+# elevation. `_prepare_environment` owns that switch and is idempotent, so the
+# one-shot frame, offline accumulation and the determinism check are all lit by
+# the same environment. Nothing here reimplements AETHER: the radiance comes
+# from `atmosphere.generate_environment`, the LUT provenance from `bake_luts`.
+
+_env_key = None
+_env_meta = {
+    "source": "probe",
+    "enabled": False,
+    "note": "the bridge's built-in 8x4 gradient; enable Atmosphere to light from AETHER",
+}
+
+# `generate_environment` requires scattering_orders == 4 (the bake handle
+# accepts 2..8), and validates 2..2048 x 2..1024; 64x32 is the size the shipped
+# AETHER evidence uses for environment comparisons.
+_ENV_WIDTH = 64
+_ENV_HEIGHT = 32
+
+
+def _file_sha256(path):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _rgbe_encode(rgb):
+    """Linear RGB floats -> Radiance RGBE bytes (shared-exponent, no loss)."""
+    rgb = np.clip(np.asarray(rgb, dtype=np.float64), 0.0, None)
+    out = np.zeros(rgb.shape[:-1] + (4,), dtype=np.uint8)
+    peak = np.max(rgb, axis=-1)
+    lit = peak > 1.0e-32
+    if not bool(np.any(lit)):
+        return out
+    mantissa, exponent = np.frexp(peak[lit])  # peak = mantissa * 2**exponent
+    scale = mantissa * 256.0 / peak[lit]
+    values = np.clip(rgb[lit] * scale[..., None], 0.0, 255.0).astype(np.uint8)
+    encoded = np.empty(values.shape[:-1] + (4,), dtype=np.uint8)
+    encoded[..., :3] = values
+    encoded[..., 3] = np.clip(exponent + 128, 0, 255).astype(np.uint8)
+    out[lit] = encoded
+    return out
+
+
+def _rle_scanline(values):
+    """One RGBE component as a new-style Radiance RLE stream.
+
+    The reader (`src/formats/hdr.rs`) treats a run byte above 128 as "repeat
+    the next value N-128 times" and anything else as a literal run of that
+    many bytes, so a literal run must be 1..128 and a repeat at most 127.
+    """
+    out = bytearray()
+    count = len(values)
+    pos = 0
+    while pos < count:
+        run = 1
+        while pos + run < count and run < 127 and values[pos + run] == values[pos]:
+            run += 1
+        if run >= 4:
+            out += bytes([128 + run, int(values[pos])])
+            pos += run
+            continue
+        start = pos
+        while pos < count and pos - start < 128:
+            if (
+                pos + 3 < count
+                and values[pos] == values[pos + 1]
+                and values[pos] == values[pos + 2]
+                and values[pos] == values[pos + 3]
+            ):
+                break
+            pos += 1
+        out += bytes([pos - start])
+        out += bytes(int(v) for v in values[start:pos])
+    return out
+
+
+def _write_radiance_hdr(path, rgb):
+    """Write an (H, W, 3) linear-RGB equirect as a Radiance `.hdr`.
+
+    New-style RLE scanlines (`2 2 hi lo` + four component streams), which is
+    the layout `IBL.from_hdr` and the engine's own HDR reader accept. The file
+    is written beside its destination and renamed, so a failed write cannot
+    leave a truncated HDR that a later render would load.
+    """
+    rgb = np.asarray(rgb, dtype=np.float64)
+    if rgb.ndim != 3 or rgb.shape[-1] != 3:
+        raise ValueError("environment must be an (H, W, 3) linear RGB array")
+    height, width = int(rgb.shape[0]), int(rgb.shape[1])
+    if width < 8 or width > 0x7FFF or height < 1:
+        raise ValueError(
+            "environment width must be 8..32767 (new-style RLE), got {}x{}".format(width, height)
+        )
+    rgbe = _rgbe_encode(rgb)
+    temporary = str(path) + ".part"
+    with open(temporary, "wb") as fh:
+        fh.write(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n")
+        fh.write("-Y {} +X {}\n".format(height, width).encode("ascii"))
+        for y in range(height):
+            fh.write(bytes([2, 2, (width >> 8) & 0xFF, width & 0xFF]))
+            row = rgbe[y]
+            for component in range(4):
+                fh.write(_rle_scanline(row[:, component]))
+    os.replace(temporary, str(path))
+
+
+def _atmosphere_settings(values):
+    """The project's AETHER inputs as the engine's own settings object.
+
+    The engine validates ranges (turbidity 1..10, ozone 0..600, mie_g 0..0.99,
+    ground albedo 0..1, orders 2..8) and its message is what the UI shows.
+    """
+    from forge3d import atmosphere
+
+    values = dict(values or {})
+    return atmosphere.AtmosphereSettings(
+        turbidity=float(values.get("turbidity", 2.0)),
+        ozone_du=float(values.get("ozone_du", 300.0)),
+        mie_g=float(values.get("mie_g", 0.8)),
+        ground_albedo=float(values.get("ground_albedo", 0.3)),
+        scattering_orders=int(values.get("scattering_orders", 4)),
+    )
+
+
+def _environment_key(settings, elevation, intensity):
+    return (
+        round(float(settings.turbidity), 6),
+        round(float(settings.ozone_du), 6),
+        round(float(settings.mie_g), 6),
+        round(float(settings.ground_albedo), 6),
+        int(settings.scattering_orders),
+        round(float(elevation), 6),
+        round(float(intensity), 6),
+    )
+
+
+def _probe_meta(path):
+    return {
+        "source": "probe",
+        "enabled": False,
+        "path": str(path),
+        "width": 8,
+        "height": 4,
+        "intensity": 1.0,
+        "note": "the bridge's built-in 8x4 gradient; enable Atmosphere to light from AETHER",
+    }
+
+
+def _build_aether_environment(settings, elevation, env_path, intensity):
+    """Generate the AETHER sky, write it as HDR, and bind it as the IBL."""
+    global _ibl, _env_key, _env_meta
+    report = f3d.atmosphere.generate_environment(
+        _ENV_WIDTH, _ENV_HEIGHT, float(elevation), settings=settings
+    )
+    rgb = np.asarray(report["rgb_linear"], dtype=np.float64)
+    _write_radiance_hdr(env_path, rgb)
+    _ibl = f3d.IBL.from_hdr(str(env_path), intensity=float(intensity))
+    _env_key = _environment_key(settings, elevation, intensity)
+    _env_meta = {
+        "source": "aether",
+        "enabled": True,
+        "path": str(env_path),
+        "width": int(report["width"]),
+        "height": int(report["height"]),
+        "mode": str(report.get("mode", "")),
+        "linear_hdr": bool(report.get("linear_hdr", True)),
+        "sun_elevation_deg": float(elevation),
+        "intensity": float(intensity),
+        "settings": settings.native_kwargs(),
+        "mean_luminance": float(np.mean(rgb)),
+        "max_luminance": float(np.max(rgb)),
+        "hdr_sha256": _file_sha256(env_path),
+        "note": (
+            "equirectangular AETHER sky generated at the current sun elevation; "
+            "the terrain's IBL is this file, the direct light stays the sun below"
+        ),
+    }
+    return dict(_env_meta)
+
+
+def _prepare_environment(p):
+    """Bind the IBL this render should use and report what lit it.
+
+    Called by every raster render path. With atmosphere off the bridge keeps
+    the probe gradient (rebuilt when a previous project had AETHER on); with it
+    on, the environment is generated once per (inputs, sun elevation) and
+    reused, so repeated frames and the two determinism runs share one IBL.
+    """
+    global _ibl, _env_key, _env_meta
+    probe_path = p.get("hdr_path") or os.path.join(
+        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
+    )
+    if _renderer is None:
+        _terrain_hdr(probe_path)  # creates the session and the probe IBL
+        _env_key = ("probe",)
+        _env_meta = _probe_meta(probe_path)
+    settings = dict(p.get("atmosphere") or {})
+    if not bool(settings.get("enabled", False)):
+        if _env_key != ("probe",) or _ibl is None:
+            if not os.path.exists(probe_path):
+                _write_default_hdr(probe_path)
+            _ibl = f3d.IBL.from_hdr(str(probe_path), intensity=1.0)
+            _env_key = ("probe",)
+            _env_meta = _probe_meta(probe_path)
+        return dict(_env_meta)
+    atmos = _atmosphere_settings(settings)
+    sun = p.get("sun") or {}
+    elevation = float(sun.get("elevation_deg", 45.0))
+    intensity = float(settings.get("intensity", 1.0))
+    env_path = p.get("env_path") or os.path.join(
+        tempfile.gettempdir(), "forge3d-studio-env.hdr"
+    )
+    key = _environment_key(atmos, elevation, intensity)
+    if _env_key == key and _ibl is not None:
+        return dict(_env_meta)
+    return _build_aether_environment(atmos, elevation, env_path, intensity)
+
+
+def _op_atmosphere_bake(p):
+    """Resolve (or bake) the AETHER LUT bank and report its provenance.
+
+    `precomputed=False` means this build baked the tables for these inputs
+    (`atmosphere-bake`); the SHA-256 identifies the exact payload that would
+    light a frame, so two runs claiming the same sky can be compared.
+    """
+    settings = _atmosphere_settings(p.get("settings") or {})
+    handle = f3d.atmosphere.bake_luts(settings)
+    return {
+        "settings": settings.native_kwargs(),
+        "precomputed": bool(handle.precomputed),
+        "deterministic_sha256": str(handle.deterministic_sha256),
+        "byte_size": int(handle.byte_size),
+        "storage_format": str(handle["storage_format"]),
+        "wavelength_count": int(handle["wavelength_count"]),
+        "precomputed_turbidity_bracket": handle["precomputed_turbidity_bracket"],
+        "dimensions": handle["dimensions"],
+        "aerial_lut_semantics": str(handle.aerial_lut_semantics),
+        "scattering_lut_semantics": str(handle["scattering_lut_semantics"]),
+    }
+
+
+def _op_atmosphere_environment(p):
+    """Generate the AETHER sky at the given elevation and bind it as the IBL."""
+    settings = _atmosphere_settings(p.get("settings") or {})
+    elevation = float(p.get("sun_elevation_deg", 45.0))
+    intensity = float(p.get("intensity", 1.0))
+    env_path = p.get("env_path")
+    if not env_path:
+        raise RuntimeError(
+            "atmosphere.environment needs env_path (the worker's per-engine HDR path)"
+        )
+    return _build_aether_environment(settings, elevation, env_path, intensity)
+
+
+# --- observation: SIDERA ephemeris (M7) --------------------------------------
+# `astro.observe` is the engine's ephemeris, not a Studio ephemeris: sun and
+# Moon positions, Moon phase, Delta T and sidereal time come from SIDERA, and
+# the only arithmetic added here is the compass -> renderer azimuth conversion
+# that MapScene applies to every terrain light azimuth.
+
+
+def _observation_instant(raw):
+    from datetime import datetime, timezone
+
+    text = str(raw or "").strip()
+    if not text:
+        raise RuntimeError(
+            "astro.observe needs datetime_utc (ISO-8601, e.g. 2026-06-21T12:00:00Z)"
+        )
+    normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        when = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise RuntimeError("datetime_utc {!r} is not ISO-8601: {}".format(text, exc))
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc)
+
+
+def _op_astro_observe(p):
+    """Apparent topocentric Sun/Moon positions for one instant and place."""
+    from forge3d import astro
+
+    when = _observation_instant(p.get("datetime_utc"))
+    latitude = float(p.get("latitude_deg", 0.0))
+    longitude = float(p.get("longitude_deg", 0.0))
+    height_m = float(p.get("height_m", 0.0))
+    refraction = bool(p.get("refraction", False))
+    warnings = []
+    bodies = {}
+    for body in ("sun", "moon"):
+        azimuth, altitude, distance = astro.body_position(
+            body,
+            when,
+            latitude,
+            longitude,
+            height_m=height_m,
+            refraction=refraction,
+        )
+        # Compass azimuth (N=0, E=90) -> the terrain renderer's frame. The
+        # renderer reads a math angle from +X toward +Y and +Y runs south, so
+        # compass A is A - 90; `map_scene._render_terrain_renderer_result`
+        # carries the same conversion for every recipe light.
+        renderer_azimuth = (float(azimuth) - 90.0) % 360.0
+        renderer_elevation = float(altitude)
+        if renderer_elevation <= 0.0:
+            if body == "sun":
+                warnings.append(
+                    "the Sun is {:.2f} deg below the horizon at this instant; the terrain "
+                    "sun is clamped to the horizon (elevation 0) for rendering".format(
+                        abs(renderer_elevation)
+                    )
+                )
+            renderer_elevation = 0.0
+        bodies[body] = {
+            "azimuth_deg": float(azimuth),
+            "altitude_deg": float(altitude),
+            "distance_au": float(distance),
+            "renderer_azimuth_deg": renderer_azimuth,
+            "renderer_elevation_deg": renderer_elevation,
+            "above_horizon": float(altitude) > 0.0,
+        }
+    illuminated, phase_angle, semidiameter = astro.moon_phase(when)
+    mean_sidereal, apparent_sidereal = astro.sidereal_time(when)
+    return {
+        "datetime_utc": when.isoformat().replace("+00:00", "Z"),
+        "latitude_deg": latitude,
+        "longitude_deg": longitude,
+        "height_m": height_m,
+        "refraction": refraction,
+        "bodies": bodies,
+        "moon": {
+            "illuminated_fraction": float(illuminated),
+            "phase_angle_deg": float(phase_angle),
+            "semidiameter_arcsec": float(semidiameter),
+        },
+        "delta_t_seconds": float(astro.delta_t_seconds(when)),
+        "sidereal_time_deg": {
+            "mean": float(mean_sidereal),
+            "apparent": float(apparent_sidereal),
+        },
+        "warnings": warnings,
+    }
+
+
+# --- smoke volumes (M7) -------------------------------------------------------
+# The volume is loaded once per bridge and rendered as a plan-view plate
+# (`render_projection_rgba`, a top-down raymarch of the density field) that the
+# bridge composites over the finished terrain frame. The plate is a separate
+# engine render: the terrain certificate signs the terrain pass only, which is
+# reported with every composite instead of implying the plate is certified.
+
+_smoke_domain = None
+_smoke_source = None
+_smoke_meta = None
+
+_SMOKE_SETTINGS_KEYS = (
+    "density_scale",
+    "extinction",
+    "scattering",
+    "absorption",
+    "phase_g",
+    "max_steps",
+    "exposure",
+)
+
+
+def _smoke_settings(values):
+    from forge3d import smoke
+
+    values = dict(values or {})
+    kwargs = {}
+    for key in _SMOKE_SETTINGS_KEYS:
+        if key in values and values[key] is not None:
+            kwargs[key] = int(values[key]) if key == "max_steps" else float(values[key])
+    return smoke.SmokeRenderSettings(**kwargs)
+
+
+def _sun_vector(azimuth_deg, elevation_deg):
+    """Sun compass azimuth/elevation -> a unit direction in volume space.
+
+    The volume lives in its own index space (no projection is implied), so the
+    plate lights from the same bearing and height as the terrain's sun with
+    north along -Z.
+    """
+    azimuth = math.radians(float(azimuth_deg))
+    elevation = math.radians(float(elevation_deg))
+    return [
+        float(math.sin(azimuth) * math.cos(elevation)),
+        float(math.sin(elevation)),
+        float(-math.cos(azimuth) * math.cos(elevation)),
+    ]
+
+
+def _op_smoke_capabilities(p):
+    from forge3d import smoke
+
+    report = dict(smoke.capability_report())
+    report["native_available"] = bool(smoke.native_smoke_available())
+    report["renderer"] = "native" if report.get("native_backend") else "cpu_fallback"
+    report["volume_importers"] = [
+        ".npy (density, z/y/x)",
+        ".npz (density/velocity/voxel_size)",
+    ]
+    return report
+
+
+def _op_smoke_load(p):
+    """Load a density volume; the plate renders from it until it is cleared."""
+    global _smoke_domain, _smoke_source, _smoke_meta
+    from forge3d import smoke
+
+    path = str(p["path"])
+    if not os.path.isfile(path):
+        raise RuntimeError("smoke volume not found: " + path)
+    lower = path.lower()
+    if lower.endswith(".npy"):
+        density = np.load(path)
+        if getattr(density, "ndim", 0) != 3:
+            raise RuntimeError(
+                "a smoke .npy must be a 3D density grid ordered (z, y, x), got shape {}".format(
+                    getattr(density, "shape", None)
+                )
+            )
+        domain = smoke.domain_from_density(
+            np.ascontiguousarray(density, dtype=np.float32)
+        )
+        kind = "npy density"
+        levels = []
+    elif lower.endswith(".npz"):
+        cube = smoke.load_npz_volume(path)
+        domain = cube.to_domain()
+        kind = "npz volume"
+        levels = [float(v) for v in cube.vertical_levels]
+    else:
+        raise RuntimeError(
+            "Studio loads smoke volumes from .npy (raw density, z/y/x) or .npz "
+            "(density/velocity/voxel_size/origin); got " + os.path.basename(path)
+        )
+    density = np.asarray(domain.to_density_numpy(), dtype=np.float32)
+    dims = [int(v) for v in domain.dims]
+    _smoke_domain = domain
+    _smoke_source = path
+    _smoke_meta = {
+        "path": path,
+        "kind": kind,
+        "dims": dims,
+        "voxel_size": [float(v) for v in domain.voxel_size],
+        "origin": [float(v) for v in domain.origin],
+        "vertical_levels": levels,
+        "voxel_count": int(dims[0] * dims[1] * dims[2]),
+        "density_max": float(np.max(density)) if density.size else 0.0,
+        "density_mean": float(np.mean(density)) if density.size else 0.0,
+        "active_fraction": (
+            float(np.count_nonzero(density > 1.0e-5) / max(density.size, 1))
+            if density.size
+            else 0.0
+        ),
+        "memory": dict(domain.memory_report()),
+        "renderer": "native" if smoke.native_smoke_available() else "cpu_fallback",
+        "certificate_covers": "terrain pass only",
+    }
+    return dict(_smoke_meta)
+
+
+def _op_smoke_clear(p):
+    global _smoke_domain, _smoke_source, _smoke_meta
+    _smoke_domain = None
+    _smoke_source = None
+    _smoke_meta = None
+    return {"cleared": True}
+
+
+def _op_smoke_composite(p):
+    """Composite the plan-view smoke plate over one rendered terrain frame."""
+    if _smoke_domain is None:
+        raise RuntimeError("no smoke volume loaded")
+    from forge3d import smoke
+    from forge3d._png import load_png_rgba
+    from forge3d.helpers.offscreen import save_png_deterministic
+
+    frame_path = str(p["frame_png"])
+    out_path = str(p["out_png"])
+    opacity = float(np.clip(float(p.get("opacity", 1.0)), 0.0, 1.0))
+    frame = np.asarray(load_png_rgba(frame_path), dtype=np.float32)
+    if frame.ndim != 3 or frame.shape[-1] != 4:
+        raise RuntimeError("the rendered frame did not decode to RGBA")
+    height, width = int(frame.shape[0]), int(frame.shape[1])
+    settings = _smoke_settings(p.get("settings"))
+    sun = p.get("sun") or {}
+    sun_direction = _sun_vector(sun.get("azimuth_deg", 0.0), sun.get("elevation_deg", 45.0))
+    started = time.perf_counter()
+    plate = np.asarray(
+        _smoke_domain.render_projection_rgba(
+            width,
+            height,
+            view_direction=(0.0, -1.0, 0.0),
+            sun_direction=tuple(sun_direction),
+            settings=settings,
+        )
+    )
+    if plate.shape[0] != height or plate.shape[1] != width:
+        raise RuntimeError(
+            "the smoke plate came back {}x{}, the frame is {}x{}".format(
+                plate.shape[1], plate.shape[0], width, height
+            )
+        )
+    coverage = np.clip(plate[..., 3].astype(np.float32) / 255.0 * opacity, 0.0, 1.0)
+    blended = frame[..., :3] * (1.0 - coverage[..., None]) + plate[
+        ..., :3
+    ].astype(np.float32) * coverage[..., None]
+    out = np.empty_like(frame, dtype=np.uint8)
+    out[..., :3] = np.clip(blended + 0.5, 0.0, 255.0).astype(np.uint8)
+    out[..., 3] = frame[..., 3].astype(np.uint8)
+    save_png_deterministic(out_path, out)
+    return {
+        "status": "ok",
+        "renderer": "native" if smoke.native_smoke_available() else "cpu_fallback",
+        "path": out_path,
+        "frame": frame_path,
+        "source": _smoke_source,
+        "width": width,
+        "height": height,
+        "opacity": opacity,
+        "alpha_coverage": float(np.mean(coverage)),
+        "alpha_max": float(np.max(coverage)),
+        "plate_rgb_mean": [float(v) for v in np.mean(plate[..., :3], axis=(0, 1))],
+        "settings": {key: float(getattr(settings, key, 0.0)) for key in _SMOKE_SETTINGS_KEYS},
+        "sun_direction": sun_direction,
+        "composite_ms": (time.perf_counter() - started) * 1000.0,
+        "certificate_covers": "terrain pass only",
+    }
 
 
 # --- ops: render quality (M6) ------------------------------------------------
@@ -955,9 +1527,7 @@ def _op_terrain_render_offline(p):
         raise ValueError(
             "unknown denoiser {!r}; Studio offers {}".format(method, ", ".join(_DENOISERS))
         )
-    _terrain_hdr(p.get("hdr_path") or os.path.join(
-        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
-    ))
+    environment = _prepare_environment(p)
     denoise = _denoise_settings(method)
     # A denoised result needs the albedo/normal guidance AOVs; MapScene's
     # `_mapscene_aov_settings(force_guidance=denoise_enabled)` does the same.
@@ -1012,6 +1582,7 @@ def _op_terrain_render_offline(p):
             "terrain_span": span,
             "render_ms": (time.perf_counter() - started) * 1000.0,
             "requested_denoiser": method,
+            "environment": environment,
         }
     )
     if certificate:
@@ -1199,6 +1770,14 @@ def _op_path_trace_render(p):
         "seed": seed,
         "albedo": albedo_note,
         "denoiser_used": "none",
+        "environment": {
+            "source": "path_tracer_default",
+            "note": (
+                "the hybrid tracer lights from its own sky term (env_intensity); "
+                "the terrain renderer's AETHER IBL does not apply to this path"
+            ),
+            "env_intensity": env_intensity,
+        },
         "render_ms": (time.perf_counter() - started) * 1000.0,
     }
     if certificate:
@@ -2075,6 +2654,13 @@ _OPS = {
     "determinism.check": _op_determinism_check,
     "dataset.inspect": _op_dataset_inspect,
     "rig.bake": _op_rig_bake,
+    "atmosphere.bake": _op_atmosphere_bake,
+    "atmosphere.environment": _op_atmosphere_environment,
+    "astro.observe": _op_astro_observe,
+    "smoke.capabilities": _op_smoke_capabilities,
+    "smoke.load": _op_smoke_load,
+    "smoke.clear": _op_smoke_clear,
+    "smoke.composite": _op_smoke_composite,
 }
 
 
@@ -2192,6 +2778,13 @@ fn locate_host_python(site_packages: &Path) -> PathBuf {
 struct WorkerState {
     bridge: Py<PyDict>,
     hdr_path: PathBuf,
+    /// M7: the per-engine Radiance HDR the AETHER environment is written to.
+    /// Per engine for the same reason as `hdr_path`: two workers share one temp
+    /// directory and must not hand each other's sky to `IBL.from_hdr`.
+    env_hdr_path: PathBuf,
+    /// M7: scratch file for the composited (terrain + smoke) frame, so the
+    /// certificate's own frame PNG is never overwritten by the plate blend.
+    smoke_png: PathBuf,
     scratch_png: PathBuf,
     camera: CameraParams,
     sun: SunParams,
@@ -2201,6 +2794,13 @@ struct WorkerState {
     render_params: serde_json::Value,
     /// M6: render mode + offline/path-trace quality for viewport and exports.
     quality: RenderQuality,
+    /// M7: AETHER inputs; `enabled` false means the engine probe environment.
+    atmosphere: AtmosphereParams,
+    /// M7: smoke render settings and composite opacity.
+    smoke: SmokeParams,
+    smoke_opacity: f32,
+    /// True between a successful `smoke.load` and the next `smoke.clear`.
+    smoke_loaded: bool,
     terrain_visible: bool,
     dirty: bool,
     has_terrain: bool,
@@ -2377,6 +2977,8 @@ fn run_worker(
     let mut engine = WorkerState {
         bridge: bridge.clone().unbind(),
         hdr_path,
+        env_hdr_path: std::env::temp_dir().join(format!("forge3d-studio-{tag}-env.hdr")),
+        smoke_png: std::env::temp_dir().join(format!("forge3d-studio-{tag}-smoke.png")),
         scratch_png: std::env::temp_dir().join(format!("forge3d-studio-{tag}-frame.png")),
         camera: CameraParams::default(),
         sun: SunParams::default(),
@@ -2384,6 +2986,10 @@ fn run_worker(
         request_certificate: false,
         render_params: serde_json::Value::Object(serde_json::Map::new()),
         quality: RenderQuality::default(),
+        atmosphere: AtmosphereParams::default(),
+        smoke: SmokeParams::default(),
+        smoke_opacity: 1.0,
+        smoke_loaded: false,
         terrain_visible: true,
         dirty: true,
         has_terrain: false,
@@ -2474,6 +3080,20 @@ fn run_worker(
                     engine.dirty = true;
                 }
             }
+            Command::SetAtmosphere(atmosphere) => {
+                if engine.atmosphere != atmosphere {
+                    engine.atmosphere = atmosphere;
+                    engine.dirty = true;
+                }
+            }
+            Command::SetSmoke { params, opacity } => {
+                let opacity = opacity.clamp(0.0, 1.0);
+                if engine.smoke != params || engine.smoke_opacity != opacity {
+                    engine.smoke = params;
+                    engine.smoke_opacity = opacity;
+                    engine.dirty = true;
+                }
+            }
             Command::RenderFrame {
                 width,
                 height,
@@ -2498,13 +3118,15 @@ fn run_worker(
                     });
                 } else {
                     match render_frame_png(py, &mut engine, events, width, height, &path) {
-                        Ok(quality) => {
+                        Ok(frame) => {
                             let _ = events.send(Event::ExportFinished {
                                 path,
                                 width,
                                 height,
                                 render_ms: started.elapsed().as_secs_f32() * 1000.0,
-                                quality,
+                                quality: frame.quality,
+                                certificate: frame.certificate,
+                                smoke: frame.smoke,
                             });
                         }
                         Err(message) => {
@@ -2516,11 +3138,36 @@ fn run_worker(
             }
             Command::Call { job, op, params } => {
                 let _ = events.send(Event::Busy(true));
+                // Every op sees the same environment a render would: the
+                // atmosphere/observation/determinism ops reason about the sun,
+                // camera and IBL the frames actually use, and explicit keys in
+                // `params` still win.
+                let params = with_environment(&engine, params);
                 match dispatch(py, engine.bridge.bind(py), &op, &params) {
                     Ok(result) => {
+                        match op.as_str() {
+                            "smoke.load" => engine.smoke_loaded = true,
+                            "smoke.clear" => engine.smoke_loaded = false,
+                            _ => {}
+                        }
                         let _ = events.send(Event::JobDone { job, op, result });
                     }
                     Err(message) => {
+                        // A failed load must not leave an older volume live: the
+                        // bridge assigns its domain only on success, so a failed
+                        // replace would keep rendering the previous volume while
+                        // the UI reports the new path. Clear it and stop
+                        // compositing, so what is on screen is what the project
+                        // says.
+                        if op == "smoke.load" {
+                            let _ = dispatch(
+                                py,
+                                engine.bridge.bind(py),
+                                "smoke.clear",
+                                &serde_json::json!({}),
+                            );
+                            engine.smoke_loaded = false;
+                        }
                         let _ = events.send(Event::JobFailed { job, op, message });
                     }
                 }
@@ -2577,7 +3224,8 @@ fn clear_progress_sink(bridge: &Bound<'_, PyDict>) {
     let _ = bridge.del_item("_studio_progress");
 }
 
-/// Render arguments every quality path shares: view, sun, ramp and targets.
+/// Render arguments every quality path shares: view, sun, ramp, environment and
+/// targets.
 fn render_args(
     engine: &WorkerState,
     width: u32,
@@ -2604,17 +3252,99 @@ fn render_args(
         "colormap": engine.colormap,
         "params": engine.render_params,
         "hdr_path": engine.hdr_path.to_string_lossy(),
+        "env_path": engine.env_hdr_path.to_string_lossy(),
+        "atmosphere": atmosphere_payload(engine),
         "out_png": out.to_string_lossy(),
         "certificate_path": certificate_path
             .map(|path| path.to_string_lossy().into_owned()),
     })
 }
 
+/// The project's atmosphere inputs as one flat dict.
+///
+/// `_prepare_environment` reads `enabled`/`intensity` from it and hands the rest
+/// to `AtmosphereSettings`, so the engine's own range validation is what the
+/// worker sees (and what a bad value reports).
+fn atmosphere_payload(engine: &WorkerState) -> serde_json::Value {
+    let mut payload = engine.atmosphere.engine_kwargs();
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "enabled".to_owned(),
+            serde_json::json!(engine.atmosphere.enabled),
+        );
+        map.insert(
+            "intensity".to_owned(),
+            serde_json::json!(engine.atmosphere.intensity),
+        );
+    }
+    payload
+}
+
+/// The environment a render or an environment-aware op should use.
+///
+/// These are defaults: a caller that passes its own value for a key keeps it.
+fn environment_payload(engine: &WorkerState) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("hdr_path", serde_json::json!(engine.hdr_path)),
+        ("env_path", serde_json::json!(engine.env_hdr_path)),
+        ("atmosphere", atmosphere_payload(engine)),
+        ("smoke", engine.smoke.render_settings()),
+        ("smoke_opacity", serde_json::json!(engine.smoke_opacity)),
+        (
+            "sun",
+            serde_json::json!({
+                "azimuth_deg": engine.sun.azimuth_deg,
+                "elevation_deg": engine.sun.elevation_deg,
+                "intensity": engine.sun.intensity,
+            }),
+        ),
+        (
+            "camera",
+            serde_json::json!({
+                "phi_deg": engine.camera.phi_deg,
+                "theta_deg": engine.camera.theta_deg,
+                "radius": engine.camera.radius,
+                "fov_deg": engine.camera.fov_deg,
+                "target": [engine.camera.target_x, 0.0, engine.camera.target_z],
+            }),
+        ),
+        (
+            "domain",
+            serde_json::json!([engine.domain.0, engine.domain.1]),
+        ),
+    ]
+}
+
+/// Merge the environment defaults into an op's params without clobbering them.
+fn with_environment(engine: &WorkerState, params: serde_json::Value) -> serde_json::Value {
+    let mut map = match params {
+        serde_json::Value::Object(map) => map,
+        serde_json::Value::Null => serde_json::Map::new(),
+        other => return other,
+    };
+    for (key, value) in environment_payload(engine) {
+        map.entry(key.to_owned()).or_insert(value);
+    }
+    serde_json::Value::Object(map)
+}
+
+/// What one render produced beyond the pixels: the file to read, the quality
+/// metadata, the signed certificate and the smoke composite report.
+struct RenderedFrame {
+    /// The PNG a caller should read: the terrain frame, or the terrain+smoke
+    /// blend when a plate was composited over it.
+    frame_png: PathBuf,
+    quality: Option<serde_json::Value>,
+    certificate: Option<PathBuf>,
+    smoke: Option<serde_json::Value>,
+}
+
 /// Render one frame through the op the current quality settings select.
 ///
-/// Returns the render's own quality metadata for the offline and path-traced
-/// paths (`None` for the plain one-shot raster frame, which has nothing extra
-/// to report).
+/// The render's own quality metadata comes back for the offline and path-traced
+/// paths (`None` for the plain one-shot raster frame, which has nothing extra to
+/// report). A loaded, visible smoke volume is composited over the finished
+/// frame; the certificate stays the terrain pass's.
 fn render_frame_png(
     py: Python<'_>,
     engine: &mut WorkerState,
@@ -2622,7 +3352,7 @@ fn render_frame_png(
     width: u32,
     height: u32,
     out: &Path,
-) -> Result<Option<serde_json::Value>, String> {
+) -> Result<RenderedFrame, String> {
     if !engine.has_terrain {
         return Err("no terrain loaded".to_owned());
     }
@@ -2665,11 +3395,58 @@ fn render_frame_png(
         clear_progress_sink(bridge);
     }
     let metadata = outcome?;
-    Ok(if op == "terrain.render" {
-        None
-    } else {
-        Some(metadata)
+    // Report the certificate that exists, not the name we asked for: a build
+    // that did not sign must not leave the UI pointing at a stale file.
+    let certificate = certificate_path.filter(|path| path.exists());
+    let (frame_png, smoke) = composite_smoke(py, engine, events, out);
+    Ok(RenderedFrame {
+        frame_png,
+        quality: (op != "terrain.render").then_some(metadata),
+        certificate,
+        smoke,
     })
+}
+
+/// Composite the bridge's plan-view smoke plate over a finished terrain frame.
+///
+/// Returns the file to read and the bridge's report. Nothing is composited when
+/// the smoke layer is off or no volume is loaded (both are honest states: the
+/// caller sees `None`). A failed composite is reported and the terrain frame is
+/// kept without the plate, never silently swapped for a partial one.
+fn composite_smoke(
+    py: Python<'_>,
+    engine: &WorkerState,
+    events: &Sender<Event>,
+    frame: &Path,
+) -> (PathBuf, Option<serde_json::Value>) {
+    if !(engine.smoke.enabled && engine.smoke_loaded) {
+        return (frame.to_path_buf(), None);
+    }
+    let blended = &engine.smoke_png;
+    let _ = std::fs::remove_file(blended);
+    let params = serde_json::json!({
+        "frame_png": frame.to_string_lossy(),
+        "out_png": blended.to_string_lossy(),
+        "opacity": engine.smoke_opacity,
+        "settings": engine.smoke.render_settings(),
+        "sun": {
+            "azimuth_deg": engine.sun.azimuth_deg,
+            "elevation_deg": engine.sun.elevation_deg,
+        },
+    });
+    match dispatch(py, engine.bridge.bind(py), "smoke.composite", &params) {
+        Ok(report) => (blended.clone(), Some(report)),
+        Err(message) => {
+            let _ = events.send(Event::Error {
+                context: "Smoke composite".to_owned(),
+                message: format!("{message}\nThe terrain frame is shown without the smoke plate."),
+            });
+            (
+                frame.to_path_buf(),
+                Some(serde_json::json!({ "status": "failed", "message": message })),
+            )
+        }
+    }
 }
 
 /// Render via the dispatcher, then decode the output PNG into RGBA bytes and
@@ -2685,19 +3462,21 @@ fn render_terrain_frame(
 ) {
     let out = force_out.unwrap_or_else(|| engine.scratch_png.clone());
     let started = Instant::now();
-    let result = render_frame_png(py, engine, events, width, height, &out).and_then(|quality| {
-        image::open(&out)
+    let result = render_frame_png(py, engine, events, width, height, &out).and_then(|frame| {
+        image::open(&frame.frame_png)
             .map_err(|err| format!("decoding rendered PNG: {err}"))
-            .map(|img| (img.to_rgba8().into_raw(), quality))
+            .map(|img| (img.to_rgba8().into_raw(), frame))
     });
     match result {
-        Ok((rgba, quality)) => {
+        Ok((rgba, frame)) => {
             let _ = events.send(Event::FrameReady {
                 width,
                 height,
                 rgba,
                 render_ms: started.elapsed().as_secs_f32() * 1000.0,
-                quality,
+                quality: frame.quality,
+                certificate: frame.certificate,
+                smoke: frame.smoke,
             });
         }
         Err(message) => {

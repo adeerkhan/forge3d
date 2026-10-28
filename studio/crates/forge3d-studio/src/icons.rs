@@ -89,6 +89,7 @@ icon_set![
     (Frame, "frame"),
     (Columns2, "columns-2"),
     (Ruler, "ruler"),
+    (Wind, "wind"),
 ];
 
 /// Rasterized icon set keyed by [`Icon`].

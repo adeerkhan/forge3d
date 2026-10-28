@@ -106,6 +106,7 @@ pub fn layer_icon(kind: LayerKind) -> Icon {
         LayerKind::PointCloud => Icon::Cloud,
         LayerKind::Mesh => Icon::Box,
         LayerKind::Furniture => Icon::Compass,
+        LayerKind::Smoke => Icon::Wind,
         LayerKind::Group => Icon::Folder,
     }
 }

@@ -154,6 +154,12 @@ pub enum Action {
     // Scene
     AddTerrainLayer,
     AddGroup,
+    /// M7: AETHER atmosphere inputs + IBL.
+    AtmosphereSettings,
+    /// M7: the SIDERA observation the sun can be derived from.
+    TimeAndPlace,
+    /// M7: load a smoke density volume.
+    AddSmokeVolume,
     // Layer
     ZoomToLayer,
     ToggleLayerVisibility,
@@ -499,6 +505,24 @@ pub const ACTIONS: &[ActionDef] = &[
         None,
     ),
     scene(Action::AddGroup, "New group", Some(Icon::FolderPlus), None),
+    scene(
+        Action::AtmosphereSettings,
+        "Atmosphere (AETHER)…",
+        Some(Icon::Sun),
+        None,
+    ),
+    scene(
+        Action::TimeAndPlace,
+        "Time and place (SIDERA)…",
+        Some(Icon::Compass),
+        None,
+    ),
+    scene(
+        Action::AddSmokeVolume,
+        "Add smoke volume…",
+        Some(Icon::Wind),
+        None,
+    ),
     // --------------------------------------------------------------- Layer
     layer(
         Action::ZoomToLayer,
@@ -691,12 +715,28 @@ impl Action {
     }
 
     /// Every action in one menu, in registry order.
+    ///
+    /// Submenu entries are included: this list is what the command palette and
+    /// the shortcut window show, and a submenu is presentation only.
     pub fn in_menu(menu: Menu) -> Vec<Action> {
         ACTIONS
             .iter()
             .filter(|def| def.menu == Some(menu))
             .map(|def| def.action)
             .collect()
+    }
+
+    /// The one-level submenu this action sits in, when it does.
+    ///
+    /// The action still belongs to its menu (`menu()`), so nothing that lists
+    /// actions by menu loses it; only the menu bar nests it.
+    pub fn submenu(self) -> Option<(Menu, &'static str)> {
+        match self {
+            Action::AtmosphereSettings | Action::TimeAndPlace | Action::AddSmokeVolume => {
+                Some((Menu::Scene, "Environment"))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -744,6 +784,31 @@ mod tests {
                 "menu {} would render empty",
                 menu.label()
             );
+        }
+    }
+
+    #[test]
+    fn submenu_entries_stay_listed_under_their_menu() {
+        for action in [
+            Action::AtmosphereSettings,
+            Action::TimeAndPlace,
+            Action::AddSmokeVolume,
+        ] {
+            assert_eq!(
+                action.submenu().map(|(menu, _)| menu),
+                Some(Menu::Scene),
+                "{action:?} must nest under its own menu"
+            );
+            assert!(
+                Action::in_menu(Menu::Scene).contains(&action),
+                "{action:?} must stay in Scene for the palette and shortcut window"
+            );
+        }
+        // A submenu never claims an action from another menu.
+        for def in ACTIONS {
+            if let Some((menu, _)) = def.action.submenu() {
+                assert_eq!(def.menu, Some(menu), "{:?} menu drift", def.action);
+            }
         }
     }
 

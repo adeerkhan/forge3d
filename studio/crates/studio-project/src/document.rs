@@ -50,6 +50,10 @@ pub enum LayerKind {
     Mesh,
     /// Graticule, scale bar, north arrow, legend, map plate.
     Furniture,
+    /// M7: an atmospheric smoke volume drawn as a projected plate over the
+    /// terrain frame (density field + render settings live in
+    /// [`crate::SmokeParams`]).
+    Smoke,
     /// A folder that carries visibility/opacity for its children.
     Group,
 }
@@ -66,6 +70,7 @@ impl LayerKind {
         LayerKind::PointCloud,
         LayerKind::Mesh,
         LayerKind::Furniture,
+        LayerKind::Smoke,
         LayerKind::Group,
     ];
 
@@ -80,6 +85,7 @@ impl LayerKind {
             LayerKind::PointCloud => "Point cloud",
             LayerKind::Mesh => "Mesh",
             LayerKind::Furniture => "Map furniture",
+            LayerKind::Smoke => "Smoke volume",
             LayerKind::Group => "Group",
         }
     }
@@ -87,7 +93,10 @@ impl LayerKind {
     /// Whether Studio can draw this kind today. `false` is not an error — the
     /// Inspector names the milestone that implements it.
     pub fn renders(self) -> bool {
-        matches!(self, LayerKind::Terrain | LayerKind::Group)
+        matches!(
+            self,
+            LayerKind::Terrain | LayerKind::Smoke | LayerKind::Group
+        )
     }
 
     pub fn is_group(self) -> bool {
@@ -103,6 +112,7 @@ impl LayerKind {
             "pointcloud" => LayerKind::PointCloud,
             "tileset" => LayerKind::Buildings,
             "mesh" => LayerKind::Mesh,
+            "smoke" => LayerKind::Smoke,
             _ => LayerKind::Reference,
         }
     }
@@ -117,6 +127,7 @@ impl LayerKind {
             "labels" | "label" | "label_layer" => LayerKind::Labels,
             "points" | "pointcloud" => LayerKind::PointCloud,
             "mesh" | "gltf" => LayerKind::Mesh,
+            "smoke" => LayerKind::Smoke,
             "graticule" | "scale_bar" | "north_arrow" | "legend" | "map_plate" => {
                 LayerKind::Furniture
             }
@@ -561,6 +572,19 @@ impl Document {
             .find(|layer| layer.kind == LayerKind::Terrain)
     }
 
+    /// M7: the smoke-volume layer, if the document has one.
+    pub fn smoke_layer(&self) -> Option<&Layer> {
+        self.layers
+            .iter()
+            .find(|layer| layer.kind == LayerKind::Smoke)
+    }
+
+    pub fn smoke_layer_mut(&mut self) -> Option<&mut Layer> {
+        self.layers
+            .iter_mut()
+            .find(|layer| layer.kind == LayerKind::Smoke)
+    }
+
     /// Whether every ancestor of `id` is visible.
     pub fn effective_visible(&self, id: LayerId) -> bool {
         let self_visible = self.layer(id).map(|layer| layer.visible).unwrap_or(false);
@@ -882,9 +906,12 @@ mod tests {
     }
 
     #[test]
-    fn only_terrain_and_groups_claim_to_render_today() {
+    fn only_implemented_kinds_claim_to_render_today() {
         for kind in LayerKind::ALL {
-            let expected = matches!(kind, LayerKind::Terrain | LayerKind::Group);
+            let expected = matches!(
+                kind,
+                LayerKind::Terrain | LayerKind::Smoke | LayerKind::Group
+            );
             assert_eq!(kind.renders(), expected, "{kind:?} capability drift");
         }
     }

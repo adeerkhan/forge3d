@@ -20,12 +20,16 @@ use crate::ui::{menu, shortcuts, status, toolbar};
 use egui::{Color32, ColorImage, Context, Response, Slider, TextureHandle, TextureOptions, Ui};
 use studio_engine::{Command, EngineHandle, Event};
 use studio_project::document::{DocHistory, LayerId, LayerKind};
-use studio_project::{CameraParams, Layer, Project, RenderMode, SunParams};
+use studio_project::{CameraParams, Layer, Observation, Project, RenderMode, SunParams};
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(120);
 /// M4: how long a terrain-parameter edit settles before it is re-validated
 /// by the engine (typing a value should not dispatch one job per keystroke).
 const PARAMS_VALIDATE_DEBOUNCE: Duration = Duration::from_millis(700);
+/// M7: how long an atmosphere edit settles before the sky is baked and
+/// re-generated. Every slider frame would otherwise dispatch an environment
+/// build (a full AETHER sky plus an HDR write) into the worker queue.
+const ATMOSPHERE_SYNC_DEBOUNCE: Duration = Duration::from_millis(400);
 const MAX_STATUS_ERRORS: usize = 4;
 /// Console history kept in the bottom dock.
 const MAX_LOG_LINES: usize = 500;
@@ -114,6 +118,20 @@ enum PendingJob {
     ParamsValidate,
     /// M6: what this engine environment can render (denoisers, tracing).
     OfflineCaps,
+    /// M7: AETHER LUT provenance for the project's atmosphere inputs.
+    AtmosphereBake,
+    /// M7: the generated atmosphere bound as this render's IBL.
+    AtmosphereEnvironment,
+    /// M7: SIDERA ephemeris for the project's instant and place.
+    AstroObserve,
+    /// M7: what this build can render smoke with.
+    SmokeCaps,
+    /// M7: a density volume handed to the bridge.
+    SmokeLoad {
+        path: PathBuf,
+    },
+    /// M7: the bridge's volume dropped.
+    SmokeClear,
 }
 
 /// One baked camera-rig keyframe in renderer world units.
@@ -358,6 +376,42 @@ pub struct StudioApp {
     render_after_recipe: bool,
     /// M10: GPU-shared native viewport (egui-native texture, no readback).
     native: NativeViewportState,
+    /// M7: the AETHER atmosphere window.
+    atmosphere_window: bool,
+    /// M7: the time-and-place (SIDERA observation) window.
+    place_window: bool,
+    /// M7: last `atmosphere.bake` report — the LUT bank's provenance for the
+    /// project's current inputs (precomputed or baked here, plus its SHA).
+    atmosphere_bake: Option<serde_json::Value>,
+    /// M7: what lit the environment currently bound (`aether` or the engine
+    /// probe), from `atmosphere.environment`.
+    atmosphere_meta: Option<serde_json::Value>,
+    /// M7: last `astro.observe` report (bodies, Moon phase, ΔT, sidereal time).
+    astro_meta: Option<serde_json::Value>,
+    /// M7: SIDERA's own reason the current instant/place could not be resolved.
+    astro_error: Option<String>,
+    /// M7: what this build can render smoke with (`smoke.capabilities`).
+    smoke_caps: Option<serde_json::Value>,
+    /// M7: the loaded volume's report (`smoke.load`).
+    smoke_meta: Option<serde_json::Value>,
+    /// M7: the plate report from the last rendered frame (coverage, renderer,
+    /// or `status: failed`), `None` when no plate was composited.
+    smoke_composite: Option<serde_json::Value>,
+    /// M7: the path the bridge was last asked for (in flight or loaded), so a
+    /// repaint does not queue the same load again.
+    smoke_requested: Option<PathBuf>,
+    /// M7: the path whose load the bridge confirmed.
+    smoke_loaded: Option<PathBuf>,
+    /// M7: a path whose load failed, with the bridge's reason — a known-bad
+    /// file is not re-dispatched every frame.
+    smoke_error: Option<(PathBuf, String)>,
+    /// M7: the observation `astro.observe` last answered for, so the sun is not
+    /// re-derived on every repaint.
+    applied_observation: Option<Observation>,
+    /// M7: when the debounced atmosphere sync (bake + environment) should run.
+    atmosphere_sync_due: Option<Instant>,
+    /// M7: an atmosphere job is in flight; later edits wait for it.
+    atmosphere_sync_pending: bool,
 }
 
 /// M10: the GPU-shared viewport's lifecycle.
@@ -570,6 +624,21 @@ impl StudioApp {
             pending_mapscene_camera: None,
             render_after_recipe: false,
             native: NativeViewportState::start(cc),
+            atmosphere_window: false,
+            place_window: false,
+            atmosphere_bake: None,
+            atmosphere_meta: None,
+            astro_meta: None,
+            astro_error: None,
+            smoke_caps: None,
+            smoke_meta: None,
+            smoke_composite: None,
+            smoke_requested: None,
+            smoke_loaded: None,
+            smoke_error: None,
+            applied_observation: None,
+            atmosphere_sync_due: None,
+            atmosphere_sync_pending: false,
         }
     }
 
@@ -667,6 +736,13 @@ impl StudioApp {
                             .call("offline.capabilities", serde_json::json!({})),
                         PendingJob::OfflineCaps,
                     );
+                    // M7: and what it can render smoke with, so the volume
+                    // panel names the real renderer instead of assuming one.
+                    self.pending_jobs.insert(
+                        self.engine
+                            .call("smoke.capabilities", serde_json::json!({})),
+                        PendingJob::SmokeCaps,
+                    );
                 }
                 Event::TerrainLoaded {
                     path,
@@ -730,31 +806,26 @@ impl StudioApp {
                     rgba,
                     render_ms,
                     quality,
+                    certificate,
+                    smoke,
                 } => {
-                    // M5: the worker writes a signed certificate next to the
-                    // scratch frame when signing is on; record it.
-                    if self.request_certificate {
-                        let cert_path = std::env::temp_dir().join("forge3d-studio-frame.cert.json");
-                        if let Ok(text) = std::fs::read_to_string(&cert_path) {
-                            let sha = serde_json::from_str::<serde_json::Value>(&text)
-                                .ok()
-                                .and_then(|cert| {
-                                    cert.get("payload_sha256")
-                                        .and_then(|v| v.as_str().map(String::from))
-                                });
-                            let record = CertRecord {
-                                source: "terrain".to_owned(),
-                                path: cert_path.clone(),
-                                payload_sha256: sha,
-                                verified: None,
-                            };
-                            if !self.certificates.iter().any(|c| {
-                                c.path == record.path && c.payload_sha256 == record.payload_sha256
-                            }) {
-                                self.certificates.push(record);
-                            }
+                    // M5/M7: the worker names the certificate it actually
+                    // wrote for this frame — never a guessed file name.
+                    if let Some(cert_path) = certificate {
+                        let sha = read_certificate_sha(&cert_path);
+                        let record = CertRecord {
+                            source: "terrain".to_owned(),
+                            path: cert_path,
+                            payload_sha256: sha,
+                            verified: None,
+                        };
+                        if !self.certificates.iter().any(|c| {
+                            c.path == record.path && c.payload_sha256 == record.payload_sha256
+                        }) {
+                            self.certificates.push(record);
                         }
                     }
+                    self.note_smoke_report("Frame", smoke);
                     // M10: while the native viewport paints, a readback frame
                     // is only a timing sample — its pixels are stale by the
                     // time they arrive and are not shown.
@@ -790,6 +861,8 @@ impl StudioApp {
                     height,
                     render_ms,
                     quality,
+                    certificate,
+                    smoke,
                 } => {
                     let mode = quality
                         .as_ref()
@@ -797,6 +870,16 @@ impl StudioApp {
                         .and_then(|mode| mode.as_str())
                         .unwrap_or("raster")
                         .to_owned();
+                    if let Some(cert_path) = certificate {
+                        let sha = read_certificate_sha(&cert_path);
+                        self.certificates.push(CertRecord {
+                            source: "export".to_owned(),
+                            path: cert_path,
+                            payload_sha256: sha,
+                            verified: None,
+                        });
+                    }
+                    self.note_smoke_report("Export", smoke);
                     self.quality_meta = quality;
                     self.progress = None;
                     self.set_status(format!(
@@ -940,12 +1023,14 @@ impl StudioApp {
 
     /// True when the viewport paints from the native scene: terrain mode with
     /// a loaded native terrain. MapScene renders through the bridge and owns
-    /// the panel in its own mode, and a quality render is always a bridge
-    /// still (the native viewer has no accumulation or tracer).
+    /// the panel in its own mode, a quality render is always a bridge still
+    /// (the native viewer has no accumulation or tracer), and an active smoke
+    /// plate needs the bridge composite.
     fn native_paints(&self) -> bool {
         self.scene_mode == SceneMode::Terrain
             && self.native.is_live()
             && !self.quality_mode_active()
+            && !self.smoke_plate_active()
     }
 
     /// Image the viewport paints: the native scene's texture when it is live,
@@ -1080,6 +1165,13 @@ impl StudioApp {
             return;
         };
         if self.native.viewport.is_none() || self.scene_mode != SceneMode::Terrain {
+            return;
+        }
+        // M7: the bridge composites the smoke plate over a finished frame, so a
+        // native frame cannot carry it. Skip the native pass and let the
+        // readback frame paint; `native_paints` agrees, and the smoke panel
+        // states the reason.
+        if self.smoke_plate_active() {
             return;
         }
         self.sync_native_colormap();
@@ -1482,6 +1574,74 @@ impl StudioApp {
                 // render; a missing OIDN build or tracer is named, not hidden.
                 self.offline_caps = Some(result);
             }
+            Some(PendingJob::AtmosphereBake) => {
+                self.atmosphere_bake = Some(result);
+            }
+            Some(PendingJob::AtmosphereEnvironment) => {
+                self.atmosphere_sync_pending = false;
+                let source = result
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                let note = match source.as_str() {
+                    "aether" => format!(
+                        "AETHER environment bound ({}×{}, sun {}°)",
+                        result.get("width").and_then(|v| v.as_u64()).unwrap_or(0),
+                        result.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+                        result
+                            .get("sun_elevation_deg")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(0.0)
+                    ),
+                    _ => {
+                        "Atmosphere off: the engine probe environment lights the terrain".to_owned()
+                    }
+                };
+                self.atmosphere_meta = Some(result);
+                self.set_status(note);
+                self.invalidate_viewport();
+            }
+            Some(PendingJob::AstroObserve) => {
+                self.apply_astro_report(result);
+            }
+            Some(PendingJob::SmokeCaps) => {
+                self.smoke_caps = Some(result);
+            }
+            Some(PendingJob::SmokeLoad { path }) => {
+                self.smoke_loaded = Some(path.clone());
+                self.smoke_error = None;
+                self.smoke_composite = None;
+                let dims = result
+                    .get("dims")
+                    .and_then(|dims| dims.as_array())
+                    .map(|dims| {
+                        dims.iter()
+                            .filter_map(|v| v.as_u64())
+                            .map(|v| v.to_string())
+                            .collect::<Vec<_>>()
+                            .join("×")
+                    })
+                    .unwrap_or_else(|| "?".to_owned());
+                let renderer = result
+                    .get("renderer")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?")
+                    .to_owned();
+                self.smoke_meta = Some(result);
+                self.set_status(format!(
+                    "Smoke volume {} loaded ({dims}, {renderer} renderer)",
+                    path.display()
+                ));
+                self.invalidate_viewport();
+            }
+            Some(PendingJob::SmokeClear) => {
+                self.smoke_loaded = None;
+                self.smoke_requested = None;
+                self.smoke_meta = None;
+                self.smoke_composite = None;
+                self.invalidate_viewport();
+            }
             None => {
                 self.set_status(format!("Engine op '{op}' finished"));
             }
@@ -1521,6 +1681,46 @@ impl StudioApp {
                     return;
                 }
             }
+        }
+        match &kind {
+            // M7: the atmosphere fell back to the probe environment, or the
+            // bake failed. The panel keeps the engine's own words.
+            Some(PendingJob::AtmosphereEnvironment) | Some(PendingJob::AtmosphereBake) => {
+                self.atmosphere_sync_pending = false;
+                self.push_error("Atmosphere", message.to_owned());
+                return;
+            }
+            // M7: SIDERA could not resolve the instant/place. The scene keeps
+            // the sun it had, and the window says why.
+            Some(PendingJob::AstroObserve) => {
+                self.astro_error = Some(message.lines().next().unwrap_or(message).to_owned());
+                self.push_error("SIDERA observation", message.to_owned());
+                return;
+            }
+            Some(PendingJob::SmokeCaps) => {
+                self.push_error("Smoke capabilities", message.to_owned());
+                return;
+            }
+            Some(PendingJob::SmokeLoad { path }) => {
+                // The worker cleared any previously loaded volume, so nothing
+                // is composited over a frame while the UI shows this failure.
+                self.smoke_loaded = None;
+                self.smoke_meta = None;
+                self.smoke_error = Some((path.clone(), message.to_owned()));
+                self.push_error(
+                    format!("Loading smoke volume {}", path.display()),
+                    message.to_owned(),
+                );
+                return;
+            }
+            Some(PendingJob::SmokeClear) => {
+                // Clearing is idempotent: keep no volume claimed and retry on
+                // the next sync if the worker still holds one.
+                self.smoke_requested = None;
+                self.push_error("Clearing smoke volume", message.to_owned());
+                return;
+            }
+            _ => {}
         }
         self.push_error(format!("Engine op '{op}'"), message.to_owned());
     }
@@ -1668,6 +1868,36 @@ impl StudioApp {
         );
         self.pending_jobs
             .insert(job, PendingJob::DatasetInspect { path });
+    }
+
+    /// M7: pick a density volume and hand it to the project.
+    ///
+    /// The volume is referenced by path like every other dataset; the bridge
+    /// loads it (`smoke.load`) and the layer row appears through
+    /// [`Project::sync_smoke_layer`]. Only the formats the bridge can read are
+    /// offered, so the picker cannot produce a path the engine would reject.
+    fn pick_smoke_volume(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Smoke volumes (density)", &["npy", "npz"])
+            .pick_file()
+        else {
+            return;
+        };
+        let before = self.project.document.clone();
+        self.project.smoke.path = Some(path.clone());
+        self.project.normalize();
+        if self.project.document != before {
+            self.history.record(before);
+        }
+        self.project_dirty = true;
+        self.smoke_error = None;
+        self.sync_engine_smoke();
+        self.sync_smoke_volume();
+        if let Some(id) = self.project.document.smoke_layer().map(|layer| layer.id) {
+            self.selection = vec![id];
+            self.dock.left_tab = 0;
+        }
+        self.set_status(format!("Loading smoke volume {}…", path.display()));
     }
 
     /// Import-dialog action: load the inspected file into the terrain slot.
@@ -2085,12 +2315,258 @@ impl StudioApp {
         self.engine.send(Command::SetSun(self.project.sun));
         // M6: the project's render quality travels with it.
         self.sync_engine_quality();
+        // M7: so do the atmosphere, the loaded smoke volume and (when the sun is
+        // derived from it) the observation.
+        self.sync_engine_atmosphere();
+        self.sync_engine_smoke();
+        self.sync_smoke_volume();
+        if self.project.observation.apply_sun {
+            self.request_observation();
+        }
+        if self.project.atmosphere.enabled {
+            self.schedule_atmosphere_sync();
+        }
         // M4: the project's terrain params travel with it. They were validated
         // by the pages when they were last edited; a hand-edited project file
         // surfaces the engine's own error on the first render.
         self.engine.send(Command::SetRenderParams(
             self.project.terrain_params.clone(),
         ));
+    }
+
+    /// M7: hand the AETHER inputs to the worker.
+    fn sync_engine_atmosphere(&mut self) {
+        self.engine
+            .send(Command::SetAtmosphere(self.project.atmosphere.clone()));
+    }
+
+    /// M7: mark the atmosphere for a debounced environment rebuild.
+    ///
+    /// Generating an AETHER sky is a full scattering pass plus an HDR write, so
+    /// a slider drag must settle before it runs — one build, not one per frame.
+    fn schedule_atmosphere_sync(&mut self) {
+        self.atmosphere_sync_due = Some(Instant::now() + ATMOSPHERE_SYNC_DEBOUNCE);
+    }
+
+    /// M7: dispatch the debounced AETHER environment build.
+    ///
+    /// The environment is also built lazily by the render path (same inputs,
+    /// same key), so this only refreshes what the panel reports — and with
+    /// atmosphere off there is nothing to build: the render path restores the
+    /// engine probe and the panel says so.
+    fn flush_atmosphere_sync(&mut self) {
+        if self.atmosphere_sync_pending {
+            return;
+        }
+        let due = self
+            .atmosphere_sync_due
+            .map(|at| Instant::now() >= at)
+            .unwrap_or(false);
+        if !due {
+            return;
+        }
+        self.atmosphere_sync_due = None;
+        if !self.project.atmosphere.enabled {
+            self.atmosphere_meta = None;
+            return;
+        }
+        self.atmosphere_sync_pending = true;
+        let params = serde_json::json!({
+            "settings": self.project.atmosphere.engine_kwargs(),
+            "sun_elevation_deg": self.project.sun.elevation_deg,
+            "intensity": self.project.atmosphere.intensity,
+        });
+        let job = self.engine.call("atmosphere.environment", params);
+        self.pending_jobs
+            .insert(job, PendingJob::AtmosphereEnvironment);
+    }
+
+    /// M7: ask AETHER for the LUT bank's provenance with the current inputs.
+    fn request_atmosphere_bake(&mut self) {
+        let params = serde_json::json!({
+            "settings": self.project.atmosphere.engine_kwargs(),
+        });
+        let job = self.engine.call("atmosphere.bake", params);
+        self.pending_jobs.insert(job, PendingJob::AtmosphereBake);
+    }
+
+    /// M7: ask SIDERA where the Sun (and Moon) are for this instant and place.
+    fn request_observation(&mut self) {
+        let observation = self.project.observation.clone();
+        let params = serde_json::json!({
+            "datetime_utc": observation.datetime_utc,
+            "latitude_deg": observation.latitude_deg,
+            "longitude_deg": observation.longitude_deg,
+            "height_m": observation.height_m,
+            "refraction": observation.refraction,
+        });
+        let job = self.engine.call("astro.observe", params);
+        self.pending_jobs.insert(job, PendingJob::AstroObserve);
+        self.set_status("Asking SIDERA for the Sun's position…");
+    }
+
+    /// M7: apply one `astro.observe` report.
+    ///
+    /// The angles come from SIDERA (plus the engine's own compass → renderer
+    /// conversion, which the bridge reports alongside them); Studio never
+    /// computes a solar position itself.
+    fn apply_astro_report(&mut self, result: serde_json::Value) {
+        self.astro_error = None;
+        let warnings: Vec<String> = result
+            .get("warnings")
+            .and_then(|value| value.as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|value| value.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for warning in &warnings {
+            self.push_log(false, format!("SIDERA: {warning}"));
+        }
+        let sun = result
+            .get("bodies")
+            .and_then(|bodies| bodies.get("sun"))
+            .cloned();
+        let sun_description = sun.as_ref().map(|sun| {
+            format!(
+                "compass {:.1}° / elevation {:.1}°",
+                sun.get("azimuth_deg")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0),
+                sun.get("altitude_deg")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            )
+        });
+        self.astro_meta = Some(result);
+        if !self.project.observation.apply_sun {
+            self.set_status(format!(
+                "SIDERA: Sun at {} (not applied — the sun keeps its manual angles)",
+                sun_description.unwrap_or_else(|| "?".to_owned())
+            ));
+            return;
+        }
+        let sun = match sun {
+            Some(sun) => sun,
+            None => {
+                self.push_error("SIDERA observation", "the report carries no Sun position");
+                return;
+            }
+        };
+        let (Some(azimuth), Some(elevation)) = (
+            sun.get("renderer_azimuth_deg").and_then(|v| v.as_f64()),
+            sun.get("renderer_elevation_deg").and_then(|v| v.as_f64()),
+        ) else {
+            self.push_error(
+                "SIDERA observation",
+                "the report carries no renderer-frame Sun angles",
+            );
+            return;
+        };
+        self.project.sun.azimuth_deg = azimuth as f32;
+        self.project.sun.elevation_deg = (elevation as f32).clamp(0.0, 90.0);
+        self.project_dirty = true;
+        self.engine.send(Command::SetSun(self.project.sun));
+        self.applied_observation = Some(self.project.observation.clone());
+        // The sky is generated at the sun's elevation, so a new sun is a new
+        // environment.
+        if self.project.atmosphere.enabled {
+            self.schedule_atmosphere_sync();
+        }
+        self.invalidate_viewport();
+        let suffix = if warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", warnings.join("; "))
+        };
+        self.set_status(format!(
+            "Sun from SIDERA: renderer azimuth {:.1}°, elevation {:.1}°{suffix}",
+            self.project.sun.azimuth_deg, self.project.sun.elevation_deg
+        ));
+    }
+
+    /// M7: hand the smoke settings (and the layer's composite opacity) over.
+    fn sync_engine_smoke(&mut self) {
+        self.engine.send(Command::SetSmoke {
+            params: self.project.smoke.clone(),
+            opacity: self.smoke_opacity(),
+        });
+    }
+
+    /// M7: the plate's composite opacity — the smoke layer row's own opacity.
+    fn smoke_opacity(&self) -> f32 {
+        self.project
+            .document
+            .smoke_layer()
+            .map(|layer| layer.opacity)
+            .unwrap_or(1.0)
+    }
+
+    /// M7: load or unload the volume so the bridge holds what the project says.
+    ///
+    /// A path the bridge already rejected is not retried every repaint: the
+    /// failure stays visible in the panel instead of flooding the worker.
+    fn sync_smoke_volume(&mut self) {
+        let wanted = self.project.smoke.path.clone();
+        if wanted == self.smoke_requested {
+            return;
+        }
+        if let (Some(wanted), Some((failed, _))) = (&wanted, &self.smoke_error) {
+            if failed == wanted {
+                return;
+            }
+        }
+        match wanted {
+            Some(path) => {
+                self.smoke_requested = Some(path.clone());
+                let job = self
+                    .engine
+                    .call("smoke.load", serde_json::json!({ "path": path }));
+                self.pending_jobs
+                    .insert(job, PendingJob::SmokeLoad { path });
+                self.set_status("Loading the smoke volume…");
+            }
+            None => {
+                self.smoke_requested = None;
+                if self.smoke_loaded.is_some() {
+                    let job = self.engine.call("smoke.clear", serde_json::json!({}));
+                    self.pending_jobs.insert(job, PendingJob::SmokeClear);
+                }
+                self.smoke_meta = None;
+                self.smoke_composite = None;
+            }
+        }
+    }
+
+    /// M7: true when a composited smoke plate is on screen.
+    ///
+    /// The native viewport cannot composite a projected volume over its frame,
+    /// so the plate routes the viewport through the bridge — and the smoke
+    /// panel states why the native path is idle.
+    fn smoke_plate_active(&self) -> bool {
+        self.project.smoke.enabled
+            && self.project.smoke.path.is_some()
+            && self.smoke_loaded.is_some()
+    }
+
+    /// M7: record a frame's smoke report (or its absence) for the inspector.
+    fn note_smoke_report(&mut self, context: &str, report: Option<serde_json::Value>) {
+        let Some(report) = report else {
+            self.smoke_composite = None;
+            return;
+        };
+        if report.get("status").and_then(|v| v.as_str()) == Some("failed") {
+            let reason = report
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("the engine gave no reason");
+            self.push_log(
+                true,
+                format!("{context}: smoke plate not composited — {reason}"),
+            );
+        }
+        self.smoke_composite = Some(report);
     }
 
     /// M4: mark the terrain params for the debounced engine validation.
@@ -2426,8 +2902,15 @@ impl StudioApp {
                     if project.document.terrain_layer().map(|layer| layer.id) == Some(id) {
                         project.terrain_visible = visible;
                     }
+                    if project.document.smoke_layer().map(|layer| layer.id) == Some(id) {
+                        project.smoke.enabled = visible;
+                    }
                 });
                 if self.is_terrain(id) {
+                    self.invalidate_viewport();
+                }
+                if self.is_smoke(id) {
+                    self.sync_engine_smoke();
                     self.invalidate_viewport();
                 }
             }
@@ -2451,6 +2934,10 @@ impl StudioApp {
                     self.opacity_edit = Some(id);
                 }
                 if self.is_terrain(id) {
+                    self.invalidate_viewport();
+                }
+                if self.is_smoke(id) {
+                    self.sync_engine_smoke();
                     self.invalidate_viewport();
                 }
             }
@@ -2544,6 +3031,7 @@ impl StudioApp {
         let mut cleared_terrain = false;
         let mut removed_dataset = false;
         let mut removed = false;
+        let mut removed_smoke = false;
         let before = self.project.document.clone();
         for id in ids {
             let Some(layer) = self.project.document.layer(*id).cloned() else {
@@ -2554,6 +3042,25 @@ impl StudioApp {
                 self.project.terrain_visible = true;
                 self.engine.send(Command::ClearTerrain);
                 cleared_terrain = true;
+            }
+            if layer.kind == LayerKind::Smoke {
+                // The volume is the layer: dropping the row unloads it from the
+                // bridge (otherwise a plate would keep rendering for a layer the
+                // project no longer has).
+                self.project.smoke.path = None;
+                self.smoke_requested = None;
+                self.smoke_loaded = None;
+                self.smoke_meta = None;
+                self.smoke_composite = None;
+                if self
+                    .pending_jobs
+                    .values()
+                    .all(|job| !matches!(job, PendingJob::SmokeClear))
+                {
+                    let job = self.engine.call("smoke.clear", serde_json::json!({}));
+                    self.pending_jobs.insert(job, PendingJob::SmokeClear);
+                }
+                removed_smoke = true;
             }
             if let Some(source) = &layer.source {
                 let path = std::path::PathBuf::from(source);
@@ -2568,21 +3075,25 @@ impl StudioApp {
             self.project_dirty = true;
         }
         self.selection.clear();
-        if removed || cleared_terrain || removed_dataset {
-            self.set_status(format!(
-                "Removed {} layer(s){}",
-                ids.len(),
-                if cleared_terrain {
-                    " and unloaded the terrain"
-                } else {
-                    ""
-                }
-            ));
+        if removed || cleared_terrain || removed_dataset || removed_smoke {
+            let mut extra = String::new();
+            if cleared_terrain {
+                extra.push_str(" and unloaded the terrain");
+            }
+            if removed_smoke {
+                extra.push_str(" and unloaded the smoke volume");
+            }
+            self.set_status(format!("Removed {} layer(s){extra}", ids.len()));
         }
     }
 
     fn is_terrain(&self, id: LayerId) -> bool {
         self.project.document.terrain_layer().map(|layer| layer.id) == Some(id)
+    }
+
+    /// M7: whether this row is the smoke volume (the bridge's composited plate).
+    fn is_smoke(&self, id: LayerId) -> bool {
+        self.project.document.smoke_layer().map(|layer| layer.id) == Some(id)
     }
 
     /// Mutate the project with undo recording: nothing is recorded when the
@@ -2907,6 +3418,10 @@ impl StudioApp {
                     self.apply_layers_command(LayersCommand::SetStyle(id, style));
                 }
                 ui.weak("Label candidates compile into the LabelLayer.");
+            }
+            LayerKind::Smoke => {
+                ui.add_space(4.0);
+                self.smoke_section(ui);
             }
             _ => {}
         }
@@ -3401,6 +3916,468 @@ impl StudioApp {
         }
     }
 
+    // ------------------------------------------------- M7: environment windows
+
+    /// M7: the AETHER atmosphere window.
+    fn atmosphere_window(&mut self, ctx: &Context) {
+        let mut open = self.atmosphere_window;
+        egui::Window::new("Atmosphere (AETHER)")
+            .open(&mut open)
+            .default_width(360.0)
+            .resizable(false)
+            .show(ctx, |ui| self.atmosphere_body(ui));
+        self.atmosphere_window = open;
+    }
+
+    fn atmosphere_body(&mut self, ui: &mut Ui) {
+        // Edited on a copy, committed once: every helper below (debounce,
+        // engine command, viewport) then runs exactly once per change.
+        let mut atmosphere = self.project.atmosphere.clone();
+        let before = atmosphere.clone();
+        let mut rebuild = false;
+
+        ui.checkbox(
+            &mut atmosphere.enabled,
+            "Light the terrain with a generated sky",
+        )
+        .on_hover_text(
+            "On: AETHER generates an equirectangular sky at the current sun elevation, \
+             written as Radiance HDR and bound as the render's IBL. Off: the engine's \
+             probe environment lights the terrain.",
+        );
+        ui.add_enabled_ui(atmosphere.enabled, |ui| {
+            ui.add(
+                Slider::new(&mut atmosphere.intensity, 0.0..=4.0)
+                    .text("IBL intensity")
+                    .logarithmic(true),
+            );
+            egui::Grid::new("atmosphere_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Turbidity");
+                    ui.add(egui::DragValue::new(&mut atmosphere.turbidity).clamp_range(1.0..=10.0))
+                        .on_hover_text("AETHER's atmospheric turbidity (1 = very clear)");
+                    ui.end_row();
+                    ui.label("Ozone (DU)");
+                    ui.add(egui::DragValue::new(&mut atmosphere.ozone_du).clamp_range(0.0..=600.0))
+                        .on_hover_text("Total ozone column in Dobson units");
+                    ui.end_row();
+                    ui.label("Mie g");
+                    ui.add(egui::DragValue::new(&mut atmosphere.mie_g).clamp_range(0.0..=0.99))
+                        .on_hover_text("Aerosol scattering anisotropy");
+                    ui.end_row();
+                    ui.label("Ground albedo");
+                    ui.add(
+                        egui::DragValue::new(&mut atmosphere.ground_albedo)
+                            .clamp_range(0.0..=1.0)
+                            .speed(0.01),
+                    );
+                    ui.end_row();
+                });
+        });
+        // The panel does not offer a value the sky generator rejects: it takes
+        // scattering_orders == 4 only, while the LUT bake handle accepts 2–8.
+        ui.label(
+            egui::RichText::new(format!(
+                "Scattering orders: {} — the sky generator accepts 4 (the LUT bake accepts 2–8)",
+                atmosphere.scattering_orders
+            ))
+            .small()
+            .weak(),
+        );
+        ui.label(
+            egui::RichText::new(
+                "The sky is generated at the Sun's elevation, so changing the Sun rebuilds it. \
+                 Path tracing does not use AETHER: the tracer lights from its own environment \
+                 (Render ▸ Render quality ▸ Path tracing ▸ Environment).",
+            )
+            .small()
+            .weak(),
+        );
+
+        if atmosphere != before {
+            rebuild = true;
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Bake LUT bank").clicked() {
+                self.request_atmosphere_bake();
+            }
+            if ui
+                .add_enabled(!self.busy, egui::Button::new("Rebuild sky"))
+                .clicked()
+            {
+                rebuild = true;
+            }
+            if ui
+                .add_enabled(
+                    self.project.terrain.is_some(),
+                    egui::Button::new("Render still"),
+                )
+                .clicked()
+            {
+                self.invalidate_viewport();
+            }
+            if ui.button("Close").clicked() {
+                self.atmosphere_window = false;
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label(theme::group_label("Environment in use"));
+        match self.atmosphere_meta.as_ref() {
+            Some(meta) => {
+                let source = meta
+                    .get("source")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?");
+                if source == "aether" {
+                    provenance_grid(ui, "atmosphere_env", meta);
+                } else {
+                    ui.weak(
+                        "The engine probe environment is bound — turn the sky on above to \
+                         generate an AETHER environment.",
+                    );
+                }
+            }
+            None if atmosphere.enabled => {
+                ui.weak(
+                    "No environment built yet for these inputs — it is built on the next render.",
+                );
+            }
+            None => {
+                ui.weak("Atmosphere off: the engine's probe environment lights the terrain.");
+            }
+        }
+
+        ui.add_space(6.0);
+        ui.label(theme::group_label("LUT bank"));
+        match self.atmosphere_bake.as_ref() {
+            Some(bake) => {
+                provenance_grid(ui, "atmosphere_bake", bake);
+                if bake
+                    .get("precomputed")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false)
+                {
+                    ui.weak(
+                        "These inputs resolve to the precomputed LUT bank (nothing was baked).",
+                    );
+                } else {
+                    ui.weak("These inputs were baked for this session (atmosphere-bake).");
+                }
+            }
+            None => {
+                ui.weak("Not asked yet — press 'Bake LUT bank' to report its provenance.");
+            }
+        }
+
+        if rebuild {
+            self.project.atmosphere = atmosphere;
+            self.project_dirty = true;
+            self.sync_engine_atmosphere();
+            self.schedule_atmosphere_sync();
+            // A changed environment changes the frame it lit.
+            if self.project.terrain.is_some() {
+                self.invalidate_viewport();
+            }
+        }
+    }
+
+    /// M7: the time-and-place (SIDERA observation) window.
+    fn place_window(&mut self, ctx: &Context) {
+        let mut open = self.place_window;
+        egui::Window::new("Time and place (SIDERA)")
+            .open(&mut open)
+            .default_width(360.0)
+            .resizable(false)
+            .show(ctx, |ui| self.place_body(ui));
+        self.place_window = open;
+    }
+
+    fn place_body(&mut self, ui: &mut Ui) {
+        let mut observation = self.project.observation.clone();
+        let before = observation.clone();
+        let mut apply = false;
+
+        ui.label(theme::group_label("Instant (UTC)"));
+        ui.add(
+            egui::TextEdit::singleline(&mut observation.datetime_utc)
+                .hint_text("2026-06-21T12:00:00Z")
+                .desired_width(f32::INFINITY),
+        );
+        ui.label(
+            egui::RichText::new("ISO-8601, e.g. 2026-06-21T12:00:00Z")
+                .small()
+                .weak(),
+        );
+
+        ui.add_space(4.0);
+        ui.label(theme::group_label("Place"));
+        egui::Grid::new("place_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Latitude");
+                ui.add(
+                    egui::DragValue::new(&mut observation.latitude_deg)
+                        .clamp_range(-90.0..=90.0)
+                        .speed(0.001)
+                        .suffix("°"),
+                );
+                ui.end_row();
+                ui.label("Longitude");
+                ui.add(
+                    egui::DragValue::new(&mut observation.longitude_deg)
+                        .clamp_range(-180.0..=180.0)
+                        .speed(0.001)
+                        .suffix("°"),
+                );
+                ui.end_row();
+                ui.label("Height");
+                ui.add(
+                    egui::DragValue::new(&mut observation.height_m)
+                        .clamp_range(-500.0..=9000.0)
+                        .suffix(" m"),
+                );
+                ui.end_row();
+            });
+        ui.checkbox(
+            &mut observation.refraction,
+            "Apply atmospheric refraction to the altitude",
+        )
+        .on_hover_text(
+            "SIDERA's refraction model (Bennett). Off gives the geometric altitude; \
+             positions below the horizon are unaffected.",
+        );
+        ui.checkbox(
+            &mut observation.apply_sun,
+            "Derive the terrain Sun from this observation",
+        )
+        .on_hover_text(
+            "On: the Sun's azimuth and elevation come from SIDERA for this instant and place. \
+             Off: the Sun keeps the angles set in the Inspector, and the observation is only \
+             reported.",
+        );
+
+        ui.add_space(4.0);
+        if ui.button("Compute Sun & Moon").clicked() {
+            apply = true;
+        }
+        ui.label(
+            egui::RichText::new(
+                "Compass azimuth (N = 0°, E = 90°) becomes the renderer's azimuth as A − 90, \
+                 the same conversion MapScene applies to recipe lights. An altitude below the \
+                 horizon is clamped to 0° for rendering, and the report says so.",
+            )
+            .small()
+            .weak(),
+        );
+
+        ui.add_space(6.0);
+        ui.label(theme::group_label("SIDERA report"));
+        if let Some(error) = self.astro_error.clone() {
+            ui.colored_label(ui.visuals().error_fg_color, format!("⚠ {error}"));
+        }
+        match self.astro_meta.as_ref() {
+            Some(meta) => astro_report(ui, meta),
+            None => {
+                ui.weak("No observation resolved yet — press 'Compute Sun & Moon'.");
+            }
+        }
+
+        if observation != before {
+            self.project.observation = observation;
+            self.project_dirty = true;
+            // Changing the place or instant invalidates the report it produced.
+            self.astro_meta = None;
+            if self.project.observation.apply_sun {
+                apply = true;
+            }
+        }
+        if apply {
+            self.request_observation();
+        }
+    }
+
+    /// M7: the smoke volume's settings and what the engine reports about it.
+    fn smoke_section(&mut self, ui: &mut Ui) {
+        let caps = self.smoke_caps.clone();
+        let mut smoke = self.project.smoke.clone();
+        let before = smoke.clone();
+
+        ui.label(theme::group_label("Smoke volume"));
+        match &smoke.path {
+            Some(path) => {
+                ui.label(theme::meta(path.display().to_string()))
+                    .on_hover_text(path.display().to_string());
+            }
+            None => {
+                ui.weak("No volume loaded.");
+                if ui.button("Choose volume…").clicked() {
+                    self.pick_smoke_volume();
+                }
+                if let Some(caps) = caps.as_ref() {
+                    let renderer = caps
+                        .get("renderer")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("?");
+                    let importers = caps
+                        .get("volume_importers")
+                        .and_then(|value| value.as_array())
+                        .map(|list| {
+                            list.iter()
+                                .filter_map(|value| value.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        })
+                        .unwrap_or_else(|| "?".to_owned());
+                    ui.weak(format!("This build renders smoke with: {renderer}"));
+                    ui.weak(format!("Reads: {importers}"));
+                } else {
+                    ui.weak("Asking the engine what it can render smoke with…");
+                }
+                return;
+            }
+        }
+
+        let mut cleared = false;
+        ui.horizontal(|ui| {
+            if ui.button("Choose volume…").clicked() {
+                self.pick_smoke_volume();
+            }
+            if ui.button("Clear").clicked() {
+                let before = self.project.document.clone();
+                self.project.smoke.path = None;
+                self.project.normalize();
+                if self.project.document != before {
+                    self.history.record(before);
+                }
+                self.smoke_requested = None;
+                self.smoke_error = None;
+                self.project_dirty = true;
+                self.sync_engine_smoke();
+                self.sync_smoke_volume();
+                cleared = true;
+            }
+        });
+        if cleared {
+            return;
+        }
+
+        egui::Grid::new("smoke_settings_grid")
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Density scale");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.density_scale)
+                        .clamp_range(0.0..=20.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Extinction");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.extinction)
+                        .clamp_range(0.0..=20.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Scattering");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.scattering)
+                        .clamp_range(0.0..=1.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Absorption");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.absorption)
+                        .clamp_range(0.0..=1.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Phase g");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.phase_g)
+                        .clamp_range(-0.99..=0.99)
+                        .speed(0.01),
+                );
+                ui.end_row();
+                ui.label("Max steps");
+                ui.add(egui::DragValue::new(&mut smoke.max_steps).clamp_range(1..=2048));
+                ui.end_row();
+                ui.label("Exposure");
+                ui.add(
+                    egui::DragValue::new(&mut smoke.exposure)
+                        .clamp_range(0.0..=8.0)
+                        .speed(0.01),
+                );
+                ui.end_row();
+            });
+        ui.weak("Opacity above is the plate's composite opacity.");
+
+        ui.add_space(4.0);
+        if let Some((path, message)) = self.smoke_error.clone() {
+            ui.colored_label(
+                ui.visuals().error_fg_color,
+                format!("⚠ {} — {message}", path.display()),
+            );
+        } else if self.smoke_loaded.is_some() {
+            ui.label(theme::meta("Loaded in the engine"));
+        } else {
+            ui.weak("Not loaded in the engine yet.");
+        }
+        if let Some(meta) = self.smoke_meta.as_ref() {
+            provenance_grid(ui, "smoke_meta", meta);
+        }
+        if let Some(report) = self.smoke_composite.as_ref() {
+            if report.get("status").and_then(|value| value.as_str()) == Some("failed") {
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    "The last frame shipped without the plate — see the log.",
+                );
+            } else {
+                let coverage = report
+                    .get("alpha_coverage")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(0.0);
+                let renderer = report
+                    .get("renderer")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("?");
+                ui.label(theme::meta(format!(
+                    "Last frame: {:.1}% coverage, {renderer} renderer",
+                    coverage * 100.0
+                )));
+            }
+            if let Some(note) = report.get("certificate_covers").and_then(|v| v.as_str()) {
+                ui.weak(format!("Signed certificate covers: {note}."));
+            }
+        }
+        if self.smoke_plate_active() {
+            ui.label(
+                egui::RichText::new(
+                    "The native viewport is bypassed while the plate is composited: it cannot \
+                     composite a projected volume, so frames come from the bridge.",
+                )
+                .small()
+                .weak(),
+            );
+        }
+
+        if smoke != before {
+            self.project.smoke = smoke;
+            self.project_dirty = true;
+            self.sync_engine_smoke();
+            if self.smoke_plate_active() {
+                self.invalidate_viewport();
+            }
+        }
+    }
+
     /// Timeline tab: the camera-rig bake, keyframe scrubber and playback.
     fn timeline_tab(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical()
@@ -3552,6 +4529,62 @@ impl StudioApp {
         }
     }
 
+    /// M7: one line per environment piece, and the way to its editor.
+    fn environment_summary(&mut self, ui: &mut Ui) {
+        let atmosphere = if self.project.atmosphere.enabled {
+            match self
+                .atmosphere_meta
+                .as_ref()
+                .and_then(|meta| meta.get("hdr_sha256"))
+                .and_then(|value| value.as_str())
+            {
+                Some(sha) => format!("AETHER sky (hdr {})", &sha[..sha.len().min(12)]),
+                None => "AETHER sky (built on the next render)".to_owned(),
+            }
+        } else {
+            "engine probe environment".to_owned()
+        };
+        let observation = if self.project.observation.apply_sun {
+            format!(
+                "Sun from SIDERA at {}",
+                self.project.observation.datetime_utc
+            )
+        } else {
+            "Sun set by hand".to_owned()
+        };
+        let smoke = match (&self.project.smoke.path, self.smoke_loaded.is_some()) {
+            (Some(path), true) => format!("smoke plate: {}", path.display()),
+            (Some(path), false) => format!("smoke volume not loaded: {}", path.display()),
+            (None, _) => "no smoke volume".to_owned(),
+        };
+        egui::Grid::new("environment_summary")
+            .num_columns(2)
+            .spacing([10.0, 3.0])
+            .show(ui, |ui| {
+                ui.label(theme::meta("Light"));
+                ui.label(theme::meta(atmosphere));
+                ui.end_row();
+                ui.label(theme::meta("Sun"));
+                ui.label(theme::meta(observation));
+                ui.end_row();
+                ui.label(theme::meta("Smoke"));
+                ui.label(theme::meta(smoke));
+                ui.end_row();
+            });
+        ui.horizontal(|ui| {
+            if ui.small_button("Atmosphere…").clicked() {
+                self.atmosphere_window = true;
+                if self.atmosphere_bake.is_none() {
+                    self.request_atmosphere_bake();
+                }
+            }
+            if ui.small_button("Time and place…").clicked() {
+                self.place_window = true;
+                self.request_observation();
+            }
+        });
+    }
+
     fn sun_section(&mut self, ui: &mut Ui) {
         ui.label(theme::group_label("Sun"));
         let before = self.project.sun;
@@ -3562,8 +4595,23 @@ impl StudioApp {
         if self.project.sun != before {
             self.project_dirty = true;
             self.engine.send(Command::SetSun(self.project.sun));
+            // M7: the generated sky is built at the sun's elevation.
+            if self.project.atmosphere.enabled {
+                self.schedule_atmosphere_sync();
+            }
             self.invalidate_viewport();
         }
+        if self.project.observation.apply_sun {
+            ui.label(
+                egui::RichText::new(
+                    "The Sun follows the SIDERA observation (Scene ▸ Environment).",
+                )
+                .small()
+                .weak(),
+            );
+        }
+        ui.add_space(4.0);
+        self.environment_summary(ui);
         ui.add_space(4.0);
         egui::Grid::new("active_look")
             .num_columns(2)
@@ -4376,6 +5424,19 @@ impl StudioApp {
                     self.set_status("Group added — drag layers into it");
                 }
             }
+            Action::AtmosphereSettings => {
+                self.atmosphere_window = true;
+                if self.atmosphere_bake.is_none() {
+                    self.request_atmosphere_bake();
+                }
+            }
+            Action::TimeAndPlace => {
+                self.place_window = true;
+                // Open with SIDERA's answer for the current instant and place,
+                // so the panel never shows blank fields it could fill.
+                self.request_observation();
+            }
+            Action::AddSmokeVolume => self.pick_smoke_volume(),
             Action::ZoomToLayer => {
                 if let Some(id) = self.selection.first().copied() {
                     self.apply_layers_command(LayersCommand::ZoomTo(id));
@@ -4434,7 +5495,7 @@ impl StudioApp {
             }
             Action::ShowShortcuts => self.shortcuts_open = true,
             Action::ShowAbout => self.set_status(format!(
-                "Forge3D Studio {} — embedded forge3d engine, bridge v2 (17 operations)",
+                "Forge3D Studio {} — embedded forge3d engine, bridge v2 (31 operations)",
                 env!("CARGO_PKG_VERSION")
             )),
             Action::OpenPalette => self.palette.toggle(),
@@ -4982,6 +6043,12 @@ impl eframe::App for StudioApp {
         if self.quality_window {
             self.quality_window(ctx);
         }
+        if self.atmosphere_window {
+            self.atmosphere_window(ctx);
+        }
+        if self.place_window {
+            self.place_window(ctx);
+        }
         if let Some(action) = crate::ui::palette::window(ctx, &mut self.palette) {
             self.run_action(ctx, action);
         }
@@ -5026,6 +6093,8 @@ impl eframe::App for StudioApp {
             }
         }
         self.flush_params_validate();
+        self.flush_atmosphere_sync();
+        self.sync_smoke_volume();
         self.flush_pending_render();
 
         // A native repaint that could not draw this frame (the viewport rect
@@ -5043,6 +6112,148 @@ fn number(value: &serde_json::Value, key: &str, fallback: f32) -> f32 {
         .and_then(|number| number.as_f64())
         .map(|number| number as f32)
         .unwrap_or(fallback)
+}
+
+// ------------------------------------------------- M7: report rendering
+
+/// The `payload_sha256` a signed certificate reports, if it parses.
+fn read_certificate_sha(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let cert: serde_json::Value = serde_json::from_str(&text).ok()?;
+    cert.get("payload_sha256")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+}
+
+/// One engine report as a key/value grid.
+///
+/// The values are the engine's own (paths, SHAs, dimensions, semantics), shown
+/// verbatim: a report that says `cpu_fallback` must read as `cpu_fallback`.
+fn provenance_grid(ui: &mut Ui, id: &str, report: &serde_json::Value) {
+    let Some(object) = report.as_object() else {
+        ui.weak(describe_json(report));
+        return;
+    };
+    egui::Grid::new(format!("{id}_grid"))
+        .num_columns(2)
+        .spacing([8.0, 3.0])
+        .show(ui, |ui| {
+            for (key, value) in object {
+                ui.label(theme::meta(title_case(key)));
+                let text = describe_json(value);
+                let trimmed = if text.chars().count() > 42 {
+                    format!("{}…", text.chars().take(41).collect::<String>())
+                } else {
+                    text.clone()
+                };
+                ui.label(theme::meta(trimmed)).on_hover_text(text);
+                ui.end_row();
+            }
+        });
+}
+
+/// A JSON value as one short line.
+fn describe_json(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "—".to_owned(),
+        serde_json::Value::Bool(flag) => if *flag { "yes" } else { "no" }.to_owned(),
+        serde_json::Value::Number(number) => match number.as_f64() {
+            Some(float) if number.is_f64() => {
+                let text = format!("{float:.4}");
+                text.trim_end_matches('0').trim_end_matches('.').to_owned()
+            }
+            _ => number.to_string(),
+        },
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .map(describe_json)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Object(map) => map
+            .iter()
+            .map(|(key, value)| format!("{}: {}", title_case(key), describe_json(value)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// M7: one SIDERA report — the Sun and Moon, the Moon's phase, ΔT, sidereal time.
+///
+/// Both frames are shown: the compass angles SIDERA returns and the
+/// renderer-frame angles the terrain light uses, so the conversion is visible
+/// rather than implied.
+fn astro_report(ui: &mut Ui, report: &serde_json::Value) {
+    let number = |value: Option<&serde_json::Value>| {
+        value.and_then(|value| value.as_f64()).unwrap_or(f64::NAN)
+    };
+    egui::Grid::new("astro_report_grid")
+        .num_columns(2)
+        .spacing([8.0, 3.0])
+        .show(ui, |ui| {
+            for (key, label) in [("sun", "Sun"), ("moon", "Moon")] {
+                let body = report.get("bodies").and_then(|bodies| bodies.get(key));
+                ui.label(label);
+                match body {
+                    Some(body) => {
+                        ui.label(theme::meta(format!(
+                            "compass az {:.2}°, alt {:.2}°",
+                            number(body.get("azimuth_deg")),
+                            number(body.get("altitude_deg"))
+                        )))
+                        .on_hover_text(format!(
+                            "renderer az {:.2}°, elevation {:.2}°",
+                            number(body.get("renderer_azimuth_deg")),
+                            number(body.get("renderer_elevation_deg"))
+                        ));
+                    }
+                    None => {
+                        ui.label(theme::meta("—"));
+                    }
+                }
+                ui.end_row();
+            }
+            if let Some(moon) = report.get("moon") {
+                ui.label("Moon phase");
+                ui.label(theme::meta(format!(
+                    "{:.1}% illuminated ({:.1}° phase angle)",
+                    number(moon.get("illuminated_fraction")) * 100.0,
+                    number(moon.get("phase_angle_deg"))
+                )));
+                ui.end_row();
+            }
+            ui.label("ΔT");
+            ui.label(theme::meta(format!(
+                "{:.1} s",
+                number(report.get("delta_t_seconds"))
+            )));
+            ui.end_row();
+            if let Some(sidereal) = report.get("sidereal_time_deg") {
+                ui.label("Sidereal time");
+                ui.label(theme::meta(format!(
+                    "mean {:.4}°, apparent {:.4}°",
+                    number(sidereal.get("mean")),
+                    number(sidereal.get("apparent"))
+                )));
+                ui.end_row();
+            }
+        });
+    let warnings = report
+        .get("warnings")
+        .and_then(|value| value.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|value| value.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for warning in warnings {
+        ui.label(
+            egui::RichText::new(format!("⚠ {warning}"))
+                .small()
+                .color(ui.visuals().warn_fg_color),
+        );
+    }
 }
 
 fn sanitize_name(name: &str) -> String {

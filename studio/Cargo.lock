@@ -3690,6 +3690,7 @@ dependencies = [
  "pyo3-build-config",
  "serde",
  "serde_json",
+ "sha2",
  "studio-project",
  "wgpu",
 ]

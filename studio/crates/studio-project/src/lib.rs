@@ -15,8 +15,11 @@ pub use document::{DocHistory, Document, Layer, LayerId, LayerKind, Row};
 /// Format version written by this build of the application.
 ///
 /// v3 adds the scene document ([`Document`]) — the ordered layer tree the
-/// Layers panel edits. v1/v2 files are migrated on load in memory.
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+/// Layers panel edits — and the render-quality switch. v4 adds the
+/// environment: AETHER atmosphere settings, the SIDERA observation the sun
+/// can be derived from, and the smoke-volume parameters. v1–v3 files are
+/// migrated on load in memory.
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
 /// Scene mode: direct terrain rendering or a MapScene recipe scene.
 pub const SCENE_MODE_TERRAIN: &str = "terrain";
@@ -213,6 +216,157 @@ pub struct RenderQuality {
     pub path_trace: PathTraceSettings,
 }
 
+/// M7: AETHER physical atmosphere inputs.
+///
+/// The field set and ranges mirror `forge3d.atmosphere.AtmosphereSettings`
+/// exactly, so the panel's values are the engine's own arguments and the
+/// engine's rejection text (not a Studio guess) is what a bad value produces.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AtmosphereParams {
+    /// Generate the sky from these inputs and light the terrain with it
+    /// (`IBL.from_hdr` over the AETHER equirect environment). Off: the
+    /// viewport keeps the engine's probe environment.
+    pub enabled: bool,
+    /// IBL intensity multiplier for the generated environment.
+    pub intensity: f32,
+    pub turbidity: f32,
+    pub ozone_du: f32,
+    pub mie_g: f32,
+    pub ground_albedo: f32,
+    /// `generate_environment` accepts 4 only; the bake handle accepts 2–8.
+    pub scattering_orders: u32,
+}
+
+impl Default for AtmosphereParams {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            intensity: 1.0,
+            turbidity: 2.0,
+            ozone_du: 300.0,
+            mie_g: 0.8,
+            ground_albedo: 0.3,
+            scattering_orders: 4,
+        }
+    }
+}
+
+impl AtmosphereParams {
+    /// The physical inputs as the engine's keyword arguments.
+    pub fn engine_kwargs(&self) -> serde_json::Value {
+        serde_json::json!({
+            "turbidity": self.turbidity,
+            "ozone_du": self.ozone_du,
+            "mie_g": self.mie_g,
+            "ground_albedo": self.ground_albedo,
+            "scattering_orders": self.scattering_orders,
+        })
+    }
+}
+
+/// M7: a SIDERA observation — when and where the sun (and Moon) sat.
+///
+/// Studio derives the terrain sun from `astro.body_position` and converts the
+/// compass azimuth into the renderer's frame (see [`Observation::renderer_azimuth_deg`]).
+/// The observation is stored even when [`Self::apply_sun`] is off, so a
+/// snapshot's place and time travel with the project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Observation {
+    /// Re-derive the terrain sun whenever the observation changes.
+    pub apply_sun: bool,
+    /// ISO-8601 UTC instant, e.g. `2026-06-21T12:00:00Z`.
+    pub datetime_utc: String,
+    pub latitude_deg: f32,
+    pub longitude_deg: f32,
+    pub height_m: f32,
+    /// Apply SIDERA's atmospheric refraction to the returned altitude.
+    pub refraction: bool,
+}
+
+impl Default for Observation {
+    fn default() -> Self {
+        // A neutral starting point (equator / prime meridian at noon UTC). It
+        // is a default for the panel's fields, not a claim about the scene —
+        // a georeferenced DEM does not carry an observation time.
+        Self {
+            apply_sun: false,
+            datetime_utc: "2026-06-21T12:00:00Z".to_owned(),
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            height_m: 0.0,
+            refraction: false,
+        }
+    }
+}
+
+impl Observation {
+    /// Compass azimuth → the terrain renderer's `light_azimuth_deg`.
+    ///
+    /// The engine's own conversion (MapScene passes compass azimuths through
+    /// the same arithmetic): the renderer reads a math angle from +X toward
+    /// +Y in the terrain frame, where +Y runs south, so compass `A` is
+    /// `A - 90`. `map_scene._render_terrain_renderer_result` carries the same
+    /// comment; a parity test locks the two together.
+    pub fn renderer_azimuth_deg(compass_azimuth_deg: f32) -> f32 {
+        (compass_azimuth_deg - 90.0).rem_euclid(360.0)
+    }
+}
+
+/// M7: an atmospheric smoke volume and the renderer settings for its plate.
+///
+/// The volume is referenced by path (never embedded), like every other
+/// dataset. The layer row carries visibility and the composite opacity; these
+/// fields are the engine's `SmokeRenderSettings` plus the density source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SmokeParams {
+    /// Mirrors the smoke layer's visibility; the worker composites only when
+    /// a volume is loaded and this is on.
+    pub enabled: bool,
+    pub path: Option<PathBuf>,
+    pub density_scale: f32,
+    pub extinction: f32,
+    pub scattering: f32,
+    pub absorption: f32,
+    pub phase_g: f32,
+    pub max_steps: u32,
+    pub exposure: f32,
+}
+
+impl Default for SmokeParams {
+    fn default() -> Self {
+        // The engine's own `SmokeRenderSettings` defaults.
+        Self {
+            enabled: true,
+            path: None,
+            density_scale: 1.0,
+            extinction: 2.6,
+            scattering: 0.85,
+            absorption: 0.45,
+            phase_g: 0.24,
+            max_steps: 256,
+            exposure: 1.0,
+        }
+    }
+}
+
+impl SmokeParams {
+    /// The volume's render settings as `smoke.SmokeRenderSettings` keywords.
+    pub fn render_settings(&self) -> serde_json::Value {
+        serde_json::json!({
+            "density_scale": self.density_scale,
+            "extinction": self.extinction,
+            "scattering": self.scattering,
+            "absorption": self.absorption,
+            "phase_g": self.phase_g,
+            "max_steps": self.max_steps,
+            "exposure": self.exposure,
+        })
+    }
+}
+
 /// Reference to a terrain dataset on disk. The file itself is never copied
 /// into the project; only the path and the metadata captured at import time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -272,6 +426,13 @@ pub struct Project {
     /// v3 (additive, M6): render mode plus the offline/path-trace quality
     /// settings the viewport and exports use.
     pub render_quality: RenderQuality,
+    /// v4 (additive, M7): AETHER atmosphere inputs and whether the generated
+    /// sky lights the terrain.
+    pub atmosphere: AtmosphereParams,
+    /// v4 (additive, M7): the SIDERA observation the sun can be derived from.
+    pub observation: Observation,
+    /// v4 (additive, M7): the smoke volume and its render settings.
+    pub smoke: SmokeParams,
     /// v3: the scene document — the ordered layer tree the Layers panel edits.
     /// Migrated from the v2 fields (terrain reference, dataset list, serialized
     /// recipe) when absent.
@@ -295,6 +456,9 @@ impl Default for Project {
             camera_rig_json: None,
             terrain_params: serde_json::Value::Object(serde_json::Map::new()),
             render_quality: RenderQuality::default(),
+            atmosphere: AtmosphereParams::default(),
+            observation: Observation::default(),
+            smoke: SmokeParams::default(),
             document: Document::default(),
         }
     }
@@ -356,6 +520,7 @@ impl Project {
         self.format_version = CURRENT_FORMAT_VERSION;
         if !self.document.is_empty() {
             self.sync_terrain_layer();
+            self.sync_smoke_layer();
             return;
         }
         // Recipe layers sit above the terrain. Recipe order is bottom→top, and
@@ -407,6 +572,41 @@ impl Project {
             );
         }
         self.sync_terrain_layer();
+        self.sync_smoke_layer();
+    }
+
+    /// M7: create, update or drop the smoke layer so it matches [`Self::smoke`].
+    ///
+    /// The row mirrors the volume's path and visibility; the renderer settings
+    /// stay in [`Self::smoke`] (one source of truth), and the row's opacity is
+    /// the plate's composite opacity.
+    pub fn sync_smoke_layer(&mut self) {
+        let Some(path) = self.smoke.path.clone() else {
+            if let Some(id) = self.document.smoke_layer().map(|layer| layer.id) {
+                self.document.remove(id);
+            }
+            return;
+        };
+        let name = path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Smoke".to_owned());
+        let source = path.display().to_string();
+        let visible = self.smoke.enabled;
+        if let Some(layer) = self.document.smoke_layer_mut() {
+            layer.name = name;
+            layer.source = Some(source);
+            layer.visible = visible;
+            return;
+        }
+        self.document.push_detailed(
+            LayerKind::Smoke,
+            name,
+            visible,
+            Some(source),
+            serde_json::Value::Null,
+            None,
+        );
     }
 
     /// Create, update or drop the terrain layer so it matches [`Self::terrain`]
@@ -469,6 +669,11 @@ impl Project {
         }
         if self.export.width == 0 || self.export.height == 0 {
             warnings.push("Export size must be non-zero".to_owned());
+        }
+        if let Some(path) = &self.smoke.path {
+            if !path.is_file() {
+                warnings.push(format!("Smoke volume not found: {}", path.display()));
+            }
         }
         if self.scene_mode == SCENE_MODE_MAPSCENE && self.scene_recipe_json.is_none() {
             warnings.push("MapScene project has no recipe yet".to_owned());
@@ -810,5 +1015,118 @@ mod tests {
         assert!(RenderMode::Raster.label().contains("PBR"));
         assert!(RenderMode::PathTraced.label().contains("ReSTIR"));
         assert_eq!(DENOISERS, ["none", "atrous", "oidn"]);
+    }
+
+    #[test]
+    fn m7_environment_defaults_leave_the_viewport_as_it_was() {
+        // Off by default: an old project keeps the engine's probe environment,
+        // takes the sun from its own fields and composites no smoke.
+        let project = Project::new();
+        assert!(!project.atmosphere.enabled);
+        assert!(!project.observation.apply_sun);
+        assert!(project.smoke.path.is_none());
+        assert_eq!(project.atmosphere.scattering_orders, 4);
+        assert_eq!(project.smoke.extinction, 2.6);
+        assert_eq!(project.format_version, 4);
+    }
+
+    #[test]
+    fn m7_environment_round_trips_through_the_project_file() {
+        let mut project = Project::new();
+        project.atmosphere = AtmosphereParams {
+            enabled: true,
+            intensity: 1.4,
+            turbidity: 4.5,
+            ozone_du: 280.0,
+            mie_g: 0.72,
+            ground_albedo: 0.2,
+            scattering_orders: 4,
+        };
+        project.observation = Observation {
+            apply_sun: true,
+            datetime_utc: "2026-10-28T15:30:00Z".to_owned(),
+            latitude_deg: 46.5763,
+            longitude_deg: 7.9904,
+            height_m: 1200.0,
+            refraction: true,
+        };
+        project.smoke = SmokeParams {
+            enabled: true,
+            path: Some(PathBuf::from("/tmp/plume.npz")),
+            extinction: 3.1,
+            ..SmokeParams::default()
+        };
+        let json = serde_json::to_string(&project).expect("serialize");
+        let parsed: Project = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, project);
+        assert!(json.contains("\"atmosphere\""));
+        assert!(json.contains("\"observation\""));
+        assert_eq!(parsed.observation.latitude_deg, 46.5763);
+    }
+
+    #[test]
+    fn m7_smoke_volume_syncs_a_real_layer_row() {
+        let mut project = Project::new();
+        project.terrain = Some(TerrainRef {
+            path: PathBuf::from("/tmp/dem.tif"),
+            width: 8,
+            height: 8,
+            height_min: 0.0,
+            height_max: 1.0,
+        });
+        project.smoke.path = Some(PathBuf::from("/tmp/plume.npz"));
+        project.normalize();
+        let layer = project.document.smoke_layer().expect("smoke layer");
+        assert_eq!(layer.name, "plume");
+        assert_eq!(layer.kind.label(), "Smoke volume");
+        assert!(layer.kind.renders());
+        assert!(layer.visible);
+
+        // The eye mirrors the setting both ways.
+        project.smoke.enabled = false;
+        project.normalize();
+        assert!(!project.document.smoke_layer().expect("smoke").visible);
+
+        // Dropping the volume drops the row; the terrain row survives.
+        project.smoke.path = None;
+        project.normalize();
+        assert!(project.document.smoke_layer().is_none());
+        assert!(project.document.terrain_layer().is_some());
+    }
+
+    #[test]
+    fn m7_compass_azimuth_maps_onto_the_renderer_frame() {
+        // The engine's convention (map_scene._render_terrain_renderer_result):
+        // compass north (0°) is the renderer's -90°, east (90°) is 0°.
+        assert_eq!(Observation::renderer_azimuth_deg(0.0), 270.0);
+        assert_eq!(Observation::renderer_azimuth_deg(90.0), 0.0);
+        assert_eq!(Observation::renderer_azimuth_deg(180.0), 90.0);
+        assert_eq!(Observation::renderer_azimuth_deg(270.0), 180.0);
+    }
+
+    #[test]
+    fn m7_missing_smoke_volume_warns_but_does_not_block_the_project() {
+        let mut project = Project::new();
+        project.smoke.path = Some(PathBuf::from("/nonexistent/plume.npz"));
+        let warnings = project.validation_warnings();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("Smoke volume not found"));
+
+        let json = serde_json::to_string(&project).expect("serialize");
+        assert!(serde_json::from_str::<Project>(&json).is_ok());
+    }
+
+    #[test]
+    fn v3_project_without_environment_fields_loads_with_m7_defaults() {
+        let dir = std::env::temp_dir().join("studio-project-test");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("v3.forge3d");
+        std::fs::write(&path, r#"{ "format_version": 3, "name": "pre-m7" }"#).expect("write");
+        let project = Project::load(&path).expect("v3 must load");
+        std::fs::remove_file(&path).ok();
+        assert_eq!(project.format_version, 4);
+        assert_eq!(project.atmosphere, AtmosphereParams::default());
+        assert_eq!(project.observation, Observation::default());
+        assert_eq!(project.smoke, SmokeParams::default());
     }
 }
