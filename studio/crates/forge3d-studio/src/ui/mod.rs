@@ -1,18 +1,141 @@
-//! UI shell modules (GUI.md Part III).
-//!
-//! U0 splits the shell into modules with one job each: tokens, dock state and
-//! chrome, the registry-driven menu/toolbar/palette/shortcut surfaces, and the
-//! status bar. Panel bodies move here as they are rewritten in U1 (layers) and
-//! U2 (inspector) — the render-parameter pages already live as a free function
-//! so they can be rendered headlessly.
+//! The UI shell: one generic panel host, the dock layout, and the panels.
 
-pub mod dock;
-pub mod examples;
-pub mod menu;
-pub mod palette;
 pub mod panels;
-pub mod shortcuts;
-pub mod status;
-pub mod theme;
-pub mod toolbar;
+pub mod shell;
 pub mod viewport;
+
+use std::rc::Rc;
+
+use gpui_kit::component::dock::{
+    panel_handle, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel as StyledPanel,
+    PanelEvent,
+};
+use gpui_kit::component::menu::AppMenuBar;
+use gpui_kit::*;
+
+/// What a panel draws: a function of application state.
+type PanelContent = dyn Fn(&mut Window, &mut App) -> AnyElement;
+
+/// A dock panel that draws whatever closure it was built with.
+///
+/// Studio panels are functions of application state, not independent widgets:
+/// they read the [`Studio`](crate::state::Studio) entity and dispatch actions
+/// for edits. One host type keeps the dock's `Panel`/`BasePanel` boilerplate in
+/// one place instead of six.
+pub struct PanelHost {
+    id: &'static str,
+    title: SharedString,
+    focus: FocusHandle,
+    content: Rc<PanelContent>,
+}
+
+impl PanelHost {
+    pub fn new(
+        id: &'static str,
+        title: impl Into<SharedString>,
+        cx: &mut App,
+        content: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    ) -> Entity<Self> {
+        cx.new(|cx| Self {
+            id,
+            title: title.into(),
+            focus: cx.focus_handle(),
+            content: Rc::new(content),
+        })
+    }
+}
+
+impl Focusable for PanelHost {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for PanelHost {}
+
+impl BasePanel for PanelHost {
+    fn panel_name(&self) -> &'static str {
+        self.id
+    }
+
+    /// Studio panels are part of the workbench, not documents: they cannot be
+    /// closed, only collapsed.
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl StyledPanel for PanelHost {
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.title.clone()
+    }
+}
+
+impl Render for PanelHost {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id(self.id)
+            .size_full()
+            .overflow_y_scroll()
+            .track_focus(&self.focus)
+            .child((self.content)(window, cx))
+    }
+}
+
+/// Build the dock: Layers (left), Inspector (right), Console/Statistics
+/// (bottom) and the viewport in the centre.
+pub fn build_dock(
+    studio: WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> (Entity<DockArea>, Rc<DockSkin>, Entity<AppMenuBar>) {
+    let (dock_area, skin) = DockSkin::dock_area("studio-dock", Some(1), window, cx);
+
+    let layers = PanelHost::new("studio.layers", "Layers", cx, {
+        let studio = studio.clone();
+        move |window, cx| panels::layers(&studio, window, cx)
+    });
+    let inspector = PanelHost::new("studio.inspector", "Inspector", cx, {
+        let studio = studio.clone();
+        move |window, cx| panels::inspector(&studio, window, cx)
+    });
+    let console = PanelHost::new("studio.console", "Console", cx, {
+        let studio = studio.clone();
+        move |window, cx| panels::console(&studio, window, cx)
+    });
+    let statistics = PanelHost::new("studio.statistics", "Statistics", cx, {
+        let studio = studio.clone();
+        move |window, cx| panels::statistics(&studio, window, cx)
+    });
+    let viewport = PanelHost::new("studio.viewport", "Viewport", cx, {
+        let studio = studio.clone();
+        move |window, cx| viewport::viewport_panel(&studio, window, cx)
+    });
+
+    let left = DockLayout::tabs().panel_view(panel_handle(layers), cx);
+    let right = DockLayout::tabs().panel_view(panel_handle(inspector), cx);
+    let bottom = DockLayout::tabs()
+        .panel_view(panel_handle(console), cx)
+        .panel_view(panel_handle(statistics), cx);
+    let center = DockLayout::tabs().panel_view(panel_handle(viewport), cx);
+
+    dock_area.update(cx, |area, cx| {
+        area.set_center(center, window, cx);
+        area.set_dock(DockPlacement::Left, left, window, cx);
+        area.set_dock_size(DockPlacement::Left, px(260.), window, cx);
+        area.set_dock(DockPlacement::Right, right, window, cx);
+        area.set_dock_size(DockPlacement::Right, px(320.), window, cx);
+        area.set_dock(DockPlacement::Bottom, bottom, window, cx);
+        area.set_dock_size(DockPlacement::Bottom, px(180.), window, cx);
+        for placement in [
+            DockPlacement::Left,
+            DockPlacement::Bottom,
+            DockPlacement::Right,
+        ] {
+            area.set_dock_collapsible(placement, true, window, cx);
+        }
+    });
+
+    let menu_bar = crate::actions::menu_bar(cx);
+    (dock_area, skin, menu_bar)
+}

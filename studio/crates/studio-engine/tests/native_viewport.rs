@@ -1,7 +1,8 @@
-//! M10: the GPU-shared viewport.
+//! M10/G0: the engine-device viewport.
 //!
-//! The interactive viewport paints `TerrainScene`'s viewer path on eframe's own
-//! device, so two properties have to hold off-screen:
+//! The interactive viewport paints `TerrainScene`'s viewer path on the engine's
+//! negotiated device and reads the frame back as RGBA, so two properties have
+//! to hold off-screen:
 //!
 //! * the per-scene resource cache reproduces a frame byte for byte (a cached
 //!   bind group that silently rotted would show up as a shifting image);
@@ -320,14 +321,11 @@ fn native_viewport_reports_its_state_honestly() {
 
 fn native_viewport_body() {
     let _ = env_logger::try_init();
-    let ctx = forge3d::core::gpu::try_ctx().expect("GPU context");
-    let mut viewport =
-        NativeViewport::new(ctx.device.clone(), ctx.queue.clone(), ctx.adapter.clone())
-            .expect("native viewport construction");
+    let mut viewport = NativeViewport::new().expect("native viewport construction");
 
     // No terrain yet: render must say so, not present a blank frame.
     assert!(!viewport.has_terrain());
-    assert!(viewport.render(64, 48).is_err());
+    assert!(viewport.render_rgba(64, 48).is_err());
 
     let dem = fuji_dem();
     assert!(dem.is_file(), "DEM fixture missing: {}", dem.display());
@@ -348,30 +346,57 @@ fn native_viewport_body() {
         intensity: 2.5,
     };
     viewport.set_view(&camera, &sun);
-    viewport.render(64, 48).expect("render");
-    let generation = viewport.texture_generation();
+
+    let first = viewport.render_rgba(320, 240).expect("render");
+    assert_eq!((first.width, first.height), (320, 240));
+    assert_eq!(first.rgba.len(), 320 * 240 * 4, "tight RGBA rows");
     assert!(
-        viewport.present_view().is_some(),
-        "a rendered frame must expose an sRGB view for egui"
+        first.rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
+        "the presented frame is opaque"
     );
+    let covered = first
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
+        .count();
+    assert!(
+        covered as f64 / (320.0 * 240.0) > 0.10,
+        "the terrain covers only {:.1}% of the frame — framing is wrong",
+        covered as f64 / (320.0 * 240.0) * 100.0
+    );
+    assert!(
+        first.rgba.as_chunks::<4>().0.iter().any(|px| px[0] > 60),
+        "no bright pixels: nothing shaded"
+    );
+
+    // The readback path is deterministic: same view, same bytes.
+    let again = viewport.render_rgba(320, 240).expect("second render");
+    assert_eq!(first.rgba, again.rgba, "two renders of one view must match");
     assert!(viewport.last_render_ms() >= 0.0);
 
-    // Same size: the target is reused (no re-registration needed by the app).
-    viewport.render(64, 48).expect("second render");
-    assert_eq!(viewport.texture_generation(), generation);
-
-    // Resize reallocates, which the app turns into a new egui registration.
-    viewport.render(96, 64).expect("resized render");
-    assert!(viewport.texture_generation() > generation);
+    // A resize reallocates the target and reports the new size.
+    let resized = viewport.render_rgba(96, 64).expect("resized render");
+    assert_eq!((resized.width, resized.height), (96, 64));
+    assert_eq!(resized.rgba.len(), 96 * 64 * 4);
 
     // Colormaps: a known name is accepted, an unknown one is an error.
-    assert!(viewport.set_colormap(Some("viridis")).is_ok());
+    viewport.set_colormap(Some("viridis")).expect("viridis");
+    let viridis = viewport.render_rgba(96, 64).expect("render in viridis");
     assert!(viewport.set_colormap(Some("not-a-colormap")).is_err());
+    let after_reject = viewport
+        .render_rgba(96, 64)
+        .expect("a rejected colormap must not break the viewport");
+    assert_eq!(
+        viridis.rgba, after_reject.rgba,
+        "a rejected colormap must leave the previous palette in place"
+    );
 
     viewport.clear_dem();
     assert!(!viewport.has_terrain());
     assert!(
-        viewport.render(64, 48).is_err(),
+        viewport.render_rgba(64, 48).is_err(),
         "clearing the DEM must stop the viewport, not leave the last frame live"
     );
 }

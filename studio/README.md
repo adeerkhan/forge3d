@@ -1,9 +1,10 @@
 # Forge3D Studio
 
-A cross-platform desktop application (Rust + egui/eframe) for the
+A cross-platform desktop application (Rust + **GPUI Kit**) for the
 [Forge3D](https://github.com/milos-agathon/forge3d) rendering engine, built in
 this fork under `studio/`. See [`../GUI.md`](../GUI.md) for the product
-specification and [Status](#status) for where the implementation stands.
+specification (Part X is the UI-runtime workstream) and [Status](#status) for
+where the implementation stands.
 
 **This is fork-only work**: the GUI lives here and is not intended for
 upstream pull requests. The only intentional engine change is
@@ -15,25 +16,42 @@ small additive method kept documented for upstream symmetry.
 ```text
 studio/
 ├── crates/
-│   ├── forge3d-studio/    eframe/egui desktop app (bin: forge3d-studio)
-│   ├── studio-engine/     engine integration worker (embedded Python)
+│   ├── forge3d-studio/    GPUI Kit desktop app (bin: forge3d-studio)
+│   ├── studio-engine/     engine workers: bridge (embedded Python) + viewport
 │   └── studio-project/    versioned .forge3d project format (serde JSON)
-└── assets/icons/          Lucide SVG icons (ISC license, see LICENSE.md)
+└── assets/icons/          Studio SVGs (the kit ships the full Lucide set)
 ```
 
-- **UI** (`forge3d-studio`): menu bar + toolbar, scene tree (left), engine
-  viewport (center, drag to orbit / scroll to zoom), properties (right:
-  camera, sun, terrain parameters, camera rig, export), status bar (adapter,
-  frame time, errors).
+Inside `forge3d-studio`:
+
+| File | Job |
+|---|---|
+| `main.rs` | `gpui_kit::application()`, kit init, window, `argv[1]` (project or DEM) |
+| `state.rs` | the `Studio` entity: project + document, selection, history, both workers, project I/O, camera/sun, coalesced frame requests |
+| `actions.rs` | the single action table → menus, keybindings, shortcuts window, handlers |
+| `ui/mod.rs` | `PanelHost` (the one dockable-panel type) and the default dock layout |
+| `ui/shell.rs` | title bar + menu bar, status bar, dialogs |
+| `ui/panels.rs` | Layers, Inspector, Console, Statistics |
+| `ui/viewport.rs` | the engine frame, tools, HUD, orbit/pan/zoom |
+
+- **UI** (`forge3d-studio`): kit title bar with the application menu bar, a
+  dock area (left: Layers; right: Inspector; bottom: Console/Statistics;
+  centre: the engine viewport with its own tool strip and HUD) and a status bar
+  (status text, selection, frame time, adapter/backend). Panels are functions
+  of the `Studio` entity — they read state and dispatch actions, so no panel
+  keeps a copy of project data.
 - **Engine worker** (`studio-engine`): a dedicated thread embeds CPython and
   drives forge3d's certified, golden-tested terrain pipeline:
   `Session(window=False)` → `TerrainRenderer.render_terrain_pbr_pom` →
   `Frame.save`. One persistent session; renders ship RGBA back to the UI
   through a command/event channel, so the GUI never blocks.
-- **Native viewport** (`studio-engine::NativeViewport`): the interactive
-  terrain frame, rendered by `forge3d::terrain::TerrainScene` into an
-  offscreen texture on eframe's wgpu device and handed to egui as a texture
-  (no readback). MapScene, exports and certificates stay on the bridge.
+- **Viewport worker** (`studio-engine::ViewportWorker`): owns
+  `forge3d::terrain::TerrainScene` on its own thread (the terrain shaders
+  compile for seconds and recurse deeply, hence the 64 MB stack), renders on
+  the engine's negotiated GPU context, reads the frame back as RGBA and sends
+  it to the UI as pixels. It is a separate thread because a render blocks the
+  device and must never block the UI thread. MapScene, exports and
+  certificates stay on the bridge.
 - **Projects** (`studio-project`): versioned JSON documents (`*.forge3d`)
   storing dataset references (paths, never pixel data), camera, sun, and
   export settings. Future versions are rejected; missing datasets surface as
@@ -60,16 +78,33 @@ the worker executes a fixed bridge script (`BRIDGE_SOURCE` in
 
 Prerequisites (Fedora):
 
-- Rust toolchain
+- Rust toolchain (edition 2021; GPUI needs a current stable)
+- `libxkbcommon-devel` and `libxkbcommon-x11-devel` (GPUI links these
+  directly). If only the runtime libraries are installed, the link step fails
+  with `unable to find library -lxkbcommon`; create symlinks in a directory and
+  point the linker at it:
+
+  ```bash
+  mkdir -p ~/.local/lib/gpui-compat
+  ln -sf /usr/lib64/libxkbcommon.so.0 ~/.local/lib/gpui-compat/libxkbcommon.so
+  ln -sf /usr/lib64/libxkbcommon-x11.so.0 ~/.local/lib/gpui-compat/libxkbcommon-x11.so
+  export RUSTFLAGS="-L $HOME/.local/lib/gpui-compat"
+  ```
 - The engine checkout's `.venv` with `forge3d` + `numpy` installed
   (`maturin develop` inside the repo creates it), **including** the Python
   development headers (uv-managed Pythons ship them)
 - A GPU adapter (Vulkan; software fallbacks work but render slowly)
+- A Wayland or X11 session
 
 ```bash
 cd studio
-cargo run --release -p forge3d-studio
+cargo run --release -p forge3d-studio            # empty workspace
+cargo run --release -p forge3d-studio -- path/to/dem.tif     # open a DEM
+cargo run --release -p forge3d-studio -- scene.forge3d       # open a project
 ```
+
+`FORGE3D_STUDIO_DUMP_FRAME=/tmp/frame.png` writes the frame the viewport is
+about to present, for comparing the interactive path against an engine export.
 
 The Python environment is auto-discovered from `../.venv` (resolved through
 `pyvenv.cfg`). To point elsewhere:
@@ -95,10 +130,12 @@ before loading them.
 - `forge3d` is consumed as a path dependency of the parent checkout
   (`../..`), pinned by the checkout itself. Updates are deliberate: pull
   upstream, rebuild, re-run the studio test suite.
-- `eframe`/`egui` are pinned to **0.27** because their wgpu renderer feature
-  uses wgpu 0.19 — the exact wgpu version forge3d builds against. One wgpu
-  build in the tree; a future GPU-side viewport sharing becomes possible
-  without a version bump.
+- `gpui-kit` **0.8** is the UI runtime. It renders through **wgpu 30** while
+  forge3d is built against **wgpu 0.19**; the two majors cannot share a device,
+  so the viewport crosses the boundary as pixels (see GUI.md Part I). This is a
+  deliberate trade: the kit replaces the whole hand-rolled chrome (dock, tabs,
+  menus, inputs, virtualised lists, command palette) and its wgpu version is not
+  ours to choose.
 - `studio-engine` no longer links forge3d's Rust crate; it talks to the
   engine through the embedded interpreter. The Rust forge3d dependency
   remains declared in the workspace for Milestone 5 work.
@@ -108,7 +145,35 @@ before loading them.
 
 ## Status
 
-Milestones from GUI.md section 12:
+UI runtime (GUI.md Part X):
+
+- [x] **G0 Runtime proof** — `gpui-kit 0.8` builds and runs here; the engine
+      device renders a DEM and the UI presents it (frame dumped and compared
+      against the engine's palette/framing).
+- [x] **G1 Shell** — kit title bar + `AppMenuBar`, `DockArea` (left/right/bottom/
+      centre, resizable, draggable tabs, collapsible), kit `StatusBar`,
+      dark/light by `ThemeMode`, About + Shortcuts dialogs.
+- [x] **G2 State + actions** — `Studio` entity with both workers and the project
+      model; one action table drives menus, keys and handlers; new/open/save,
+      DEM import, PNG export, undo/redo, layer duplicate/delete/visibility,
+      camera presets, theme.
+- [x] **G3 Panels v1** — Layers (kind icons, selection, visibility), Inspector
+      (selection header, terrain facts, engine colormaps, camera/sun steppers),
+      Console, Statistics, viewport tools + HUD + orbit/pan/zoom with coalesced
+      frame requests.
+- [ ] **G4 Params pages** — the M4 schema-driven `TerrainRenderParams` pages on
+      kit inputs, inline engine validation, dock-layout persistence.
+- [ ] **G5 Layers v2** — kit tree/virtual list, drag reorder, groups, rename,
+      opacity, context menu, multi-select.
+- [ ] **G6 Timeline, certificates, quality** — rig timeline, certificates +
+      verify, determinism check, raster/path-traced stills with progress.
+- [ ] **G7 Gallery + MapScene** — example cards with thumbnails, one-click open,
+      MapScene mode, atmosphere/astro/smoke panels.
+- [ ] **G8 Kit test harness** — headless UI tests on the kit's `TestAppContext`.
+- [ ] **G9 Retire the old shell** — no egui reference left; docs and
+      dependencies final.
+
+Engine-facing milestones from GUI.md section 12:
 
 - [x] **1. Audit** — engine API audited (see conversation/report): public
       Rust surface, viewer + IPC, offscreen paths, feature gates.
@@ -296,17 +361,17 @@ Milestones from GUI.md section 12:
       an unknown colormap is rejected without touching the frame, and a 5°
       sun still lights the terrain while 80° looks different (i.e. the
       light really is Z-up).
-- [x] **M10. GPU-shared viewport** — `studio_engine::NativeViewport`
-      renders the repaired `TerrainScene` into an `Rgba8Unorm` texture on
-      eframe's own wgpu device and registers its sRGB view with egui
-      (`register_native_texture`), so the terrain viewport paints the
-      engine's frame directly: no readback, no PNG round-trip, no Python in
-      the frame loop. The scene builds (and compiles its shaders) on a
-      64 MB-stack worker thread that the UI polls; a DEM arriving meanwhile
-      is queued. Colormap changes are pushed into the live scene, and the
-      camera/sun come from the same document values the bridge renders with.
-      MapScene mode keeps the certified bridge frame, so `native_paints()`
-      is terrain-mode only.
+- [x] **M10. Engine-device viewport** — `studio_engine::NativeViewport`
+      renders the repaired `TerrainScene` with the engine's negotiated GPU
+      context, into an `Rgba8Unorm` target, and reads the frame back as RGBA
+      (linear → sRGB encoded once). The scene builds — and compiles its
+      shaders — on a 64 MB-stack worker thread; the UI polls its events and
+      never renders on the UI thread. Colormap changes are pushed into the live
+      scene, and camera/sun come from the same document values the bridge
+      renders with. *History:* under eframe (wgpu 0.19) this was a zero-copy
+      texture hand-off; GPUI's wgpu 30 makes that impossible, so G0 replaced it
+      with the readback path. Frames are still drawn on demand, so the cost is
+      one readback per gesture end.
 - [x] **5. Embedded viewport** — done by M9 + M10: terrain frames are drawn
       on the engine's device and presented as an egui texture. Frames are
       still drawn on demand (gesture end, committed parameter edit, resize)

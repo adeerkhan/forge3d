@@ -22,7 +22,9 @@ use std::time::Instant;
 
 pub mod native_viewport;
 
-pub use native_viewport::NativeViewport;
+pub use native_viewport::{
+    NativeViewport, ViewportCommand, ViewportEvent, ViewportFrame, ViewportWorker,
+};
 
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};

@@ -2,7 +2,7 @@
 ## A Photoshop × QGIS × Blender-class desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests. Pushes go to `fork` (`adeerkhan/forge3d`); `origin` stays the upstream engine and is fetch-only.
-**Status header last updated:** 2026-10-28 (U0–U4, M5, M6, M7, M9, M10 landed; `scene.compile` makes the document the recipe source; gallery resolves paths + discloses LFS fetches; the terrain viewport is GPU-shared with eframe; render mode switches between raster accumulation and hybrid-ReSTIR path tracing with live progress; atmosphere/astro/smoke land as engine-composed surfaces with `parity_atmosphere.rs` green).
+**Status header last updated:** 2026-10-28, second pass (**UI runtime replaced**: the hand-rolled egui chrome is gone; the app is built on **GPUI Kit** — G0–G3 landed, see Part X. The engine, bridge, project format, gallery index and parity harnesses are unchanged. The interactive viewport now renders on the engine's own device and crosses into the UI as pixels, because GPUI's wgpu and forge3d's wgpu are different majors.) Earlier status: U0–U4, M5, M6, M7, M9, M10; `scene.compile` makes the document the recipe source; render mode switches between raster accumulation and hybrid-ReSTIR path tracing with live progress; atmosphere/astro/smoke land as engine-composed surfaces with `parity_atmosphere.rs` green.
 **Knowledge graph:** `.ua/knowledge-graph.json` covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (51 verification harnesses), and `studio/` (the app).
 
 ---
@@ -24,9 +24,10 @@ Build the desktop application Forge3D does not have: a professional workbench �
 
 ### Application shape
 
-- **Language:** Rust UI (egui/eframe **0.27**, pinned to match forge3d's wgpu 0.19) + an embedded-Python engine worker.
+- **Language:** Rust UI on **GPUI Kit 0.8** (GPUI + `gpui-base` + `gpui-component`: dock area, tree, table, inputs, menus, command palette, status bar) + an embedded-Python engine worker. The previous egui/eframe shell is deleted, not kept as a second path.
 - **Integration:** the worker thread embeds CPython (the engine checkout's `.venv`) and drives forge3d's certified, golden-tested Python entry points through one JSON dispatcher (`studio_dispatch`, 31 ops). Every upstream golden (`mapscene_*`, determinism, certificates) exercises exactly those entry points, so Studio renders are engine renders by construction.
-- **Why the engine is driven through embedded Python:** the certified, golden-tested `render_terrain_pbr_pom` path is what every recipe golden, certificate and determinism test exercises, so MapScene, exports and certificates go through it. The pure-Rust `TerrainScene` viewer path had drifted from the live pipeline; M9 repaired it (Z-up mesh mode, current bind groups, colour target) and M10 renders it into an offscreen texture on eframe's own wgpu device, so the interactive terrain viewport no longer round-trips pixels through Python.
+- **Why the engine is driven through embedded Python:** the certified, golden-tested `render_terrain_pbr_pom` path is what every recipe golden, certificate and determinism test exercises, so MapScene, exports and certificates go through it. The pure-Rust `TerrainScene` viewer path had drifted from the live pipeline; M9 repaired it (Z-up mesh mode, current bind groups, colour target) and it paints the interactive viewport on the engine's own device.
+- **The wgpu boundary (decided, not provisional):** GPUI renders through **wgpu 30**; forge3d is built against **wgpu 0.19**. Two wgpu majors cannot share a `Device` or a `Texture`, so the M10 *zero-copy* texture hand-off is impossible under GPUI. The viewport therefore renders on the engine's negotiated device, reads the frame back once per requested frame, encodes linear → sRGB once, and hands GPUI an image. That costs one readback per gesture end (the viewport already renders on demand, not at a free-running frame rate), and it keeps the engine untouched. Revisit only if GPUI exposes a shared-device surface.
 - **Targets:** Linux first (Fedora dev machine), Windows and macOS after packaging (M12).
 
 ### Design language
@@ -88,10 +89,10 @@ Vector/building layer *authoring* (import records metadata only today), COG-over
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Four dock slots** (left, right, bottom, center-free), each holding a **tab group** with a fixed, purpose-named set of tabs. Splitters resize; sizes persist. No free-floating windows and no tab-tearing in U0–U4: `egui 0.27` has no dock crate we can pin safely, and a hand-rolled slot+tab model is ~250 lines we fully control. (Revisit draggable tabs only if the hand-rolled version proves limiting.)
+- **Four dock slots** (left, right, bottom, center), each a **tab group**, now provided by the kit's `DockArea`: resizable splits, draggable tabs, tab tearing into a group, collapsible docks, panel zoom, and a serializable layout (`DockAreaState`). The hand-rolled `dock.rs` from U0 is deleted; layout persistence writes the dock state, not a bespoke struct.
 - **Layout presets** (`View ▸ Panel layout`): *Default*, *Cartography* (wide layers + legend), *Modeling* (wide viewport, collapsed left dock), *Data* (tall bottom console). Reset layout restores Default.
 - **Every slot can collapse** to a 0-width rail with its tab icon, Photoshop-style.
-- **Persistence:** layout, panel sizes, collapsed state and active tabs in the platform config dir (`$XDG_CONFIG_HOME/forge3d-studio/layout.json`), never in the project file (a project must open identically on another machine). Theme and Python-path preferences join them in the Preferences dialog (U1).
+- **Persistence:** the dock state plus theme in the platform config dir (`$XDG_CONFIG_HOME/forge3d-studio/`), never in the project file (a project must open identically on another machine). G4 wires the load/save; G0–G3 build the default layout each launch.
 
 ### 3.2 Menu bar and the action registry
 
@@ -182,7 +183,7 @@ The answer to "the studio's purpose dies if the examples aren't usable". `studio
 
 ### 3.8 Theme, iconography, motion
 
-- One `theme.rs` token table: spacing (4/8/12/16), radius (6), row height (22), font sizes (11/13/15), accent, panel widths, and a dark + light palette derived from egui `Visuals` so both themes stay legible.
+- Semantic tokens come from the kit's `Theme` (`ActiveTheme::theme().colors.*`: background, surface, foreground, muted_foreground, border, primary, accent, danger, radius, spacing, typography). The Studio look is expressed as a choice among those tokens plus density overrides — no parallel colour table. Dark and light are the kit's `ThemeMode`.
 - Icons are loaded from `studio/assets/icons/*.svg` (Lucide, ISC) through the existing `resvg` loader; the set grows to one glyph per concept (eye/eye-off, lock, folder, table, spline, building, tag, cube, cloud, sun, moon, move, rotate, hand, zoom, ruler, palette, film, play/pause, undo/redo, upload/download, grip, more, search, chevron, x). A typed `Icon` enum prevents typo'd names, and a test asserts every enum variant resolves to a file.
 - No animation beyond egui's own feedback; the only progress indicator is the status bar's job chip plus a spinner after 250 ms.
 
@@ -201,24 +202,48 @@ The answer to "the studio's purpose dies if the examples aren't usable". `studio
 
 ```
 studio/crates/
-├── forge3d-studio/
+├── forge3d-studio/             the GPUI Kit application (bin: forge3d-studio)
 │   └── src/
-│       ├── main.rs
-│       ├── app.rs              // state, update loop, event routing (thin)
-│       ├── actions.rs          // Action enum + registry + handlers
-│       ├── doc/                // document model, layer ops, undo stack
-│       │   ├── mod.rs  layer.rs  migrate.rs  undo.rs
+│       ├── main.rs             application(), kit init, window, argv
+│       ├── state.rs            Studio entity: document, selection, both workers,
+│       │                       project I/O, camera/sun, coalesced frame requests
+│       ├── actions.rs          ONE action table → menus + keybindings + shortcuts
 │       └── ui/
-│           ├── mod.rs  dock.rs  menu.rs  toolbar.rs  status.rs
-│           ├── theme.rs  icons.rs
-│           ├── panels/ (U1/U2) layers.rs  inspector.rs
-│           │            render_params.rs  timeline.rs  console.rs
-│           │            certificates.rs  statistics.rs  examples.rs
-│           └── viewport/ (U3) mod.rs  gizmo.rs  hud.rs  tools.rs
-├── studio-engine/              // bridge (unchanged role)
-├── studio-project/             // project file format (v3 adds the document)
-└── studio-examples/            // gallery index + fixtures contract tests
+│           ├── mod.rs          PanelHost (one dockable panel type) + dock layout
+│           ├── shell.rs        title bar, menu bar, status bar, dialogs
+│           ├── panels.rs       Layers, Inspector, Console, Statistics
+│           └── viewport.rs     frame image, tools, HUD, orbit/pan/zoom
+├── studio-engine/              bridge worker (unchanged role) +
+│                               native_viewport.rs (engine device → RGBA)
+└── studio-project/             project format + document model (unchanged)
 ```
+
+### 3.12 UI runtime (GPUI Kit)
+
+The UI is GPUI Kit, not egui. The consequences are visible in the architecture:
+
+- **One panel type.** `ui::PanelHost` implements the dock's `Panel`/`BasePanel`,
+  `Focusable`, `EventEmitter<PanelEvent>` and `Render` once, and takes a closure
+  `(&mut Window, &mut App) -> AnyElement`. Studio panels are *functions of
+  state*: they read the `Studio` entity and dispatch actions for edits, so the
+  dock does not need six near-identical panel types and no panel keeps private
+  copies of project data.
+- **One action table.** `studio_action_table!` expands the same list into
+  (a) the menu tree, (b) `cx.bind_keys` bindings, (c) the shortcuts window and
+  (d) the app-level handlers via the `StudioAction` trait. An action in the
+  table without `run` does not compile; a duplicate shortcut fails a test.
+- **Dock from the kit.** Resizable splits, draggable tabs, tear-off groups,
+  collapsible rails and serializable layout come from `gpui_component::dock`
+  instead of the ~290 hand-rolled lines it replaces.
+- **Frame requests are coalesced.** Pointer moves only mark the view dirty; the
+  state pump (20 Hz) issues at most one frame per tick, so a fast orbit cannot
+  queue a render per mouse event. A drag does not talk to the bridge at all:
+  the bridge is synced when the gesture ends (`end_gesture`), so exports render
+  what the viewport showed.
+- **The frame is an image.** See the wgpu boundary note in Part I: the engine
+  device renders, the UI presents bytes. `FORGE3D_STUDIO_DUMP_FRAME=<path>`
+  writes the presented frame to PNG, which is how the viewport is compared
+  against engine exports in review.
 
 ---
 
@@ -429,3 +454,56 @@ M9/M10 landed ahead of M6–M8 because the CPU readback was already the bottlene
 A user opens Forge3D Studio and gets a professional workbench: a menu bar and docked panels that stay out of the way; a layers panel where every object they add — terrain, raster, vector, buildings, labels, point cloud, mesh, furniture — is a row they can select, reorder, hide, group, style and undo; an inspector that follows that selection and shows the engine's own vocabulary and validation; a viewport they can orbit with the mouse or with a Blender-style gizmo in the corner; a bottom dock with the timeline, job log, certificates and statistics; and an examples gallery that opens any of the repository's 51 example workflows as a ready-to-edit scene — with the tiers stating honestly what still needs a milestone.
 
 And every one of those capabilities corresponds to an `examples/` workflow that Studio reproduces, with tests proving the parity.
+
+---
+
+## Part X — UI runtime migration (GPUI Kit)
+
+The U0 shell proved the engine wiring on egui; the interaction model it needed
+(dockable tabs, virtualised lists, a command palette, typed actions, testable
+components) is what GPUI Kit already is. This workstream replaces the UI runtime
+and keeps everything else: bridge ops, project format, gallery index, parity
+harnesses, certificates.
+
+**Non-negotiable invariants**
+
+1. The engine is untouched. The only fork-side engine code stays
+   `TerrainScene::clear_viewer_terrain` and the M9 viewer repair.
+2. Every bridge op, project field and parity test survives the port.
+3. No dead UI. A control either works or is absent; a not-yet-ported surface
+   says so in place (e.g. the Inspector states that the schema-driven parameter
+   pages are G3), instead of showing disabled stubs.
+4. A milestone may not leave the app unable to load a DEM and paint a frame.
+
+| # | Milestone | Contents | Exit criteria | Status |
+|---|---|---|---|---|
+| **G0** | **Runtime proof** | `gpui-kit 0.8` builds and runs on the dev machine (Wayland); the engine device renders a DEM → RGBA → `RenderImage`; a window paints it | frame dumped from the running app matches the engine's own palette and framing | **landed** |
+| **G1** | **Shell** | title bar + kit `AppMenuBar`, `DockArea` with left/right/bottom/center groups, kit `StatusBar`, dark/light via `ThemeMode`, dialogs | window opens, dock resizes/tabs/drag, status bar reports adapter/backend/frame ms | **landed** |
+| **G2** | **State + actions** | `Studio` entity owning project, selection, history, both workers; action table → menus/keybindings/handlers; project new/open/save, DEM import, PNG export, undo/redo, layer duplicate/delete/visibility, camera presets, theme | actions reachable from menu, shortcut and panel; `cargo test` green | **landed** |
+| **G3** | **Panels v1** | Layers (kind icons, selection, visibility), Inspector (selection header, terrain facts, colormap chips from the engine registry, camera/sun steppers, honest params note), Console, Statistics, viewport tools + HUD + orbit/pan/zoom | layering a DEM and orbiting it works end to end; the inspector drives the frame | **landed** |
+| **G4** | **Params pages** | the M4 schema-driven `TerrainRenderParams` pages rebuilt on kit inputs (typed fields, enum selects, inline engine validation, debounced `terrain.params_validate`); dock layout persistence | every field of `terrain.params_schema` renders and validates; layout survives restart | next |
+| **G5** | **Layers v2** | kit `Tree`/virtual list for deep documents, drag reorder with drop indicators, group collapse, inline rename, opacity, context menu, multi-select ranges | the U1 panel's behaviour, on the kit's tree, with the same document commands | next |
+| **G6** | **Timeline, certificates, quality** | camera-rig timeline (scrub/play/sequence), certificate list + verify, determinism check, render mode (raster/path-traced) and quality window with engine-streamed progress | M5/M6 surfaces back, gates unchanged | planned |
+| **G7** | **Gallery + MapScene** | examples gallery cards with thumbnails and tiers, one-click open, MapScene mode + recipe inspector + atmosphere/astro/smoke panels | U4/M2/M7 surfaces back | planned |
+| **G8** | **Kit test harness** | headless UI tests with the kit's `TestAppContext` (dock composition, panel render, action dispatch), golden frame comparison | UI tests run without a display in CI | planned |
+| **G9** | **Retire the old shell** | delete any remaining egui-era docs/scripts, update `studio/README.md`, confirm `cargo fmt`/`clippy`/tests, single dependency set | no reference to eframe/egui remains in `studio/` | with G8 |
+
+**Ordering note:** G4 before G5 because the parameter pages are the surface the
+engine vocabulary actually lives in; G6 before G7 because certificates and
+render modes are what make a saved still trustworthy.
+
+### Known consequences of the runtime swap
+
+- **Readback instead of texture sharing.** ~1 readback per requested frame;
+  measured with the frame timer in Statistics. If continuous rendering ever
+  lands, this becomes the first bottleneck to revisit (and the honest reason a
+  shared-device path would be needed).
+- **Two adapters can be chosen.** The bridge's embedded Python builds its own
+  engine context and may pick a different GPU than the pure-Rust viewport
+  context (`Viewport device:` vs `Engine:` in the Console). G4 pins the adapter
+  through the engine's own selection knobs so both agree; until then the
+  Console states both.
+- **Linux link prerequisite.** GPUI needs `libxkbcommon`/`libxkbcommon-x11`
+  development symlinks; Fedora's `libxkbcommon-devel` provides them. Where only
+  the runtime `.so.0` files are installed, point the linker at a directory of
+  symlinks (`RUSTFLAGS="-L <dir>"`) — documented in `studio/README.md`.
