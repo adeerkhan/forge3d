@@ -10,8 +10,9 @@ pyo3-build-config = "0.21"
 
 [dependencies]
 studio-project.workspace = true
-# M10: the interactive viewport renders through the engine's own Rust surface
-# on the wgpu device eframe presents with.
+# The interactive viewport renders through the engine's own Rust surface on the
+# engine's negotiated wgpu context, then hands the UI pixels (see
+# native_viewport.rs for why the boundary is a readback).
 forge3d.workspace = true
 wgpu = "0.19"
 image.workspace = true

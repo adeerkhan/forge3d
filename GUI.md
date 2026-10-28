@@ -2,7 +2,7 @@
 ## A Photoshop × QGIS × Blender-class desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests. Pushes go to `fork` (`adeerkhan/forge3d`); `origin` stays the upstream engine and is fetch-only.
-**Status header last updated:** 2026-10-28, second pass (**UI runtime replaced**: the hand-rolled egui chrome is gone; the app is built on **GPUI Kit** — G0–G3 landed, see Part X. The engine, bridge, project format, gallery index and parity harnesses are unchanged. The interactive viewport now renders on the engine's own device and crosses into the UI as pixels, because GPUI's wgpu and forge3d's wgpu are different majors.) Earlier status: U0–U4, M5, M6, M7, M9, M10; `scene.compile` makes the document the recipe source; render mode switches between raster accumulation and hybrid-ReSTIR path tracing with live progress; atmosphere/astro/smoke land as engine-composed surfaces with `parity_atmosphere.rs` green.
+**Status header last updated:** 2026-10-28, third pass (**UI runtime replaced**: the hand-rolled egui chrome is gone; the app is built on **GPUI Kit** — G0–G7 and the pure contracts of G8 landed, see Part X. The interactive viewport renders on the engine's own device and crosses into the UI as pixels, because GPUI's wgpu and forge3d's wgpu are different majors. Viewport cadence is now gated by an in-flight render flag, draws at half resolution during a drag and stops entirely when idle.) Earlier status: U0–U4, M5, M6, M7, M9, M10; `scene.compile` makes the document the recipe source; render mode switches between raster accumulation and hybrid-ReSTIR path tracing with live progress; atmosphere/astro/smoke land as engine-composed surfaces with `parity_atmosphere.rs` green.
 **Knowledge graph:** `.ua/knowledge-graph.json` covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (51 verification harnesses), and `studio/` (the app).
 
 ---
@@ -92,7 +92,7 @@ Vector/building layer *authoring* (import records metadata only today), COG-over
 - **Four dock slots** (left, right, bottom, center), each a **tab group**, now provided by the kit's `DockArea`: resizable splits, draggable tabs, tab tearing into a group, collapsible docks, panel zoom, and a serializable layout (`DockAreaState`). The hand-rolled `dock.rs` from U0 is deleted; layout persistence writes the dock state, not a bespoke struct.
 - **Layout presets** (`View ▸ Panel layout`): *Default*, *Cartography* (wide layers + legend), *Modeling* (wide viewport, collapsed left dock), *Data* (tall bottom console). Reset layout restores Default.
 - **Every slot can collapse** to a 0-width rail with its tab icon, Photoshop-style.
-- **Persistence:** the dock state plus theme in the platform config dir (`$XDG_CONFIG_HOME/forge3d-studio/`), never in the project file (a project must open identically on another machine). G4 wires the load/save; G0–G3 build the default layout each launch.
+- **Persistence:** the dock state plus theme in the platform config dir (`$XDG_CONFIG_HOME/forge3d-studio/`), never in the project file (a project must open identically on another machine). G4 lands the load/save (versioned: a stale layout is ignored, not restored badly).
 
 ### 3.2 Menu bar and the action registry
 
@@ -481,16 +481,45 @@ harnesses, certificates.
 | **G1** | **Shell** | title bar + kit `AppMenuBar`, `DockArea` with left/right/bottom/center groups, kit `StatusBar`, dark/light via `ThemeMode`, dialogs | window opens, dock resizes/tabs/drag, status bar reports adapter/backend/frame ms | **landed** |
 | **G2** | **State + actions** | `Studio` entity owning project, selection, history, both workers; action table → menus/keybindings/handlers; project new/open/save, DEM import, PNG export, undo/redo, layer duplicate/delete/visibility, camera presets, theme | actions reachable from menu, shortcut and panel; `cargo test` green | **landed** |
 | **G3** | **Panels v1** | Layers (kind icons, selection, visibility), Inspector (selection header, terrain facts, colormap chips from the engine registry, camera/sun steppers, honest params note), Console, Statistics, viewport tools + HUD + orbit/pan/zoom | layering a DEM and orbiting it works end to end; the inspector drives the frame | **landed** |
-| **G4** | **Params pages** | the M4 schema-driven `TerrainRenderParams` pages rebuilt on kit inputs (typed fields, enum selects, inline engine validation, debounced `terrain.params_validate`); dock layout persistence | every field of `terrain.params_schema` renders and validates; layout survives restart | next |
-| **G5** | **Layers v2** | kit `Tree`/virtual list for deep documents, drag reorder with drop indicators, group collapse, inline rename, opacity, context menu, multi-select ranges | the U1 panel's behaviour, on the kit's tree, with the same document commands | next |
-| **G6** | **Timeline, certificates, quality** | camera-rig timeline (scrub/play/sequence), certificate list + verify, determinism check, render mode (raster/path-traced) and quality window with engine-streamed progress | M5/M6 surfaces back, gates unchanged | planned |
-| **G7** | **Gallery + MapScene** | examples gallery cards with thumbnails and tiers, one-click open, MapScene mode + recipe inspector + atmosphere/astro/smoke panels | U4/M2/M7 surfaces back | planned |
-| **G8** | **Kit test harness** | headless UI tests with the kit's `TestAppContext` (dock composition, panel render, action dispatch), golden frame comparison | UI tests run without a display in CI | planned |
-| **G9** | **Retire the old shell** | delete any remaining egui-era docs/scripts, update `studio/README.md`, confirm `cargo fmt`/`clippy`/tests, single dependency set | no reference to eframe/egui remains in `studio/` | with G8 |
+| **G4** | **Params pages** | the M4 schema-driven `TerrainRenderParams` pages rebuilt on kit inputs (checkbox / enum dropdown / parsed text), inline engine validation, debounced `terrain.params_validate`; dock layout persistence | every field of `terrain.params_schema` renders, commits only complete values, and the engine's rejection is what is shown; layout survives restart | **landed** |
+| **G5** | **Layers v2** | tree rows (disclosure, icon, name, opacity, lock, eye), range/toggle selection, inline rename, live drag reorder, context menu, groups, selection opacity | U1 behaviour with `scene`'s document commands | **landed** (rows not virtualised) |
+| **G6** | **Timeline, certificates, quality** | camera-rig bake/scrub/play/sequence, certificate list + verify, determinism check, render mode (raster/path-traced) with offline and PT settings, engine-streamed progress | M5/M6 surfaces back; a quality still is the bridge's own pixels | **landed** |
+| **G7** | **Gallery + MapScene** | examples gallery with tiers and one-click open, MapScene mode (template build/validate/render), AETHER atmosphere, SIDERA time & place, smoke volumes | U4/M2/M7 surfaces reachable; empty/degraded states say why | **landed** (no gallery thumbnails; recipe camera editing is next) |
+| **G8** | **Tests** | pure contracts: action registry (unique shortcuts, menu coverage), render-size quantization, gallery index contract, dock panel specs, layer icons/drop thirds, params parsing | those run with `cargo test` and no display | **landed (pure)** — window-level harness blocked, see below |
+| **G9** | **Retire the old shell** | delete egui-era docs/modules, update `studio/README.md`, `cargo fmt`/`clippy -D warnings`/tests green, one dependency set | no eframe/egui reference remains in `studio/` | **landed** |
 
 **Ordering note:** G4 before G5 because the parameter pages are the surface the
 engine vocabulary actually lives in; G6 before G7 because certificates and
 render modes are what make a saved still trustworthy.
+
+### G8 blocker (recorded, not worked around)
+
+The kit's headless harness is behind its `test-support` feature, and enabling
+it cannot resolve in this workspace: `gpui-kit 0.8.1` keeps `gpui-fast 0.1.12`
+in the dependency graph, which pins `taffy =0.15.0`, while `gpui-pre 0.3.10`
+requires `^0.15.0` (resolved to 0.15.1). Any feature change forces a
+re-resolution that this pair cannot satisfy, so window-level UI tests (real
+windows, simulated pointer/keyboard) are unavailable until the kit publishes a
+consistent snapshot. The pure contracts above stay in the crate so the same
+facts are at least locked today.
+
+### Viewport performance (measured, 2026-10-28)
+
+Three bugs made orbiting unusable; all three are fixed and the numbers are in
+the G-table above:
+
+| Condition | Result |
+|---|---|
+| Idle (before) | 32 renders in 12 s — the HUD readout changed width, which resized the viewport, which requested another frame |
+| Idle (after) | 2 renders total, then nothing |
+| 180°/s orbit, half-res during drag (release) | ~60 fps, 14 ms per frame |
+| Full-size frame on release | ~80 ms (Rainier 2111², 878×606) |
+| Live switch off | no renders while dragging; one frame when the gesture ends |
+
+The frame-request path is now: pointer motion only marks the view dirty, a
+20 Hz pump issues at most one frame when nothing is in flight, and the drag
+renders at half resolution. A drag never talks to the bridge; the bridge is
+synced on gesture end so exports match what the viewport showed.
 
 ### Known consequences of the runtime swap
 
@@ -500,9 +529,9 @@ render modes are what make a saved still trustworthy.
   shared-device path would be needed).
 - **Two adapters can be chosen.** The bridge's embedded Python builds its own
   engine context and may pick a different GPU than the pure-Rust viewport
-  context (`Viewport device:` vs `Engine:` in the Console). G4 pins the adapter
-  through the engine's own selection knobs so both agree; until then the
-  Console states both.
+  context (`Viewport device:` vs `Engine:` in the Console). Both are stated
+  truthfully; pinning them to one adapter is follow-up work on the engine's
+  selection knobs, and belongs with packaging.
 - **Linux link prerequisite.** GPUI needs `libxkbcommon`/`libxkbcommon-x11`
   development symlinks; Fedora's `libxkbcommon-devel` provides them. Where only
   the runtime `.so.0` files are installed, point the linker at a directory of

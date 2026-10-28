@@ -22,7 +22,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # GPUI Kit is the whole UI framework: GPUI (Zed's GPU-accelerated runtime),
 # gpui-base (behavior/state) and gpui-component (the styled system: dock,
 # tree, table, inputs, command palette, status bar). The UI shell is built
-# against this instead of the hand-rolled egui chrome.
+# against it — one runtime, no second UI path.
 #
 # GPUI renders through wgpu 30, while forge3d (and therefore studio-engine's
 # native viewport) is built on wgpu 0.19. The two versions cannot share a

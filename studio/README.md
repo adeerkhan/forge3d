@@ -161,24 +161,35 @@ UI runtime (GUI.md Part X):
       (selection header, terrain facts, engine colormaps, camera/sun steppers),
       Console, Statistics, viewport tools + HUD + orbit/pan/zoom with coalesced
       frame requests.
-- [ ] **G4 Params pages** — the M4 schema-driven `TerrainRenderParams` pages on
-      kit inputs, inline engine validation, dock-layout persistence.
-- [ ] **G5 Layers v2** — kit tree/virtual list, drag reorder, groups, rename,
-      opacity, context menu, multi-select.
-- [ ] **G6 Timeline, certificates, quality** — rig timeline, certificates +
-      verify, determinism check, raster/path-traced stills with progress.
-- [ ] **G7 Gallery + MapScene** — example cards with thumbnails, one-click open,
-      MapScene mode, atmosphere/astro/smoke panels.
-- [ ] **G8 Kit test harness** — headless UI tests on the kit's `TestAppContext`.
-- [ ] **G9 Retire the old shell** — no egui reference left; docs and
-      dependencies final.
+- [x] **G4 Params pages** — schema-driven pages (checkbox, engine enums,
+      parsed text that commits only complete values), inline engine validation
+      through `terrain.params_validate`, dock layout saved and restored.
+- [x] **G5 Layers v2** — tree rows with disclosure/icon/opacity/lock/eye,
+      shift-range and ctrl-toggle selection, inline rename (Enter/blur), live
+      drag reorder with one undo step per drag, group/ungroup, context menu,
+      selection opacity.
+- [x] **G6 Timeline, certificates, quality** — rig bake/scrub/play and
+      sequence export, certificate list with engine verification, determinism
+      check, raster/path-traced stills with offline samples, denoiser list from
+      the engine, streamed progress.
+- [x] **G7 Gallery + MapScene** — all 50 examples indexed with tiers and
+      one-click open, MapScene template build/validate/render (the rendered PNG
+      is what the viewport shows), AETHER atmosphere, SIDERA time & place,
+      smoke volumes.
+- [x] **G8 Pure contracts** — action registry, render-size quantization,
+      gallery index, dock panel specs, layer icons/drop zones, param parsing.
+      Window-level tests are blocked by a dependency conflict inside the kit
+      (see GUI.md Part X).
+- [x] **G9 Retire the old shell** — no egui module, dependency or doc reference
+      remains in `studio/`.
 
 Engine-facing milestones from GUI.md section 12:
 
 - [x] **1. Audit** — engine API audited (see conversation/report): public
       Rust surface, viewer + IPC, offscreen paths, feature gates.
-- [x] **2. Desktop shell** — egui/eframe window, panels, Lucide icon set,
-      dark/light theme, project persistence, status bar.
+- [x] **2. Desktop shell** — window, panels, icon set, dark/light theme,
+      project persistence, status bar. *(Built on egui at the time; the shell
+      is GPUI Kit since G0–G1.)*
 - [x] **3. Real engine integration** — DEM load → persistent
       `TerrainRenderer` session → real PBR+POM renders; automated
       integration test covers load → render → export on real GPU.
@@ -368,14 +379,14 @@ Engine-facing milestones from GUI.md section 12:
       shaders — on a 64 MB-stack worker thread; the UI polls its events and
       never renders on the UI thread. Colormap changes are pushed into the live
       scene, and camera/sun come from the same document values the bridge
-      renders with. *History:* under eframe (wgpu 0.19) this was a zero-copy
-      texture hand-off; GPUI's wgpu 30 makes that impossible, so G0 replaced it
-      with the readback path. Frames are still drawn on demand, so the cost is
-      one readback per gesture end.
+      renders with. *History:* under the earlier egui shell (wgpu 0.19) this was
+      a zero-copy texture hand-off; GPUI's wgpu 30 makes that impossible, so G0
+      replaced it with the readback path. Frames are drawn on demand and gated
+      by an in-flight flag, so the cost is one readback per drawn frame.
 - [x] **5. Embedded viewport** — done by M9 + M10: terrain frames are drawn
-      on the engine's device and presented as an egui texture. Frames are
-      still drawn on demand (gesture end, committed parameter edit, resize)
-      rather than at a fixed frame rate.
+      on the engine's device and presented as the viewport image. Frames are
+      drawn on demand (gesture end, committed parameter edit, resize) rather
+      than at a fixed frame rate, and a drag draws at half resolution.
 - [ ] **6. Packaging** — Linux-first; Windows/macOS untested (libpython
       embedding and window setup need per-platform work).
 

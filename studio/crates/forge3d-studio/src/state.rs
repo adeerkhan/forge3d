@@ -5,8 +5,8 @@
 //! it never blocks on the engine (every long job is a queued command whose
 //! result arrives as an event).
 //!
-//! Ported from the egui shell with the UI calls removed: the command/event
-//! protocol, the project format and the viewport handoff are the same.
+//! The command/event protocol, the project format and the viewport handoff are
+//! the ones the engine-facing milestones proved; only the UI runtime changed.
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
