@@ -34,6 +34,8 @@ pub struct TerrainScene {
     pub(super) atmosphere_lut_cache: Mutex<Vec<super::atmosphere::luts::AtmosphereGpuLuts>>,
     pub(super) _sky_fallback_texture: TrackedTexture,
     pub(super) sky_fallback_view: wgpu::TextureView,
+    /// STUDIO-FORK (M9/R1): viewer-path colormap LUT, built once on demand.
+    pub(super) viewer_colormap_view: Option<wgpu::TextureView>,
     pub(super) _atmosphere_scattering_fallback_texture: TrackedTexture,
     pub(super) atmosphere_scattering_fallback_view: wgpu::TextureView,
     pub(super) _height_curve_identity_texture: TrackedTexture,
@@ -209,9 +211,6 @@ pub struct ViewerTerrainData {
     pub domain: (f32, f32),
     pub heightmap_texture: TrackedTexture,
     pub heightmap_view: wgpu::TextureView,
-    pub vertex_buffer: TrackedBuffer,
-    pub index_buffer: TrackedBuffer,
-    pub index_count: u32,
     pub cam_radius: f32,
     pub cam_phi_deg: f32,
     pub cam_theta_deg: f32,

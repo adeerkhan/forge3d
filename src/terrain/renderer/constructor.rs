@@ -771,6 +771,7 @@ impl TerrainScene {
             cpu_visibility_oracle: Mutex::new(None),
             pending_cpu_visibility_oracle: Mutex::new(None),
             viewer_heightmap: None,
+            viewer_colormap_view: None,
             geometry_provider: None,
             two_phase_culler: None,
             terrain_minmax_pyramid: None,

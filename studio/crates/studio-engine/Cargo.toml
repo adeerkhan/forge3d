@@ -21,3 +21,9 @@ serde_json = "1"
 
 [dev-dependencies]
 serde.workspace = true
+# M9: the native viewer-path render test exercises forge3d's Rust surface
+# directly (no Python). build.rs links libpython for this configuration.
+forge3d = { workspace = true }
+wgpu = "0.19"
+image.workspace = true
+env_logger.workspace = true
