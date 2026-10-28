@@ -34,6 +34,39 @@ pub struct LogEntry {
     pub text: String,
 }
 
+/// Which scene the app is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneMode {
+    Terrain,
+    MapScene,
+}
+
+/// One examples-gallery entry, as `studio/examples/index.json` declares it.
+#[derive(Clone, Debug)]
+pub struct ExampleEntry {
+    pub id: String,
+    pub title: String,
+    pub category: String,
+    /// `A` runs today; `B`/`C` name the milestone that unlocks them.
+    pub tier: char,
+    pub description: String,
+    /// The `examples/*.py` script this entry reproduces (shown as provenance).
+    #[allow(dead_code)]
+    pub example: String,
+    pub unlock: String,
+    pub scene: Option<serde_json::Value>,
+}
+
+/// MapScene mode state: the recipe the last build produced and its report.
+#[derive(Clone, Debug, Default)]
+pub struct MapSceneState {
+    pub template: String,
+    pub templates: Vec<String>,
+    pub recipe_json: Option<String>,
+    pub last_status: Option<String>,
+    pub certificate_sha: Option<String>,
+}
+
 /// One certificate this session produced.
 #[derive(Clone, Debug)]
 pub struct SessionCertificate {
@@ -95,6 +128,12 @@ pub enum PendingJob {
     DiagnosticsSnapshot,
     Capabilities,
     SequenceFrame,
+    MapSceneTemplate,
+    MapSceneValidate,
+    MapSceneRender,
+    AtmosphereBake,
+    AstroObserve,
+    SmokeLoad,
 }
 
 /// Interactive viewport drag, held on the state so a drag survives frames.
@@ -167,6 +206,14 @@ pub struct Studio {
     /// Layers panel UI state (anchor, rename, drop preview, collapsed groups).
     pub layers: LayerPanel,
 
+    pub scene_mode: SceneMode,
+    pub mapscene: MapSceneState,
+    pub examples: Vec<ExampleEntry>,
+    pub gallery_filter: String,
+    pub atmosphere_meta: Option<serde_json::Value>,
+    pub smoke_report: Option<serde_json::Value>,
+    pending_example: Option<ExampleEntry>,
+
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
     pub last_export: Option<PathBuf>,
@@ -226,6 +273,16 @@ impl Studio {
             params_error: None,
             params_form: ParamForm::default(),
             layers: LayerPanel::default(),
+            scene_mode: SceneMode::Terrain,
+            mapscene: MapSceneState {
+                template: "terrain_raster".to_owned(),
+                ..MapSceneState::default()
+            },
+            examples: load_examples(),
+            gallery_filter: "All".to_owned(),
+            atmosphere_meta: None,
+            smoke_report: None,
+            pending_example: None,
             focus_handle,
             drag: None,
             last_export: None,
@@ -248,6 +305,18 @@ impl Studio {
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
         studio.refresh_capabilities(cx);
+        log::info!(
+            "gallery: {} entries, {} runnable today",
+            studio.examples.len(),
+            studio
+                .examples
+                .iter()
+                .filter(|entry| entry.tier == 'A')
+                .count()
+        );
+        studio
+            .engine
+            .call("mapscene.templates", serde_json::json!({}));
 
         window.focus(&studio.focus_handle, &mut *cx);
         studio
@@ -1472,6 +1541,350 @@ impl Studio {
         cx.notify();
     }
 
+    // ------------------------------------------------------------------- scene
+
+    pub fn set_scene_mode(&mut self, mode: SceneMode, cx: &mut Context<Self>) {
+        self.scene_mode = mode;
+        self.project.scene_mode = match mode {
+            SceneMode::Terrain => "terrain".to_owned(),
+            SceneMode::MapScene => "mapscene".to_owned(),
+        };
+        self.project_dirty = true;
+        self.invalidate_viewport(cx);
+        self.set_status(match mode {
+            SceneMode::Terrain => "Terrain mode",
+            SceneMode::MapScene => "MapScene mode — build and render a recipe",
+        });
+        cx.notify();
+    }
+
+    /// Open a gallery entry: load its DEM if needed, then apply its scene.
+    pub fn open_example(&mut self, entry: ExampleEntry, cx: &mut Context<Self>) {
+        let Some(scene) = entry.scene.clone() else {
+            return;
+        };
+        let dem = scene
+            .get("dem")
+            .and_then(|value| value.as_str())
+            .map(|path| resolve_repo_path(Path::new(path)));
+        if let Some(path) = &dem {
+            if !path.exists() {
+                self.push_error(
+                    "Examples gallery",
+                    format!(
+                        "fixture {} is missing — engine fixtures live in git LFS (git lfs pull --include={})",
+                        path.display(),
+                        path.display()
+                    ),
+                );
+                cx.notify();
+                return;
+            }
+        }
+        let needs_load = match (&dem, &self.project.terrain) {
+            (Some(path), Some(terrain)) => terrain.path != *path,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        self.set_status(format!("Opening example '{}'…", entry.title));
+        if needs_load {
+            if let Some(path) = dem {
+                self.pending_example = Some(entry);
+                self.import_dem(&path, cx);
+                return;
+            }
+        }
+        self.pending_example = Some(entry);
+        self.apply_pending_example(cx);
+    }
+
+    /// Apply the scene of the example whose DEM just finished loading.
+    fn apply_pending_example(&mut self, cx: &mut Context<Self>) {
+        let Some(entry) = self.pending_example.take() else {
+            return;
+        };
+        let Some(scene) = entry.scene.clone() else {
+            return;
+        };
+        let kind = scene
+            .get("kind")
+            .and_then(|value| value.as_str())
+            .unwrap_or("terrain");
+        if let Some(camera) = scene.get("camera") {
+            let radius_rel = camera
+                .get("radius_rel")
+                .and_then(|value| value.as_f64())
+                .unwrap_or(0.4) as f32;
+            let span = self
+                .project
+                .terrain
+                .as_ref()
+                .map(|terrain| terrain_span(terrain.height_min, terrain.height_max))
+                .unwrap_or(1000.0);
+            let mut next = self.project.camera;
+            if let Some(value) = camera.get("phi_deg").and_then(|value| value.as_f64()) {
+                next.phi_deg = value as f32;
+            }
+            if let Some(value) = camera.get("theta_deg").and_then(|value| value.as_f64()) {
+                next.theta_deg = value as f32;
+            }
+            if let Some(value) = camera.get("fov_deg").and_then(|value| value.as_f64()) {
+                next.fov_deg = value as f32;
+            }
+            next.radius = radius_rel * span;
+            self.set_camera(next, cx);
+        }
+        if let Some(sun) = scene.get("sun") {
+            let mut next = self.project.sun;
+            if let Some(value) = sun.get("azimuth_deg").and_then(|value| value.as_f64()) {
+                next.azimuth_deg = value as f32;
+            }
+            if let Some(value) = sun.get("elevation_deg").and_then(|value| value.as_f64()) {
+                next.elevation_deg = value as f32;
+            }
+            if let Some(value) = sun.get("intensity").and_then(|value| value.as_f64()) {
+                next.intensity = value as f32;
+            }
+            self.set_sun(next, cx);
+        }
+        if let Some(params) = scene.get("params") {
+            if let Some(map) = params.as_object() {
+                for (key, value) in map {
+                    self.set_param("root", key, value.clone(), cx);
+                }
+            }
+        }
+        match kind {
+            "mapscene" => {
+                if let Some(template) = scene.get("template").and_then(|value| value.as_str()) {
+                    self.mapscene.template = template.to_owned();
+                }
+                self.set_scene_mode(SceneMode::MapScene, cx);
+                self.build_mapscene(cx);
+            }
+            "terrain_rig" => {
+                self.set_scene_mode(SceneMode::Terrain, cx);
+                self.set_rig_kind("orbit".to_owned(), cx);
+                self.bake_rig(cx);
+            }
+            _ => self.set_scene_mode(SceneMode::Terrain, cx),
+        }
+        self.project.name = entry.title.clone();
+        self.set_status(format!("Opened '{}'", entry.title));
+        cx.notify();
+    }
+
+    /// `mapscene.template`: build the recipe the canonical example builds.
+    pub fn build_mapscene(&mut self, cx: &mut Context<Self>) {
+        let Some(terrain) = self.project.terrain.clone() else {
+            self.push_error("MapScene template", "load a DEM dataset first");
+            return;
+        };
+        self.busy = true;
+        let job = self.engine.call(
+            "mapscene.template",
+            serde_json::json!({
+                "template": self.mapscene.template,
+                "dem_path": terrain.path.to_string_lossy(),
+                "width": self.project.export.width,
+                "height": self.project.export.height,
+                "label_text": "Studio",
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::MapSceneTemplate);
+        self.set_status("Building MapScene recipe…");
+        cx.notify();
+    }
+
+    pub fn validate_mapscene(&mut self, cx: &mut Context<Self>) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("MapScene", "build a recipe first");
+            return;
+        };
+        let job = self.engine.call(
+            "mapscene.validate",
+            serde_json::json!({ "recipe_json": recipe }),
+        );
+        self.pending_jobs.insert(job, PendingJob::MapSceneValidate);
+        self.set_status("Validating recipe…");
+        cx.notify();
+    }
+
+    /// `mapscene.render`: the certified `gpu_terrain` path.
+    pub fn render_mapscene(&mut self, cx: &mut Context<Self>) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("MapScene", "build a recipe first");
+            return;
+        };
+        let out = std::env::temp_dir().join(format!(
+            "studio-mapscene-{}-{}.png",
+            std::process::id(),
+            self.certificates.len()
+        ));
+        self.busy = true;
+        let job = self.engine.call(
+            "mapscene.render",
+            serde_json::json!({
+                "recipe_json": recipe,
+                "out_png": out.to_string_lossy(),
+                "certificate": self.sign_renders,
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::MapSceneRender);
+        self.set_status("Rendering the recipe through MapScene…");
+        cx.notify();
+    }
+
+    // --------------------------------------------------------------- atmosphere
+
+    pub fn set_atmosphere_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.project.atmosphere.enabled = enabled;
+        self.project_dirty = true;
+        self.engine
+            .send(Command::SetAtmosphere(self.project.atmosphere.clone()));
+        self.invalidate_viewport(cx);
+        if enabled {
+            self.bake_atmosphere(cx);
+        }
+    }
+
+    /// One combined stepper: turbidity delta, intensity factor, mie-g delta.
+    pub fn step_atmosphere(
+        &mut self,
+        turbidity: f32,
+        intensity: f32,
+        mie: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let atmosphere = &mut self.project.atmosphere;
+        atmosphere.turbidity = (atmosphere.turbidity + turbidity).clamp(1.0, 20.0);
+        atmosphere.intensity = (atmosphere.intensity * intensity).clamp(0.1, 10.0);
+        atmosphere.mie_g = (atmosphere.mie_g + mie).clamp(0.0, 0.99);
+        self.project_dirty = true;
+        self.engine
+            .send(Command::SetAtmosphere(self.project.atmosphere.clone()));
+        self.bake_atmosphere(cx);
+    }
+
+    /// Bake the AETHER sky; the bridge writes the HDR and the provenance.
+    pub fn bake_atmosphere(&mut self, cx: &mut Context<Self>) {
+        let job = self.engine.call(
+            "atmosphere.bake",
+            serde_json::json!({
+                "settings": {
+                    "turbidity": self.project.atmosphere.turbidity,
+                    "ozone_du": self.project.atmosphere.ozone_du,
+                    "mie_g": self.project.atmosphere.mie_g,
+                    "ground_albedo": self.project.atmosphere.ground_albedo,
+                    "scattering_orders": self.project.atmosphere.scattering_orders,
+                },
+                "sun_elevation_deg": self.project.sun.elevation_deg,
+                "sun_azimuth_deg": self.project.sun.azimuth_deg,
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::AtmosphereBake);
+        self.set_status("Baking the AETHER sky…");
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------- observation
+
+    pub fn step_observation(&mut self, dlat: f32, dlon: f32, cx: &mut Context<Self>) {
+        let observation = &mut self.project.observation;
+        observation.latitude_deg = (observation.latitude_deg + dlat).clamp(-89.0, 89.0);
+        observation.longitude_deg = (observation.longitude_deg + dlon).clamp(-180.0, 180.0);
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    /// `astro.observe` → the terrain sun, with the compass→renderer conversion
+    /// the engine's own recipes use (`A − 90`).
+    pub fn observe_sun(&mut self, cx: &mut Context<Self>) {
+        let observation = self.project.observation.clone();
+        let job = self.engine.call(
+            "astro.observe",
+            serde_json::json!({
+                "datetime_utc": observation.datetime_utc,
+                "latitude_deg": observation.latitude_deg,
+                "longitude_deg": observation.longitude_deg,
+                "height_m": observation.height_m,
+                "refraction": observation.refraction,
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::AstroObserve);
+        self.set_status("Asking SIDERA for the Sun…");
+        cx.notify();
+    }
+
+    // ------------------------------------------------------------------- smoke
+
+    pub fn set_smoke_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.project.smoke.enabled = enabled;
+        self.project.sync_smoke_layer();
+        self.project_dirty = true;
+        self.engine.send(Command::SetSmoke {
+            params: self.project.smoke.clone(),
+            opacity: 1.0,
+        });
+        self.invalidate_viewport(cx);
+    }
+
+    pub fn pick_smoke(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Load a smoke density volume (.npy or .npz)".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = first_path(rx.await.ok().and_then(|result| result.ok()));
+            if let Some(path) = picked {
+                let _ = this.update(cx, |this, cx| this.load_smoke(&path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn load_smoke(&mut self, path: &Path, cx: &mut Context<Self>) {
+        let job = self.engine.call(
+            "smoke.load",
+            serde_json::json!({ "path": path.to_string_lossy() }),
+        );
+        self.pending_jobs.insert(job, PendingJob::SmokeLoad);
+        self.project.smoke.path = Some(path.to_path_buf());
+        self.project.smoke.enabled = true;
+        self.project.sync_smoke_layer();
+        self.project_dirty = true;
+        self.set_status(format!("Loading smoke volume {}", path.display()));
+        cx.notify();
+    }
+
+    pub fn clear_smoke(&mut self, cx: &mut Context<Self>) {
+        let job = self.engine.call("smoke.clear", serde_json::json!({}));
+        self.pending_jobs.insert(job, PendingJob::SmokeLoad);
+        self.project.smoke.path = None;
+        self.smoke_report = None;
+        self.project.sync_smoke_layer();
+        self.project_dirty = true;
+        self.engine.send(Command::SetSmoke {
+            params: self.project.smoke.clone(),
+            opacity: 1.0,
+        });
+        self.set_status("Smoke volume cleared");
+        cx.notify();
+    }
+
+    pub fn step_smoke_exposure(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let smoke = &mut self.project.smoke;
+        smoke.exposure = (smoke.exposure + delta).clamp(0.05, 10.0);
+        self.project_dirty = true;
+        self.engine.send(Command::SetSmoke {
+            params: smoke.clone(),
+            opacity: 1.0,
+        });
+        self.invalidate_viewport(cx);
+    }
+
     // ------------------------------------------------------------------ params
 
     /// The committed value of one parameter, falling back to the schema default
@@ -1944,6 +2357,17 @@ impl Studio {
                     })
                     .unwrap_or_default();
             }
+            "mapscene.templates" => {
+                self.mapscene.templates = result
+                    .get("templates")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
             "terrain.params_schema" => {
                 self.params_schema = result.get("schema").cloned().or(Some(result));
             }
@@ -2049,6 +2473,125 @@ impl Studio {
             PendingJob::Capabilities => {
                 self.offline_caps = Some(result.clone());
             }
+            PendingJob::MapSceneTemplate => {
+                let recipe = result
+                    .get("recipe")
+                    .or_else(|| result.get("recipe_json"))
+                    .or_else(|| result.get("recipe_dict"))
+                    .cloned();
+                match recipe {
+                    Some(recipe) => {
+                        let text = recipe
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| recipe.to_string());
+                        self.mapscene.recipe_json = Some(text);
+                        self.mapscene.last_status =
+                            Some("Recipe built from the template".to_owned());
+                        self.busy = false;
+                        self.set_status("Recipe built — validate or render it");
+                    }
+                    None => {
+                        self.busy = false;
+                        self.push_error("MapScene", "the engine returned no recipe");
+                    }
+                }
+            }
+            PendingJob::MapSceneValidate => {
+                let status = result
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let diagnostics = result
+                    .get("diagnostics")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                self.mapscene.last_status = Some(if diagnostics.is_empty() {
+                    format!("validation: {status}")
+                } else {
+                    format!("validation: {status} — {diagnostics}")
+                });
+                self.set_status(format!("Recipe validation: {status}"));
+            }
+            PendingJob::MapSceneRender => {
+                self.busy = false;
+                let status = result
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("rendered")
+                    .to_owned();
+                let png = result
+                    .get("png")
+                    .and_then(|value| value.as_str())
+                    .map(PathBuf::from);
+                if let Some(sha) = result
+                    .get("metadata")
+                    .and_then(|meta| meta.get("certificate_payload_sha256"))
+                    .and_then(|value| value.as_str())
+                {
+                    self.mapscene.certificate_sha = Some(sha.to_owned());
+                }
+                self.mapscene.last_status = Some(format!("rendered: {status}"));
+                if let Some(path) = png {
+                    self.present_png(&path);
+                }
+                self.set_status("MapScene frame rendered");
+            }
+            PendingJob::AtmosphereBake => {
+                self.atmosphere_meta = Some(result.clone());
+                let sha = result
+                    .get("hdr_sha256")
+                    .and_then(|value| value.as_str())
+                    .map(|sha| sha.chars().take(16).collect::<String>())
+                    .unwrap_or_else(|| "no hash".to_owned());
+                self.set_status(format!("Sky baked ({sha}…)"));
+                self.invalidate_viewport(cx);
+            }
+            PendingJob::AstroObserve => {
+                let sun = result.get("bodies").and_then(|bodies| bodies.get("sun"));
+                if let Some(sun) = sun {
+                    let azimuth = sun
+                        .get("azimuth_deg")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let altitude = sun
+                        .get("altitude_deg")
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let mut next = self.project.sun;
+                    next.azimuth_deg = (azimuth - 90.0).rem_euclid(360.0);
+                    if altitude < 0.0 {
+                        self.push_log(
+                            true,
+                            format!(
+                                "The Sun is {altitude:.1}° below the horizon; clamped to 0° for the terrain light"
+                            ),
+                        );
+                        next.elevation_deg = 0.0;
+                    } else {
+                        next.elevation_deg = altitude;
+                    }
+                    self.set_sun(next, cx);
+                    self.commit_view();
+                    self.set_status(format!(
+                        "Sun from SIDERA: az {azimuth:.1}° / alt {altitude:.1}°"
+                    ));
+                }
+            }
+            PendingJob::SmokeLoad => {
+                self.smoke_report = Some(result.clone());
+                let status = result
+                    .get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("loaded");
+                self.set_status(format!("Smoke: {status}"));
+            }
             PendingJob::SequenceFrame => {
                 if let Some(sequence) = self.sequence.as_mut() {
                     sequence.finished += 1;
@@ -2065,6 +2608,20 @@ impl Studio {
         }
         let _ = op;
         cx.notify();
+    }
+
+    /// Present a PNG written by the engine (MapScene render).
+    fn present_png(&mut self, path: &Path) {
+        let Ok(image) = image::open(path) else {
+            self.push_log(true, format!("Could not read {}", path.display()));
+            return;
+        };
+        let rgba = image.to_rgba8();
+        self.frame_size = rgba.dimensions();
+        self.frame = Some(Arc::new(gpui_kit::RenderImage::new(vec![
+            image::Frame::new(rgba),
+        ])));
+        self.viewport_dirty = false;
     }
 
     /// Present RGBA pixels as the viewport image (a quality still).
@@ -2162,6 +2719,96 @@ pub fn fit_radius(span: f32) -> f32 {
     (span * 1.65).clamp(60.0, 400_000.0)
 }
 
+/// The repository checkout the app is running from.
+///
+/// Gallery scenes and engine fixtures are repo-relative; resolving them against
+/// the process CWD breaks as soon as Studio is launched from elsewhere.
+pub fn repo_root() -> PathBuf {
+    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    loop {
+        if dir
+            .join("studio")
+            .join("examples")
+            .join("index.json")
+            .is_file()
+        {
+            return dir;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Resolve a repo-relative path against the checkout.
+pub fn resolve_repo_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let candidate = repo_root().join(path);
+    if candidate.exists() {
+        candidate
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// Read the examples gallery index.
+fn load_examples() -> Vec<ExampleEntry> {
+    let path = repo_root()
+        .join("studio")
+        .join("examples")
+        .join("index.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(index) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    index
+        .get("entries")
+        .and_then(|entries| entries.as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    Some(ExampleEntry {
+                        id: entry.get("id")?.as_str()?.to_owned(),
+                        title: entry.get("title")?.as_str()?.to_owned(),
+                        category: entry
+                            .get("category")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("Other")
+                            .to_owned(),
+                        tier: entry
+                            .get("tier")
+                            .and_then(|value| value.as_str())
+                            .and_then(|tier| tier.chars().next())
+                            .unwrap_or('C'),
+                        description: entry
+                            .get("description")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        example: entry
+                            .get("example")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_owned(),
+                        unlock: entry
+                            .get("unlock")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("needs a later milestone")
+                            .to_owned(),
+                        scene: entry.get("scene").cloned(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The certificate's `payload_sha256`, when it carries one.
 fn read_certificate_sha(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -2219,6 +2866,53 @@ mod tests {
         assert_eq!(slug("Mount Fuji"), "mount_fuji");
         assert_eq!(slug("  "), "scene");
         assert_eq!(slug("a/b"), "a_b");
+    }
+
+    #[test]
+    fn render_sizes_are_even_pixels() {
+        // Quantized so a one-pixel layout jitter cannot start a render loop.
+        assert_eq!(render_size(1000.0, 601.0), (1000, 600));
+        assert_eq!(render_size(1.0, 1.0), (2, 2));
+        assert_eq!(render_size(0.0, 0.0), (2, 2));
+    }
+
+    #[test]
+    fn the_gallery_index_parses_and_its_tier_a_scenes_are_openable() {
+        let entries = load_examples();
+        assert!(
+            entries.len() >= 50,
+            "every examples/*.py should be indexed, got {}",
+            entries.len()
+        );
+        assert!(entries
+            .iter()
+            .all(|entry| matches!(entry.tier, 'A' | 'B' | 'C')));
+        for entry in entries.iter().filter(|entry| entry.tier == 'A') {
+            let scene = entry
+                .scene
+                .as_ref()
+                .unwrap_or_else(|| panic!("tier A entry {} has no scene", entry.id));
+            let kind = scene.get("kind").and_then(|value| value.as_str());
+            assert!(
+                kind.is_some(),
+                "tier A entry {} names no scene kind",
+                entry.id
+            );
+            if kind != Some("terrain_rig") {
+                assert!(
+                    scene.get("dem").and_then(|value| value.as_str()).is_some(),
+                    "tier A entry {} names no DEM",
+                    entry.id
+                );
+            }
+        }
+        assert!(
+            entries
+                .iter()
+                .filter(|entry| entry.tier == 'B' || entry.tier == 'C')
+                .all(|entry| !entry.unlock.is_empty()),
+            "a not-yet-runnable entry must say what unlocks it"
+        );
     }
 
     #[test]

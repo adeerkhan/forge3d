@@ -4,6 +4,7 @@ pub mod certificates;
 pub mod layers;
 pub mod panels;
 pub mod params;
+pub mod scene;
 pub mod shell;
 pub mod timeline;
 pub mod viewport;
@@ -14,7 +15,7 @@ use gpui_kit::component::dock::{
     panel_handle, BasePanel, DockArea, DockLayout, DockPlacement, DockSkin, Panel as StyledPanel,
     PanelEvent,
 };
-use gpui_kit::component::menu::AppMenuBar;
+use gpui_kit::component::{menu::AppMenuBar, v_flex, ActiveTheme as _};
 use gpui_kit::*;
 
 /// What a panel draws: a function of application state.
@@ -23,11 +24,13 @@ type PanelContent = dyn Fn(&mut Window, &mut App) -> AnyElement;
 /// The saved dock layout's schema version. Bump when the panel set changes in
 /// a way an old layout cannot express; a saved layout from another version is
 /// ignored and the default layout is built.
-pub const DOCK_LAYOUT_VERSION: usize = 2;
+pub const DOCK_LAYOUT_VERSION: usize = 3;
 
 /// Panel ids, in default-layout order.
 pub const PANEL_IDS: &[&str] = &[
     "studio.layers",
+    "studio.scene",
+    "studio.gallery",
     "studio.inspector",
     "studio.render",
     "studio.console",
@@ -53,6 +56,8 @@ type PanelFn = fn(&WeakEntity<crate::state::Studio>, &mut Window, &mut App) -> A
 pub fn panel_spec(id: &str) -> Option<(&'static str, PanelFn)> {
     match id {
         "studio.layers" => Some(("Layers", panels::layers)),
+        "studio.scene" => Some(("Scene", scene_panel)),
+        "studio.gallery" => Some(("Examples", gallery_panel)),
         "studio.inspector" => Some(("Inspector", panels::inspector)),
         "studio.render" => Some(("Render", render_panel)),
         "studio.timeline" => Some(("Timeline", timeline_panel)),
@@ -93,6 +98,40 @@ fn certificates_panel(
 ) -> AnyElement {
     match studio.upgrade() {
         Some(entity) => certificates::certificates(&entity, window, cx),
+        None => div().into_any_element(),
+    }
+}
+
+fn scene_panel(
+    studio: &WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => {
+            // MapScene mode and the environment share one tab so the scene's
+            // three concerns (recipe, sky, volumes) sit together.
+            let mut body = v_flex().w_full().gap_2();
+            body = body.child(scene::mapscene(&entity, window, cx));
+            body = body.child(
+                div()
+                    .border_t_1()
+                    .border_color(cx.theme().colors.border)
+                    .child(scene::environment(&entity, window, cx)),
+            );
+            body.into_any_element()
+        }
+        None => div().into_any_element(),
+    }
+}
+
+fn gallery_panel(
+    studio: &WeakEntity<crate::state::Studio>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => scene::gallery(&entity, window, cx),
         None => div().into_any_element(),
     }
 }
@@ -213,7 +252,13 @@ pub fn build_dock(
     let timeline = panel("studio.timeline");
     let certificates_panel = panel("studio.certificates");
 
-    let left = DockLayout::tabs().panel_view(panel_handle(layers), cx);
+    let scene_tab = panel("studio.scene");
+    let gallery_tab = panel("studio.gallery");
+
+    let left = DockLayout::tabs()
+        .panel_view(panel_handle(layers), cx)
+        .panel_view(panel_handle(scene_tab), cx)
+        .panel_view(panel_handle(gallery_tab), cx);
     let right = DockLayout::tabs()
         .panel_view(panel_handle(inspector), cx)
         .panel_view(panel_handle(render), cx);
@@ -243,4 +288,27 @@ pub fn build_dock(
 
     let menu_bar = crate::actions::menu_bar(cx);
     (dock_area, skin, menu_bar)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+    use std::collections::HashSet;
+
+    #[test]
+    fn every_panel_id_has_a_spec_with_a_unique_title() {
+        let mut titles = HashSet::new();
+        for id in PANEL_IDS {
+            let (title, _draw) = panel_spec(id).unwrap_or_else(|| panic!("{id} has no panel spec"));
+            assert!(!title.is_empty());
+            assert!(titles.insert(title), "duplicate panel title {title}");
+        }
+        assert_eq!(titles.len(), PANEL_IDS.len());
+    }
+
+    #[test]
+    fn unknown_panel_ids_are_rejected() {
+        assert!(panel_spec("studio.nope").is_none());
+    }
 }

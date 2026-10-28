@@ -519,3 +519,38 @@ fn drop_zone_for(event: &DragMoveEvent<LayerDrag>) -> DropZone {
         DropZone::Into
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::prelude::v1::test;
+
+    #[test]
+    fn every_layer_kind_has_its_own_icon() {
+        let icons: Vec<IconName> = LayerKind::ALL.iter().map(|kind| kind_icon(*kind)).collect();
+        for (index, icon) in icons.iter().enumerate() {
+            assert!(
+                !icons[..index].iter().any(|other| other == icon),
+                "layer kind {:?} reuses an icon",
+                LayerKind::ALL[index]
+            );
+        }
+    }
+
+    #[test]
+    fn drop_zone_is_the_pointer_third() {
+        // The mapping is what makes before/into/after predictable for the user.
+        let zone = |fraction: f32| -> DropZone {
+            if fraction < 0.3 {
+                DropZone::Before
+            } else if fraction > 0.7 {
+                DropZone::After
+            } else {
+                DropZone::Into
+            }
+        };
+        assert_eq!(zone(0.1), DropZone::Before);
+        assert_eq!(zone(0.5), DropZone::Into);
+        assert_eq!(zone(0.9), DropZone::After);
+    }
+}
