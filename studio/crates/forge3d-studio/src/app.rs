@@ -334,6 +334,103 @@ pub struct StudioApp {
     pending_mapscene_camera: Option<serde_json::Value>,
     /// U4: render the MapScene recipe as soon as the template job returns.
     render_after_recipe: bool,
+    /// M10: GPU-shared native viewport (egui-native texture, no readback).
+    native: NativeViewportState,
+}
+
+/// M10: the GPU-shared viewport's lifecycle.
+///
+/// The scene is built on a worker thread (shader compilation is the expensive
+/// part), then owned by the UI thread and re-rendered whenever the view
+/// changes. `texture_id` is the egui-side registration of the scene's sRGB
+/// view; `registered_generation` tracks target reallocation on resize.
+struct NativeViewportState {
+    /// eframe's wgpu render state — the device/queue shared with the engine.
+    wgpu: Option<eframe::egui_wgpu::RenderState>,
+    viewport: Option<studio_engine::NativeViewport>,
+    /// Scene construction in flight (worker thread).
+    building: Option<std::sync::mpsc::Receiver<Result<studio_engine::NativeViewport, String>>>,
+    texture_id: Option<egui::TextureId>,
+    registered_generation: u64,
+    /// Last requested render size; native frames re-render when it changes.
+    size: (u32, u32),
+    /// A DEM that arrived while the scene was still being built.
+    pending_load: Option<(PathBuf, f32)>,
+    /// Set on camera/sun/size/terrain changes; cleared once a frame renders.
+    dirty: bool,
+    /// Colormap currently pushed into the scene (None = Studio's relief
+    /// ramp). Kept separate from `Project::colormap` so one failed lookup is
+    /// reported once instead of every frame.
+    colormap_synced: Option<String>,
+    /// Why the native path is unavailable, if it is. The app then keeps the
+    /// bridge readback and says so instead of silently degrading.
+    error: Option<String>,
+}
+
+impl Default for NativeViewportState {
+    fn default() -> Self {
+        Self {
+            wgpu: None,
+            viewport: None,
+            building: None,
+            texture_id: None,
+            registered_generation: 0,
+            size: (0, 0),
+            pending_load: None,
+            dirty: true,
+            colormap_synced: None,
+            error: None,
+        }
+    }
+}
+
+impl NativeViewportState {
+    /// Start building the native scene if eframe gave us a wgpu device.
+    fn start(cc: &eframe::CreationContext<'_>) -> Self {
+        let Some(render_state) = cc.wgpu_render_state.clone() else {
+            return Self {
+                error: Some("eframe has no wgpu render state".to_owned()),
+                ..Self::default()
+            };
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let device = render_state.device.clone();
+        let queue = render_state.queue.clone();
+        let adapter = render_state.adapter.clone();
+        let spawned = std::thread::Builder::new()
+            .name("studio-native-gpu".to_owned())
+            // The terrain scene compiles the mega-shaders recursively; the
+            // default test/worker stack overflows (same reason the engine
+            // worker uses a big stack).
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let result = studio_engine::NativeViewport::new(device, queue, adapter);
+                let _ = tx.send(result);
+            });
+        if spawned.is_err() {
+            return Self {
+                error: Some("could not start the native viewport thread".to_owned()),
+                ..Self::default()
+            };
+        }
+        Self {
+            wgpu: Some(render_state),
+            building: Some(rx),
+            ..Self::default()
+        }
+    }
+
+    /// True when the interactive viewport can paint from the native scene.
+    fn is_live(&self) -> bool {
+        self.viewport
+            .as_ref()
+            .map(|viewport| viewport.has_terrain())
+            .unwrap_or(false)
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
 }
 
 /// Resolve a dataset path that may be relative to the repository root.
@@ -445,6 +542,7 @@ impl StudioApp {
             pending_example: None,
             pending_mapscene_camera: None,
             render_after_recipe: false,
+            native: NativeViewportState::start(cc),
         }
     }
 
@@ -565,6 +663,11 @@ impl StudioApp {
                         .unwrap_or_default();
                     self.history.clear();
                     self.layers_ui = LayersState::default();
+                    // M10: the native viewport shares the engine's wgpu
+                    // device, so it renders from the same DEM. `span` mirrors
+                    // the bridge's world scale (`max(range, 1) * 6`).
+                    let span = (height_max - height_min).abs().max(1.0) * 6.0;
+                    self.load_native_dem(&path, span);
                     self.request_viewport_render();
                     self.set_status(format!("Loaded {} ({}×{})", path.display(), width, height));
                     if self.pending_example.is_some() {
@@ -572,6 +675,11 @@ impl StudioApp {
                     }
                 }
                 Event::TerrainCleared => {
+                    if let Some(viewport) = self.native.viewport.as_mut() {
+                        viewport.clear_dem();
+                    }
+                    self.native.pending_load = None;
+                    self.native.dirty = true;
                     self.project.terrain = None;
                     self.project.terrain_visible = true;
                     self.project.sync_terrain_layer();
@@ -610,20 +718,25 @@ impl StudioApp {
                             }
                         }
                     }
-                    let texture = self.viewport_texture.get_or_insert_with(|| {
-                        ctx.load_texture(
-                            "studio-viewport",
-                            ColorImage::new([1, 1], Color32::BLACK),
+                    // M10: while the native viewport paints, a readback frame
+                    // is only a timing sample — its pixels are stale by the
+                    // time they arrive and are not shown.
+                    if !self.native_paints() {
+                        let texture = self.viewport_texture.get_or_insert_with(|| {
+                            ctx.load_texture(
+                                "studio-viewport",
+                                ColorImage::new([1, 1], Color32::BLACK),
+                                TextureOptions::LINEAR,
+                            )
+                        });
+                        texture.set(
+                            ColorImage::from_rgba_unmultiplied(
+                                [width as usize, height as usize],
+                                &rgba,
+                            ),
                             TextureOptions::LINEAR,
-                        )
-                    });
-                    texture.set(
-                        ColorImage::from_rgba_unmultiplied(
-                            [width as usize, height as usize],
-                            &rgba,
-                        ),
-                        TextureOptions::LINEAR,
-                    );
+                        );
+                    }
                     self.last_frame_ms = Some(render_ms);
                     ctx.request_repaint();
                 }
@@ -664,6 +777,12 @@ impl StudioApp {
     // -------------------------------------------------------------- actions
 
     fn request_viewport_render(&mut self) {
+        // M10: with a live native viewport the frame is drawn on the engine's
+        // own device, so the request is just "the view changed".
+        if self.native_paints() {
+            self.native.mark_dirty();
+            return;
+        }
         if self.busy {
             return;
         }
@@ -707,6 +826,213 @@ impl StudioApp {
                 height: pending.height,
             });
         }
+    }
+
+    // ------------------------------------------------- M10: native GPU path
+
+    /// True when the viewport paints from the native scene: terrain mode with
+    /// a loaded native terrain. MapScene renders through the bridge and owns
+    /// the panel in its own mode.
+    fn native_paints(&self) -> bool {
+        self.scene_mode == SceneMode::Terrain && self.native.is_live()
+    }
+
+    /// Image the viewport paints: the native scene's texture when it is live,
+    /// otherwise the bridge's frame (readback or MapScene PNG).
+    fn viewport_image(&self) -> Option<egui::TextureId> {
+        if self.native_paints() {
+            if let Some(id) = self.native.texture_id {
+                return Some(id);
+            }
+        }
+        self.viewport_texture.as_ref().map(|texture| texture.id())
+    }
+
+    /// Advance the native viewport's handshake with its worker thread.
+    ///
+    /// The scene build is slow (it compiles the terrain shaders), so it runs
+    /// off the UI thread; a DEM that arrives meanwhile waits in
+    /// `pending_load`.
+    fn poll_native_viewport(&mut self, ctx: &Context) {
+        let received = self.native.building.as_ref().map(|rx| rx.try_recv());
+        match received {
+            None | Some(Err(std::sync::mpsc::TryRecvError::Empty)) => {}
+            Some(Ok(Ok(viewport))) => {
+                self.native.building = None;
+                self.native.viewport = Some(viewport);
+                self.native.dirty = true;
+                self.push_log(
+                    false,
+                    "Native GPU viewport ready — the viewport now paints on the engine's own device (no readback, no PNG round-trip)".to_owned(),
+                );
+                ctx.request_repaint();
+            }
+            Some(Ok(Err(error))) => {
+                self.native.building = None;
+                self.native_failed(error);
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.native.building = None;
+                self.native_failed(
+                    "the native viewport thread exited while building the scene".to_owned(),
+                );
+            }
+        }
+        self.apply_pending_native_load();
+    }
+
+    /// Feed a DEM that arrived while the scene was still being built.
+    fn apply_pending_native_load(&mut self) {
+        let Some((path, span)) = self.native.pending_load.clone() else {
+            return;
+        };
+        if self.native.viewport.is_none() {
+            return;
+        }
+        self.native.pending_load = None;
+        self.load_native_dem(&path, span);
+    }
+
+    /// Record why the native path cannot paint, and hand the viewport back to
+    /// the bridge readback instead of leaving a blank panel.
+    fn native_failed(&mut self, error: String) {
+        self.release_native_texture();
+        self.native.viewport = None;
+        self.native.pending_load = None;
+        let already_reported = self.native.error.as_deref() == Some(error.as_str());
+        self.native.error = Some(error.clone());
+        if !already_reported {
+            self.push_error("Native viewport", error);
+        }
+        self.queue_viewport_render();
+    }
+
+    /// Drop the egui registration of the native texture.
+    fn release_native_texture(&mut self) {
+        let Some(id) = self.native.texture_id.take() else {
+            return;
+        };
+        if let Some(state) = self.native.wgpu.as_ref() {
+            state.renderer.write().free_texture(&id);
+        }
+        self.native.registered_generation = 0;
+    }
+
+    /// Mirror the document's DEM into the native scene. Queued when the scene
+    /// is still compiling.
+    fn load_native_dem(&mut self, path: &Path, span: f32) {
+        let loaded = self
+            .native
+            .viewport
+            .as_mut()
+            .map(|viewport| viewport.load_dem(path, span));
+        match loaded {
+            Some(Ok(())) => {
+                self.native.dirty = true;
+                // A fresh terrain re-derives its palette.
+                self.native.colormap_synced = None;
+                self.sync_native_colormap();
+            }
+            Some(Err(error)) => self.native_failed(error),
+            None => {
+                if self.native.building.is_some() {
+                    self.native.pending_load = Some((path.to_path_buf(), span));
+                }
+            }
+        }
+    }
+
+    /// Push the document's colormap into the native scene when it changed.
+    fn sync_native_colormap(&mut self) {
+        let wanted = self.project.colormap.clone();
+        if self.native.colormap_synced == wanted {
+            return;
+        }
+        let result = self
+            .native
+            .viewport
+            .as_mut()
+            .map(|viewport| viewport.set_colormap(wanted.as_deref()));
+        // Record the attempt either way: a rejected name keeps the previous
+        // palette and is reported once, not once per rendered frame.
+        self.native.colormap_synced = wanted;
+        self.native.dirty = true;
+        if let Some(Err(error)) = result {
+            self.push_error("Colormap", error);
+        }
+    }
+
+    /// Render the native scene into its offscreen target and keep the egui
+    /// registration in step. Does nothing when the view is unchanged.
+    fn render_native_viewport(&mut self, ctx: &Context) {
+        let Some(render_state) = self.native.wgpu.clone() else {
+            return;
+        };
+        if self.native.viewport.is_none() || self.scene_mode != SceneMode::Terrain {
+            return;
+        }
+        self.sync_native_colormap();
+
+        let size = self.viewport_rect.size();
+        let width = (size.x.round() as u32).max(1);
+        let height = (size.y.round() as u32).max(1);
+        let has_terrain = self
+            .native
+            .viewport
+            .as_ref()
+            .map(|viewport| viewport.has_terrain())
+            .unwrap_or(false);
+        if !has_terrain || width < 2 || height < 2 {
+            return;
+        }
+        if !self.native.dirty && self.native.size == (width, height) {
+            return;
+        }
+
+        let camera = self.project.camera;
+        let sun = self.project.sun;
+        let (result, generation, render_ms) = {
+            let viewport = match self.native.viewport.as_mut() {
+                Some(viewport) => viewport,
+                None => return,
+            };
+            viewport.set_view(&camera, &sun);
+            let result = viewport.render(width, height);
+            (
+                result,
+                viewport.texture_generation(),
+                viewport.last_render_ms(),
+            )
+        };
+        if let Err(error) = result {
+            self.native_failed(error);
+            return;
+        }
+        self.native.size = (width, height);
+        self.native.dirty = false;
+        self.last_frame_ms = Some(render_ms);
+
+        if self.native.texture_id.is_none() || generation != self.native.registered_generation {
+            let present = self
+                .native
+                .viewport
+                .as_ref()
+                .and_then(|viewport| viewport.present_view());
+            let Some(present) = present else {
+                return;
+            };
+            let mut renderer = render_state.renderer.write();
+            if let Some(stale) = self.native.texture_id.take() {
+                renderer.free_texture(&stale);
+            }
+            self.native.texture_id = Some(renderer.register_native_texture(
+                &render_state.device,
+                present,
+                eframe::wgpu::FilterMode::Linear,
+            ));
+            self.native.registered_generation = generation;
+        }
+        ctx.request_repaint();
     }
 
     // ------------------------------------------------------------ engine ops
@@ -1030,7 +1356,11 @@ impl StudioApp {
                 if self.scene_mode == SceneMode::Terrain {
                     // MapScene owns the viewport texture in its own mode.
                     self.viewport_texture = None;
-                    self.queue_viewport_render();
+                    if self.native_paints() {
+                        self.native.mark_dirty();
+                    } else {
+                        self.queue_viewport_render();
+                    }
                 }
                 if had_error {
                     self.set_status("Terrain parameters valid again");
@@ -1847,6 +2177,12 @@ impl StudioApp {
                 SceneMode::MapScene => studio_project::SCENE_MODE_MAPSCENE.to_owned(),
             };
             self.project_dirty = true;
+            // Entering terrain mode: the native scene (or the bridge) has to
+            // draw before the panel shows it. MapScene keeps its own frame.
+            if self.scene_mode == SceneMode::Terrain {
+                self.native.mark_dirty();
+                self.invalidate_viewport();
+            }
         }
         ui.add_space(8.0);
         match self.scene_mode {
@@ -3057,7 +3393,7 @@ impl StudioApp {
                 let size = self.viewport_rect.size();
                 let rect = self.viewport_rect;
 
-                if let Some(texture) = &self.viewport_texture {
+                if let Some(image_id) = self.viewport_image() {
                     let (paint_rect, response) =
                         ui.allocate_exact_size(size, egui::Sense::click_and_drag());
                     // U3 compare mode: A/B split against the last export.
@@ -3067,7 +3403,7 @@ impl StudioApp {
                             // Left of the split: current frame. Right: export.
                             if split_x > paint_rect.left() {
                                 ui.painter().image(
-                                    texture.id(),
+                                    image_id,
                                     egui::Rect::from_min_max(
                                         paint_rect.left_top(),
                                         egui::pos2(split_x.min(paint_rect.right()), paint_rect.bottom()),
@@ -3110,7 +3446,7 @@ impl StudioApp {
                             );
                         } else {
                             ui.painter().image(
-                                texture.id(),
+                                image_id,
                                 paint_rect,
                                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                                 Color32::WHITE,
@@ -3118,7 +3454,7 @@ impl StudioApp {
                         }
                     } else {
                         ui.painter().image(
-                            texture.id(),
+                            image_id,
                             paint_rect,
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             Color32::WHITE,
@@ -3650,7 +3986,11 @@ impl StudioApp {
         let Some(terrain) = &self.project.terrain else {
             return;
         };
-        self.project.camera.radius = (terrain.width.max(terrain.height) as f32) * 0.8;
+        // World scale, not pixels: the terrain spans `range * 6` world units
+        // (the bridge's and the native viewport's shared contract), and a
+        // fresh load frames it at 1.65x that span.
+        let span = (terrain.height_max - terrain.height_min).abs().max(1.0) * 6.0;
+        self.project.camera.radius = span * 1.65;
         self.push_camera();
     }
 
@@ -4145,6 +4485,7 @@ impl eframe::App for StudioApp {
         self.sync_window_title(ctx);
         self.handle_shortcuts(ctx);
         self.poll_engine_events(ctx);
+        self.poll_native_viewport(ctx);
         self.poll_lfs_fetch();
         self.tick_playback(ctx);
 
@@ -4153,6 +4494,9 @@ impl eframe::App for StudioApp {
         self.bottom_dock(ctx);
         self.left_panel(ctx);
         self.right_panel(ctx);
+        // M10: draw before laying the panel out, using the previous frame's
+        // viewport rect (a size change re-renders on the next frame).
+        self.render_native_viewport(ctx);
         self.viewport_panel(ctx);
         self.import_window(ctx);
         if let Some(action) = crate::ui::palette::window(ctx, &mut self.palette) {
@@ -4172,8 +4516,14 @@ impl eframe::App for StudioApp {
             self.persist_layout();
         }
 
-        // Kick the very first render once the GPU is up.
-        if self.gpu.is_some() && self.viewport_texture.is_none() && self.pending_render.is_none() {
+        // Kick the very first render once the GPU is up. With a live native
+        // viewport there is nothing to queue: it redraws only when its view
+        // changes (`invalidate_viewport` marks it dirty).
+        if !self.native_paints()
+            && self.gpu.is_some()
+            && self.viewport_texture.is_none()
+            && self.pending_render.is_none()
+        {
             self.request_viewport_render();
         }
         // Re-render when the viewport is resized.
@@ -4191,6 +4541,12 @@ impl eframe::App for StudioApp {
         }
         self.flush_params_validate();
         self.flush_pending_render();
+
+        // A native repaint that could not draw this frame (the viewport rect
+        // was not known yet, say) needs one more frame to land.
+        if self.native_paints() && self.native.dirty {
+            ctx.request_repaint();
+        }
     }
 }
 

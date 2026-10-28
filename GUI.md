@@ -2,7 +2,7 @@
 ## A Photoshop × QGIS × Blender-class desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests. Pushes go to `fork` (`adeerkhan/forge3d`); `origin` stays the upstream engine and is fetch-only.
-**Status header last updated:** 2026-10-27 (U0–U3 landed; `scene.compile` makes the document the recipe source; gallery resolves paths + discloses LFS fetches).
+**Status header last updated:** 2026-10-28 (U0–U4, M5, M9, M10 landed; `scene.compile` makes the document the recipe source; gallery resolves paths + discloses LFS fetches; the terrain viewport is GPU-shared with eframe).
 **Knowledge graph:** `.ua/knowledge-graph.json` covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (51 verification harnesses), and `studio/` (the app).
 
 ---
@@ -26,7 +26,7 @@ Build the desktop application Forge3D does not have: a professional workbench �
 
 - **Language:** Rust UI (egui/eframe **0.27**, pinned to match forge3d's wgpu 0.19) + an embedded-Python engine worker.
 - **Integration:** the worker thread embeds CPython (the engine checkout's `.venv`) and drives forge3d's certified, golden-tested Python entry points through one JSON dispatcher (`studio_dispatch`, 17 ops). Every upstream golden (`mapscene_*`, determinism, certificates) exercises exactly those entry points, so Studio renders are engine renders by construction.
-- **Why not pure Rust yet:** the native `TerrainScene` viewer path has drifted from the live pipeline and cannot render correctly today; repairing it is milestone M9. Until then the embedded-Python bridge is the correctness anchor and the viewport is a CPU readback.
+- **Why the engine is driven through embedded Python:** the certified, golden-tested `render_terrain_pbr_pom` path is what every recipe golden, certificate and determinism test exercises, so MapScene, exports and certificates go through it. The pure-Rust `TerrainScene` viewer path had drifted from the live pipeline; M9 repaired it (Z-up mesh mode, current bind groups, colour target) and M10 renders it into an offscreen texture on eframe's own wgpu device, so the interactive terrain viewport no longer round-trips pixels through Python.
 - **Targets:** Linux first (Fedora dev machine), Windows and macOS after packaging (M12).
 
 ### Design language
@@ -154,7 +154,7 @@ Validation stays asynchronous and honest: an edit schedules a debounced engine v
 
 ### 3.5 Viewport, tools, and the 3D gizmo
 
-- **Central viewport** shows the engine's frame (CPU readback today; the embedded GPU viewport is M10). Drag = orbit, middle-drag or Space-drag = pan, wheel = zoom, `F` = fit. Renders are debounced, so a drag shows the last frame and renders on gesture end.
+- **Central viewport** shows the engine's frame (terrain mode paints on the engine's own wgpu device through a shared texture; MapScene mode uses the bridge's certified frame). Drag = orbit, middle-drag or Space-drag = pan, wheel = zoom, `F` = fit. Renders are debounced, so a drag shows the last frame and renders on gesture end.
 - **3D navigation gizmo, top-right:** an axis triad drawn from the live camera basis, with six click zones (Blender-style) that snap to Top/Bottom/Front/Back/Left/Right, a centre zone for isometric, and drag-to-orbit. It reflects the *document's* camera, so it is also correct while a rig is playing. Pure maths, unit-tested without a GPU.
 - **HUD:** zoom percentage, cursor world coordinates, a QGIS-style scale bar, safe frame toggle, and a render-time chip. Nothing overlays the gizmo.
 - **Modes:** *Viewport* (default) and *Compare* (A/B split against the last saved frame, useful for parameter work).
@@ -401,13 +401,13 @@ Each milestone ends with: build green, `cargo fmt --check`, `clippy -D warnings`
 | M6 | **Path tracing & offline** | W4 ring 1: render-mode switch, offline accumulation with convergence, denoise; parity vs PT example outputs | M |
 | M7 | **Atmosphere / astro / smoke** | W4 ring 2: AETHER settings, `Time & place…`, smoke volume layers; example-backed acceptance runs | M |
 | M8 | **Cartography depth** | W2 second ring: furniture + plate composer, thematic editors, SVG export, **plus the terrain scatter/analysis/detail-normal items deferred from M4** | L |
-| M9 | **R1 native repair** | W8-R1: repair `TerrainScene`, restore the interactive viewer's terrain, pixel-parity harness | M |
-| M10 | **R2 embedded viewport** | W8-R2: continuous GPU-shared viewport replacing CPU readback; the gizmo becomes live | L |
+| M9 | **R1 native repair** *(landed)* | W8-R1: `TerrainScene::render_viewer_terrain` repaints correctly — Z-up mesh mode, cached per-terrain `ViewerResources`, Z-up sun direction matching `decode_lighting`, colormap LUTs in the engine's ramp encoding, world-span fitting; gate tests in `native_viewport.rs`/`native_viewer_path.rs` prove frames are byte-reproducible, terrain actually shades, and grazing light differs from overhead | M |
+| M10 | **R2 embedded viewport** *(landed)* | W8-R2: `studio_engine::NativeViewport` renders into an offscreen `Rgba8Unorm` target on eframe's device and registers its sRGB view with egui, so an orbit costs one render pass and no readback; the scene builds on a big-stack worker thread; colormap edits push into the live scene; MapScene keeps the bridge frame. Rendering stays on demand (a gesture end or a committed edit), not a free-running animation loop | L |
 | M11 | **Bundles, cache, compositor** | W5 second ring: bundle UI, Anamnesis inspector, render-pass compositor | M |
 | M12 | **Packaging** | W8-R6: bundled Python runtime, Linux packages, then Windows/macOS lanes with real device verification | L |
 | M13 | **Advanced extras** | SDF editor, splat-fused mode, inverse PT, precision demos — after their examples are exercised | L |
 
-M9/M10 can be pulled earlier if the readback viewport becomes the bottleneck for the U3 gizmo; the gizmo is designed to work either way.
+M9/M10 landed ahead of M6–M8 because the CPU readback was already the bottleneck for the U3 gizmo.
 
 ---
 

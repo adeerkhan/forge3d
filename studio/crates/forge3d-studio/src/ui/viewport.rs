@@ -297,10 +297,12 @@ mod tests {
 
     #[test]
     fn snap_camera_preserves_zoom_and_target() {
-        let mut current = CameraParams::default();
-        current.radius = 1234.0;
-        current.target_x = 5.0;
-        current.target_z = -7.0;
+        let current = CameraParams {
+            radius: 1234.0,
+            target_x: 5.0,
+            target_z: -7.0,
+            ..CameraParams::default()
+        };
         let snapped = snap_camera(GizmoZone::PosY, &current);
         assert!(approx(snapped.theta_deg, 2.0), "top is theta ~0");
         assert!(approx(snapped.radius, 1234.0));
@@ -341,9 +343,11 @@ mod tests {
 
     #[test]
     fn world_width_and_zoom_percent_match_camera_maths() {
-        let mut camera = CameraParams::default();
-        camera.radius = 100.0;
-        camera.fov_deg = 60.0;
+        let camera = CameraParams {
+            radius: 100.0,
+            fov_deg: 60.0,
+            ..CameraParams::default()
+        };
         let width = world_width_at_target(&camera);
         assert!(approx(width, 2.0 * 100.0 * (30f32).to_radians().tan()));
         assert!(approx(zoom_percent(100.0, 100.0), 100.0));

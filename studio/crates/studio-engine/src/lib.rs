@@ -20,6 +20,10 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+pub mod native_viewport;
+
+pub use native_viewport::NativeViewport;
+
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use studio_project::{CameraParams, SunParams};

@@ -36,6 +36,14 @@ pub struct TerrainScene {
     pub(super) sky_fallback_view: wgpu::TextureView,
     /// STUDIO-FORK (M9/R1): viewer-path colormap LUT, built once on demand.
     pub(super) viewer_colormap_view: Option<wgpu::TextureView>,
+    /// Tracked owner of `viewer_colormap_view`, kept so the ledger accounts
+    /// for the palette while it is live.
+    pub(super) viewer_colormap_texture: Option<TrackedTexture>,
+    /// Colormap the viewer LUT was built from (`None` = Studio's relief ramp).
+    pub(super) viewer_colormap_name: Option<String>,
+    /// STUDIO-FORK (M10): viewer frame resources, reused across frames until
+    /// the terrain, the colormap or the target size changes.
+    pub(super) viewer_resources: Option<super::viewer::ViewerResources>,
     pub(super) _atmosphere_scattering_fallback_texture: TrackedTexture,
     pub(super) atmosphere_scattering_fallback_view: wgpu::TextureView,
     pub(super) _height_curve_identity_texture: TrackedTexture,
@@ -211,6 +219,13 @@ pub struct ViewerTerrainData {
     pub domain: (f32, f32),
     pub heightmap_texture: TrackedTexture,
     pub heightmap_view: wgpu::TextureView,
+    /// Horizontal world extent the shader maps `uv` onto. Defaults to the
+    /// DEM's pixel span; Studio overrides it to the document's terrain span.
+    pub world_span: f32,
+    /// Vertical exaggeration applied to raw DEM heights.
+    pub z_scale: f32,
+    /// Ground-plane point the orbit camera looks at (shader XY plane).
+    pub cam_target: [f32; 2],
     pub cam_radius: f32,
     pub cam_phi_deg: f32,
     pub cam_theta_deg: f32,

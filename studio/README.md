@@ -30,6 +30,10 @@ studio/
   `Session(window=False)` → `TerrainRenderer.render_terrain_pbr_pom` →
   `Frame.save`. One persistent session; renders ship RGBA back to the UI
   through a command/event channel, so the GUI never blocks.
+- **Native viewport** (`studio-engine::NativeViewport`): the interactive
+  terrain frame, rendered by `forge3d::terrain::TerrainScene` into an
+  offscreen texture on eframe's wgpu device and handed to egui as a texture
+  (no readback). MapScene, exports and certificates stay on the bridge.
 - **Projects** (`studio-project`): versioned JSON documents (`*.forge3d`)
   storing dataset references (paths, never pixel data), camera, sun, and
   export settings. Future versions are rejected; missing datasets surface as
@@ -41,10 +45,11 @@ The binary links libpython regardless (forge3d depends on pyo3 even as a
 pure-Rust library), so embedding costs nothing extra. The maintained,
 upstream-verified terrain renderer is the Python-driven
 `render_terrain_pbr_pom` path — every recipe golden and determinism test
-exercises exactly it. The pure-Rust `TerrainScene` viewer path has drifted
-from the live pipeline (bind-group layout grew to 23 entries, depth
-attachment, camera plumbing) and cannot render correctly today. Repairing
-that drift for a pure-Rust in-process viewport is GUI.md Milestone 5.
+exercises exactly it, so MapScene, exports and certificates use it. The
+pure-Rust `TerrainScene` viewer path had drifted from the live pipeline
+(bind-group layout grew to 23 entries, depth attachment, camera plumbing)
+and could not render correctly; M9 repaired that and M10 uses it for the
+interactive frame (see Status).
 
 The embedded interpreter uses the engine checkout's `.venv` (forge3d +
 numpy must be importable — see below). It never runs arbitrary user Python;
@@ -237,10 +242,35 @@ Milestones from GUI.md section 12:
       via `diagnostics.snapshot`; `Tools ▸ Determinism check…` renders the
       current frame twice and compares SHA-256 (parity test
       `certificate_lifecycle`).
-- [ ] **5. Embedded viewport** — current viewport is a CPU readback of the
-      engine's render (~100–300 ms/frame, on-demand, not continuous).
-      True embedding = repairing the native `TerrainScene` drift or sharing
-      wgpu devices with eframe.
+- [x] **M9. R1 native viewer repair** — the viewer used to draw the
+      shader's screen mode (a 1-unit fullscreen triangle) with a Y-up
+      camera, so it painted nothing that resembled terrain. `TerrainScene`'s
+      viewer path now draws in mesh mode (Z-up grid, heights on +Z), builds
+      its bind groups/depth/fallbacks once per terrain into a cached
+      `ViewerResources` (an orbit is two uniform writes and one pass), maps
+      the sun with the engine's own convention
+      (`(cos el·cos az, cos el·sin az, sin el)`, azimuth 0 = +X), sets
+      colormap LUTs in the same ramp encoding the export path samples, and
+      fits the camera to the DEM's world span. Gate tests prove two renders
+      of the same view are byte-identical, a colormap switch changes pixels,
+      an unknown colormap is rejected without touching the frame, and a 5°
+      sun still lights the terrain while 80° looks different (i.e. the
+      light really is Z-up).
+- [x] **M10. GPU-shared viewport** — `studio_engine::NativeViewport`
+      renders the repaired `TerrainScene` into an `Rgba8Unorm` texture on
+      eframe's own wgpu device and registers its sRGB view with egui
+      (`register_native_texture`), so the terrain viewport paints the
+      engine's frame directly: no readback, no PNG round-trip, no Python in
+      the frame loop. The scene builds (and compiles its shaders) on a
+      64 MB-stack worker thread that the UI polls; a DEM arriving meanwhile
+      is queued. Colormap changes are pushed into the live scene, and the
+      camera/sun come from the same document values the bridge renders with.
+      MapScene mode keeps the certified bridge frame, so `native_paints()`
+      is terrain-mode only.
+- [x] **5. Embedded viewport** — done by M9 + M10: terrain frames are drawn
+      on the engine's device and presented as an egui texture. Frames are
+      still drawn on demand (gesture end, committed parameter edit, resize)
+      rather than at a fixed frame rate.
 - [ ] **6. Packaging** — Linux-first; Windows/macOS untested (libpython
       embedding and window setup need per-platform work).
 
@@ -262,10 +292,14 @@ Milestones from GUI.md section 12:
   `Scene ▸ Add layer` with their renderers (U2/U3).
 - The gallery's Tier-A set is five scenes; the other 45 examples are listed
   with their unlock milestone (U2/U3/M5-M11) rather than rendered.
-- The layer document does not yet compile to a `SceneRecipe`
-  (`scene.compile`), so MapScene still builds its recipe from a template in
-  the Scene tab.
-- Viewport renders on demand (camera/sun changes), not continuously.
+- Viewport frames are drawn on demand (camera/sun changes, resize, committed
+  edits), not at a free-running frame rate. The exception is MapScene mode,
+  which renders through the bridge on request.
+- Terrain mode's viewport is the native `TerrainScene` path (M9/M10); its
+  palette comes from the engine's colormap ramps, so a parameter the native
+  path does not read (e.g. the P6.1 colour-space toggles) shows in exports
+  but not in the interactive frame. MapScene mode and exports remain the
+  certified comparison point.
 - One terrain dataset per scene; no mesh/point-cloud layers yet.
 - No cancel support for in-flight renders (GUI.md 8: they are never
   reported as successful cancellations — the UI simply waits).
