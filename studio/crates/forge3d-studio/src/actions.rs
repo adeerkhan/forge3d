@@ -27,6 +27,14 @@ gpui_kit::actions!(
         DuplicateLayer,
         DeleteLayer,
         ToggleLayerVisibility,
+        ToggleLayerLock,
+        RenameLayer,
+        GroupLayers,
+        UngroupLayers,
+        MoveLayerUp,
+        MoveLayerDown,
+        MoveLayerToTop,
+        MoveLayerToBottom,
         ToggleTheme,
         FitView,
         CameraTop,
@@ -93,6 +101,14 @@ macro_rules! studio_action_table {
             DuplicateLayer, "Duplicate layer", Edit, true, Some("ctrl-d");
             DeleteLayer, "Delete layer", Edit, false, Some("delete");
             ToggleLayerVisibility, "Toggle visibility", Layer, false, None;
+            ToggleLayerLock, "Lock / unlock", Layer, false, Some("ctrl-shift-l");
+            RenameLayer, "Rename…", Layer, false, Some("f2");
+            GroupLayers, "Group layers", Layer, true, Some("ctrl-g");
+            UngroupLayers, "Ungroup", Layer, false, Some("ctrl-shift-g");
+            MoveLayerUp, "Move up", Layer, true, Some("ctrl-shift-up");
+            MoveLayerDown, "Move down", Layer, false, Some("ctrl-shift-down");
+            MoveLayerToTop, "To top", Layer, false, None;
+            MoveLayerToBottom, "To bottom", Layer, false, None;
             FitView, "Fit view", View, false, Some("f");
             CameraTop, "Top", View, true, Some("7");
             CameraFront, "Front", View, false, Some("1");
@@ -299,6 +315,58 @@ impl StudioAction for CameraIsometric {
 impl StudioAction for ResetCamera {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.reset_camera(cx);
+    }
+}
+
+impl StudioAction for ToggleLayerLock {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        if let Some(id) = studio.primary_layer() {
+            studio.toggle_layer_lock(id, cx);
+        }
+    }
+}
+
+impl StudioAction for RenameLayer {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        if let Some(id) = studio.primary_layer() {
+            studio.begin_rename(id, cx);
+        }
+    }
+}
+
+impl StudioAction for GroupLayers {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.group_selection(cx);
+    }
+}
+
+impl StudioAction for UngroupLayers {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.ungroup_selection(cx);
+    }
+}
+
+impl StudioAction for MoveLayerUp {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.move_layer(-1, cx);
+    }
+}
+
+impl StudioAction for MoveLayerDown {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.move_layer(1, cx);
+    }
+}
+
+impl StudioAction for MoveLayerToTop {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.move_layer_to_edge(true, cx);
+    }
+}
+
+impl StudioAction for MoveLayerToBottom {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.move_layer_to_edge(false, cx);
     }
 }
 

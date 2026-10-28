@@ -9,7 +9,6 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Icon, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use studio_project::document::LayerKind;
 
 use crate::state::Studio;
 
@@ -99,137 +98,15 @@ fn stepper(
         .into_any_element()
 }
 
-fn kind_icon(kind: LayerKind) -> IconName {
-    match kind {
-        LayerKind::Terrain => IconName::Mountain,
-        LayerKind::RasterOverlay => IconName::Image,
-        LayerKind::Smoke => IconName::Cloudy,
-        LayerKind::Vector => IconName::Spline,
-        LayerKind::Buildings => IconName::Building,
-        LayerKind::Labels => IconName::Tag,
-        LayerKind::PointCloud => IconName::Cloud,
-        LayerKind::Mesh => IconName::Box,
-        LayerKind::Furniture => IconName::Map,
-        LayerKind::Group => IconName::Folder,
-        LayerKind::Reference => IconName::File,
-    }
-}
-
 // ------------------------------------------------------------------- layers
 
-pub fn layers(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> AnyElement {
-    let Some(studio_entity) = upgrade(studio) else {
-        return div().into_any_element();
-    };
-    let state = studio_entity.read(cx);
-    let rows = state.project.document.rows();
-    let selection = state.selection.clone();
-
-    let mut list = v_flex().w_full();
-    if rows.is_empty() {
-        list = list.child(
-            div()
-                .p_3()
-                .text_xs()
-                .text_color(cx.theme().colors.muted_foreground)
-                .child("No layers yet. File ▸ Import DEM… starts a scene."),
-        );
+/// The layer tree lives in its own module; this keeps the dock's panel list in
+/// one place.
+pub fn layers(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
+    match studio.upgrade() {
+        Some(entity) => crate::ui::layers::layers(&entity, window, cx),
+        None => div().into_any_element(),
     }
-
-    for row in rows {
-        let Some(layer) = state.project.document.layer(row.id).cloned() else {
-            continue;
-        };
-        let selected = selection.contains(&row.id);
-        let effective = state.project.document.effective_visible(row.id);
-        let studio_click = studio.clone();
-        let studio_eye = studio.clone();
-        let id = row.id;
-
-        let background = if selected {
-            cx.theme().colors.selection
-        } else {
-            cx.theme().colors.background
-        };
-
-        list = list.child(
-            h_flex()
-                .id(format!("layer-row-{}", id.0))
-                .h(px(24.))
-                .w_full()
-                .gap_2()
-                .pl(px(6.0 + 12.0 * row.depth as f32))
-                .pr_2()
-                .bg(background)
-                .cursor_pointer()
-                .on_click(move |event, _, cx| {
-                    let additive = event.modifiers().shift;
-                    let _ = studio_click.update(cx, |studio, cx| studio.select(id, additive, cx));
-                })
-                .child(
-                    Icon::new(kind_icon(layer.kind))
-                        .size(px(13.))
-                        .text_color(if effective {
-                            cx.theme().colors.foreground
-                        } else {
-                            cx.theme().colors.muted_foreground
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .text_xs()
-                        .text_ellipsis()
-                        .text_color(if effective {
-                            cx.theme().colors.foreground
-                        } else {
-                            cx.theme().colors.muted_foreground
-                        })
-                        .child(layer.name.clone()),
-                )
-                .child(
-                    Button::new(format!("eye-{}", id.0))
-                        .icon(if layer.visible {
-                            IconName::Eye
-                        } else {
-                            IconName::EyeOff
-                        })
-                        .xsmall()
-                        .ghost()
-                        .on_click(move |_, _, cx| {
-                            let _ = studio_eye
-                                .update(cx, |studio, cx| studio.toggle_layer_visible(id, cx));
-                        }),
-                ),
-        );
-    }
-
-    v_flex()
-        .w_full()
-        .child(
-            h_flex()
-                .justify_between()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(cx.theme().colors.border)
-                .child(group_label(
-                    format!("{} layer(s)", state.project.document.len()),
-                    cx,
-                ))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(if selection.len() > 1 {
-                            format!("{} selected", selection.len())
-                        } else {
-                            String::new()
-                        }),
-                ),
-        )
-        .child(list)
-        .into_any_element()
 }
 
 // ---------------------------------------------------------------- inspector

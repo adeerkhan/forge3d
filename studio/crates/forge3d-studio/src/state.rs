@@ -24,6 +24,7 @@ use studio_project::{CameraParams, DocHistory, LayerId, Project, SunParams};
 
 use crate::actions::*;
 use crate::ui;
+use crate::ui::layers::{DropZone, LayerPanel};
 use crate::ui::params::{ParamForm, ParamKind};
 
 /// One line of the engine log.
@@ -91,6 +92,9 @@ pub struct Studio {
     pub params_error: Option<String>,
     pub params_form: ParamForm,
 
+    /// Layers panel UI state (anchor, rename, drop preview, collapsed groups).
+    pub layers: LayerPanel,
+
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
     pub last_export: Option<PathBuf>,
@@ -141,6 +145,7 @@ impl Studio {
             params_schema: None,
             params_error: None,
             params_form: ParamForm::default(),
+            layers: LayerPanel::default(),
             focus_handle,
             drag: None,
             last_export: None,
@@ -448,6 +453,10 @@ impl Studio {
         let before = self.project.document.clone();
         if let Some(layer) = self.project.document.layer_mut(id) {
             layer.visible = !layer.visible;
+            let visible = layer.visible;
+            if self.project.document.terrain_layer().map(|layer| layer.id) == Some(id) {
+                self.project.terrain_visible = visible;
+            }
         }
         self.history.record(before);
         self.project_dirty = true;
@@ -738,6 +747,266 @@ impl Studio {
         if let Err(error) = std::fs::write(&path, json) {
             self.push_log(true, format!("Could not save layout: {error}"));
         }
+    }
+
+    // ------------------------------------------------------------------ layers
+
+    /// Document rows, minus the children of collapsed groups.
+    pub fn visible_rows(&self) -> Vec<studio_project::Row> {
+        let collapsed = &self.layers.collapsed;
+        self.project
+            .document
+            .rows()
+            .into_iter()
+            .filter(|row| {
+                if collapsed.is_empty() {
+                    return true;
+                }
+                !self
+                    .project
+                    .document
+                    .ancestors(row.id)
+                    .iter()
+                    .any(|ancestor| collapsed.contains(ancestor))
+            })
+            .collect()
+    }
+
+    pub fn toggle_layer_collapsed(&mut self, id: LayerId, cx: &mut Context<Self>) {
+        if !self.layers.collapsed.remove(&id) {
+            self.layers.collapsed.insert(id);
+        }
+        cx.notify();
+    }
+
+    /// A click in the layer tree: replace, extend a range (shift) or toggle one
+    /// row (ctrl/cmd).
+    pub fn select_layer_row(
+        &mut self,
+        id: LayerId,
+        range: bool,
+        additive: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if range {
+            if let Some(anchor) = self.layers.anchor {
+                let rows = self.visible_rows();
+                let order: Vec<LayerId> = rows.iter().map(|row| row.id).collect();
+                if let (Some(from), Some(to)) = (
+                    order.iter().position(|candidate| *candidate == anchor),
+                    order.iter().position(|candidate| *candidate == id),
+                ) {
+                    let (low, high) = if from <= to { (from, to) } else { (to, from) };
+                    self.selection = order[low..=high].to_vec();
+                    cx.notify();
+                    return;
+                }
+            }
+        } else if additive {
+            if let Some(index) = self.selection.iter().position(|other| *other == id) {
+                self.selection.remove(index);
+            } else {
+                self.selection.push(id);
+            }
+            self.layers.anchor = Some(id);
+            cx.notify();
+            return;
+        }
+        self.selection = vec![id];
+        self.layers.anchor = Some(id);
+        self.layers.dragging = None;
+        self.layers.drop_target = None;
+        cx.notify();
+    }
+
+    /// Start an inline rename. The panel creates the input (it has a window)
+    /// and hands it back through [`attach_rename_input`](Self::attach_rename_input),
+    /// so the text and cursor survive re-renders.
+    pub fn begin_rename(&mut self, id: LayerId, cx: &mut Context<Self>) {
+        if self.project.document.layer(id).is_none() {
+            return;
+        }
+        self.selection = vec![id];
+        self.layers.renaming = Some(id);
+        self.layers.rename_input = None;
+        self.layers.rename_subscription = None;
+        cx.notify();
+    }
+
+    /// Bind the freshly created rename box: Enter or blur commits, and a
+    /// cancelled rename (panel closed) just drops the box.
+    pub fn attach_rename_input(
+        &mut self,
+        id: LayerId,
+        input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) {
+        let subscription =
+            cx.subscribe(
+                &input,
+                move |this, input, event: &InputEvent, cx| match event {
+                    InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                        let text = input.read(cx).value().to_string();
+                        this.commit_rename(id, &text, cx);
+                    }
+                    _ => {}
+                },
+            );
+        self.layers.rename_input = Some(input);
+        self.layers.rename_subscription = Some(subscription);
+        cx.notify();
+    }
+
+    fn commit_rename(&mut self, id: LayerId, name: &str, cx: &mut Context<Self>) {
+        let trimmed = name.trim().to_owned();
+        if !trimmed.is_empty() {
+            let before = self.project.document.clone();
+            if let Some(layer) = self.project.document.layer_mut(id) {
+                layer.name = trimmed;
+            }
+            self.history.record(before);
+            self.project_dirty = true;
+        }
+        self.layers.renaming = None;
+        self.layers.rename_input = None;
+        cx.notify();
+    }
+
+    /// A drag started: snapshot the document so the whole drag is one undo step.
+    pub fn begin_layer_drag(&mut self, id: LayerId, cx: &mut Context<Self>) {
+        self.layers.dragging = Some(id);
+        self.layers.drag_before = Some(self.project.document.clone());
+        self.layers.drop_target = None;
+        cx.notify();
+    }
+
+    /// The pointer is over a row while dragging: reorder to match, so the tree
+    /// previews the drop. The snapshot is recorded on the first real move only.
+    pub fn preview_drop(&mut self, target: LayerId, zone: DropZone, cx: &mut Context<Self>) {
+        let Some(dragged) = self.layers.dragging else {
+            return;
+        };
+        if dragged == target || self.layers.drop_target == Some((target, zone)) {
+            return;
+        }
+        let target_is_group = self
+            .project
+            .document
+            .layer(target)
+            .map(|layer| layer.kind.is_group())
+            .unwrap_or(false);
+        let moved = match zone {
+            DropZone::Into if target_is_group => self.project.document.move_into(dragged, target),
+            DropZone::Before => self.project.document.move_beside(dragged, target, false),
+            DropZone::After => self.project.document.move_beside(dragged, target, true),
+            // Into a non-group behaves like after: a leaf cannot hold children.
+            DropZone::Into => self.project.document.move_beside(dragged, target, true),
+        };
+        self.layers.drop_target = Some((target, zone));
+        if moved {
+            if let Some(before) = self.layers.drag_before.take() {
+                self.history.record(before);
+            }
+            self.project_dirty = true;
+            self.invalidate_viewport(cx);
+            self.set_status("Reordered layers");
+        }
+        cx.notify();
+    }
+
+    pub fn toggle_layer_lock(&mut self, id: LayerId, cx: &mut Context<Self>) {
+        let before = self.project.document.clone();
+        if let Some(layer) = self.project.document.layer_mut(id) {
+            layer.locked = !layer.locked;
+        }
+        self.history.record(before);
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn group_selection(&mut self, cx: &mut Context<Self>) {
+        if self.selection.len() < 1 {
+            return;
+        }
+        let before = self.project.document.clone();
+        let ids = self.selection.clone();
+        if let Some(group) = self.project.document.group(&ids, "Group") {
+            self.history.record(before);
+            self.selection = vec![group];
+            self.layers.anchor = Some(group);
+            self.project_dirty = true;
+            self.set_status("Grouped layers");
+        }
+        cx.notify();
+    }
+
+    pub fn ungroup_selection(&mut self, cx: &mut Context<Self>) {
+        let groups: Vec<LayerId> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.project
+                    .document
+                    .layer(*id)
+                    .map(|layer| layer.kind.is_group())
+                    .unwrap_or(false)
+            })
+            .collect();
+        if groups.is_empty() {
+            return;
+        }
+        let before = self.project.document.clone();
+        for group in groups {
+            self.project.document.ungroup(group);
+        }
+        self.history.record(before);
+        self.selection.clear();
+        self.project_dirty = true;
+        self.set_status("Ungrouped");
+        cx.notify();
+    }
+
+    pub fn move_layer(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let Some(id) = self.primary_layer() else {
+            return;
+        };
+        let before = self.project.document.clone();
+        if self.project.document.move_by(id, delta) {
+            self.history.record(before);
+            self.project_dirty = true;
+            self.invalidate_viewport(cx);
+        }
+        cx.notify();
+    }
+
+    pub fn move_layer_to_edge(&mut self, top: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.primary_layer() else {
+            return;
+        };
+        let before = self.project.document.clone();
+        if self.project.document.move_to_edge(id, top) {
+            self.history.record(before);
+            self.project_dirty = true;
+            self.invalidate_viewport(cx);
+        }
+        cx.notify();
+    }
+
+    /// Opacity belongs to the selection (Photoshop), stepped in tenths.
+    pub fn step_selection_opacity(&mut self, delta: f32, cx: &mut Context<Self>) {
+        if self.selection.is_empty() {
+            return;
+        }
+        let before = self.project.document.clone();
+        for id in self.selection.clone() {
+            if let Some(layer) = self.project.document.layer_mut(id) {
+                layer.opacity = (layer.opacity + delta).clamp(0.0, 1.0);
+            }
+        }
+        self.history.record(before);
+        self.project_dirty = true;
+        cx.notify();
     }
 
     // ------------------------------------------------------------------ params
