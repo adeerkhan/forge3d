@@ -264,6 +264,24 @@ Milestones from GUI.md section 12:
       and export, and PT convergence, repeatability, seed sensitivity and
       certificate validity.
 
+- [x] **M7. Atmosphere / astro / smoke** — atmosphere (`Scene ▸ Environment ▸
+      Atmosphere…`) drives the engine's AETHER sky: LUT bake job reporting
+      provenance (SHA-256, byte size, dimensions), an equirect HDR written to
+      a per-engine path and bound as the IBL via `IBL.from_hdr`, rebuilt when
+      the sun elevation changes; project format v4 adds `atmosphere`
+      (`enabled`, `intensity`, turbidity, ozone, mie g, ground albedo,
+      scattering orders). `Time & place…` asks SIDERA for the Sun and Moon
+      (body position, phase, Delta T, sidereal time) and converts the compass
+      azimuth to the renderer frame with `A − 90`, matching MapScene; a
+      below-horizon Sun is clamped to elevation 0 with an explicit warning.
+      Smoke volume layers (`.npy` density or `.npz`) load into the bridge and
+      render as a plan-view plate composited over the finished terrain frame,
+      reported with `certificate_covers: "terrain pass only"`; a failed load
+      clears any stale volume. Project format v4 also adds `observation` and
+      `smoke`. Gate: `parity_atmosphere.rs` (LUT provenance, env changes
+      pixels + SHA, HDR RLE structure, SIDERA angles, smoke composite and
+      failed-load clearance).
+
 - [x] **M9. R1 native viewer repair** — the viewer used to draw the
       shader's screen mode (a 1-unit fullscreen triangle) with a Y-up
       camera, so it painted nothing that resembled terrain. `TerrainScene`'s
