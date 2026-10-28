@@ -242,6 +242,28 @@ Milestones from GUI.md section 12:
       via `diagnostics.snapshot`; `Tools ▸ Determinism check…` renders the
       current frame twice and compares SHA-256 (parity test
       `certificate_lifecycle`).
+- [x] **M6. Path tracing & offline** — `Render ▸ Render mode ▸` switches
+      the still between **Raster (PBR + POM)** and **Path traced (hybrid
+      ReSTIR)** and is saved with the project (format v3; older projects load
+      as raster). Raster quality uses the engine's offline accumulation
+      (`forge3d.render_offline`: jittered samples, AOVs when denoising, the
+      reported `samples_used`/`final_p95_delta`/`converged_ratio` shown
+      verbatim); path tracing drives `render_terrain_poster`
+      (spp/min/max frames, variance threshold, tile size, seed, environment
+      intensity) with an albedo map built from the document's colormap ramp,
+      sRGB→linear, capped at 2048² with the fallback stated in the note. The
+      denoiser list comes from `offline.capabilities`, and asking for a
+      denoiser the engine does not have is refused with the engine's own
+      message rather than silently downgraded. Both modes stream real
+      progress (tiles/frames) from inside the engine through a PyO3 sink into
+      the status bar. Quality modes are explicit stills: the native viewport
+      stops painting, camera motion only marks the still stale, and a render
+      happens on mode change, DEM load, a parameter change, resize,
+      `Ctrl+Shift+Q` or `Ctrl+R`. Gate: `parity_quality.rs` checks
+      capabilities honesty, accumulation/denoise provenance on a real render
+      and export, and PT convergence, repeatability, seed sensitivity and
+      certificate validity.
+
 - [x] **M9. R1 native viewer repair** — the viewer used to draw the
       shader's screen mode (a 1-unit fullscreen triangle) with a Y-up
       camera, so it painted nothing that resembled terrain. `TerrainScene`'s
@@ -295,6 +317,26 @@ Milestones from GUI.md section 12:
 - Viewport frames are drawn on demand (camera/sun changes, resize, committed
   edits), not at a free-running frame rate. The exception is MapScene mode,
   which renders through the bridge on request.
+- A quality mode (path traced, or raster with offline accumulation) shows a
+  **still**, not a live frame: the native viewport stops painting, camera
+  motion only marks it stale, and the next still is a full bridge render on
+  mode change, DEM load, a parameter edit, resize, `Ctrl+Shift+Q` or `Ctrl+R`.
+  That is deliberate — a progressive render cannot answer a drag — but it
+  means orbiting in a quality mode does not update the image until the still
+  is re-requested.
+- Path-traced stills take their albedo from the document's colormap ramp
+  (sRGB→linear) at up to 2048² texels; a larger DEM gets the downsampled map
+  and the quality window says so, rather than implying the full-resolution
+  albedo was used.
+- On the bundled 256² mini DEM at 128×80 the 1-, 2- and 4-sample offline
+  stills are pixel-identical (the subpixel jitter rounds to the same 8-bit
+  values), so `parity_quality.rs` asserts the engine's reported provenance
+  (`samples_used`, `target_samples`, `denoiser_used`) instead of a pixel
+  difference; larger DEMs/outputs do differ. Path-traced certificate digests
+  can also differ between the first and a later still in one process, because
+  the process-lifetime hybrid dummy storage buffer enters the allocation
+  ledger on first use — the test asserts pixels, frame count and signature
+  validity rather than digest equality.
 - Terrain mode's viewport is the native `TerrainScene` path (M9/M10); its
   palette comes from the engine's colormap ramps, so a parameter the native
   path does not read (e.g. the P6.1 colour-space toggles) shows in exports

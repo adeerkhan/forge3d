@@ -2,7 +2,7 @@
 ## A Photoshop × QGIS × Blender-class desktop application for the Forge3D engine
 
 **Repository:** this fork (`adeerkhan/forge3d`), directory `studio/` — fork-only work, not intended for upstream pull requests. Pushes go to `fork` (`adeerkhan/forge3d`); `origin` stays the upstream engine and is fetch-only.
-**Status header last updated:** 2026-10-28 (U0–U4, M5, M9, M10 landed; `scene.compile` makes the document the recipe source; gallery resolves paths + discloses LFS fetches; the terrain viewport is GPU-shared with eframe).
+**Status header last updated:** 2026-10-28 (U0–U4, M5, M6, M9, M10 landed; `scene.compile` makes the document the recipe source; gallery resolves paths + discloses LFS fetches; the terrain viewport is GPU-shared with eframe; render mode switches between raster accumulation and hybrid-ReSTIR path tracing with live progress).
 **Knowledge graph:** `.ua/knowledge-graph.json` covers the feature surface this plan migrates: `python/forge3d` (public API = the feature list), `examples/` (51 verification harnesses), and `studio/` (the app).
 
 ---
@@ -25,7 +25,7 @@ Build the desktop application Forge3D does not have: a professional workbench �
 ### Application shape
 
 - **Language:** Rust UI (egui/eframe **0.27**, pinned to match forge3d's wgpu 0.19) + an embedded-Python engine worker.
-- **Integration:** the worker thread embeds CPython (the engine checkout's `.venv`) and drives forge3d's certified, golden-tested Python entry points through one JSON dispatcher (`studio_dispatch`, 17 ops). Every upstream golden (`mapscene_*`, determinism, certificates) exercises exactly those entry points, so Studio renders are engine renders by construction.
+- **Integration:** the worker thread embeds CPython (the engine checkout's `.venv`) and drives forge3d's certified, golden-tested Python entry points through one JSON dispatcher (`studio_dispatch`, 24 ops). Every upstream golden (`mapscene_*`, determinism, certificates) exercises exactly those entry points, so Studio renders are engine renders by construction.
 - **Why the engine is driven through embedded Python:** the certified, golden-tested `render_terrain_pbr_pom` path is what every recipe golden, certificate and determinism test exercises, so MapScene, exports and certificates go through it. The pure-Rust `TerrainScene` viewer path had drifted from the live pipeline; M9 repaired it (Z-up mesh mode, current bind groups, colour target) and M10 renders it into an offscreen texture on eframe's own wgpu device, so the interactive terrain viewport no longer round-trips pixels through Python.
 - **Targets:** Linux first (Fedora dev machine), Windows and macOS after packaging (M12).
 
@@ -154,7 +154,7 @@ Validation stays asynchronous and honest: an edit schedules a debounced engine v
 
 ### 3.5 Viewport, tools, and the 3D gizmo
 
-- **Central viewport** shows the engine's frame (terrain mode paints on the engine's own wgpu device through a shared texture; MapScene mode uses the bridge's certified frame). Drag = orbit, middle-drag or Space-drag = pan, wheel = zoom, `F` = fit. Renders are debounced, so a drag shows the last frame and renders on gesture end.
+- **Central viewport** shows the engine's frame (terrain mode paints on the engine's own wgpu device through a shared texture; MapScene mode uses the bridge's certified frame). Drag = orbit, middle-drag or Space-drag = pan, wheel = zoom, `F` = fit. Renders are debounced, so a drag shows the last frame and renders on gesture end. In a quality mode (path traced, or raster with offline accumulation) the viewport holds a **still** instead: camera motion only marks it stale, and the image comes from the bridge's offline/path-traced render on mode change, terrain load, a parameter change, resize, `Ctrl+Shift+Q` or `Ctrl+R`, with the badge and status chip naming the mode.
 - **3D navigation gizmo, top-right:** an axis triad drawn from the live camera basis, with six click zones (Blender-style) that snap to Top/Bottom/Front/Back/Left/Right, a centre zone for isometric, and drag-to-orbit. It reflects the *document's* camera, so it is also correct while a rig is playing. Pure maths, unit-tested without a GPU.
 - **HUD:** zoom percentage, cursor world coordinates, a QGIS-style scale bar, safe frame toggle, and a render-time chip. Nothing overlays the gizmo.
 - **Modes:** *Viewport* (default) and *Compare* (A/B split against the last saved frame, useful for parameter work).
@@ -281,8 +281,8 @@ Engine surface: `path_tracing.py`, `offline.py`, `denoise.py`, `denoise_oidn.py`
 
 | Studio capability | Exposed as | Harness example |
 |---|---|---|
-| Path-traced renders (hybrid ReSTIR), offline accumulation | `Render ▸ Render mode` + accumulation in the status bar/Statistics | `offline.py`, `southeast_europe_population_pt_native.py`, `swiss_landcover_pt_oblique.py` |
-| Denoising (A-trous, OIDN when present) | Post-render toggle in `Render ▸` | `denoise.py`, `denoise_oidn.py` |
+| Path-traced renders (hybrid ReSTIR), offline accumulation *(landed 2026-10-28: `Render ▸ Render mode ▸` Raster / Path traced, persisted per project; raster offline uses `render_offline` with samples + denoiser, PT uses `render_terrain_poster`; progress streams from the engine into the status bar/Statistics)* | `Render ▸ Render mode` + quality window in the status bar/Statistics | `offline.py`, `southeast_europe_population_pt_native.py`, `swiss_landcover_pt_oblique.py` |
+| Denoising (A-trous, OIDN when present) *(landed 2026-10-28: the denoiser list comes from `offline.capabilities`; an unavailable denoiser is refused with the engine's own message instead of being downgraded)* | Quality window in the status bar/Statistics | `denoise.py`, `denoise_oidn.py` |
 | SDF scenes | SDF layer kind (later milestone) | `sdf.py` |
 | SPLAT-FUSED scenes | Splat layer kind + fused render mode | `splat.py` |
 | Atmospheric smoke (NPZ/xarray, HRRR fields) | Smoke layer kind + timeline playback | `smoke.py`, `california_*`, `bryce_canyon_storm_timelapse.py` |
@@ -398,7 +398,7 @@ Each milestone ends with: build green, `cargo fmt --check`, `clippy -D warnings`
 | # | Milestone | Contents | Size |
 |---|---|---|---|
 | M5 | **Certificates & diagnostics** | W5 first ring in the new bottom dock: certificates on every terrain/MapScene render, determinism check, degradation ledger, telemetry | M |
-| M6 | **Path tracing & offline** | W4 ring 1: render-mode switch, offline accumulation with convergence, denoise; parity vs PT example outputs | M |
+| M6 | **Path tracing & offline** *(landed)* | W4 ring 1: `Render ▸ Render mode` (Raster / Path traced, persisted in the project as format v3), raster offline accumulation through `render_offline` (samples, denoiser, convergence + `samples_used`/`final_p95_delta` reported), hybrid-ReSTIR stills through `render_terrain_poster` (spp/frames/variance threshold/tile/seed/env intensity), engine-streamed progress in the status bar, denoiser availability from `offline.capabilities`. Quality modes are explicit stills: `native_paints()` is false, camera motion only marks the still stale. Gate: `parity_quality.rs` (capabilities honesty, accumulation + denoise provenance, PT convergence/repeat/seed/certificate) | M |
 | M7 | **Atmosphere / astro / smoke** | W4 ring 2: AETHER settings, `Time & place…`, smoke volume layers; example-backed acceptance runs | M |
 | M8 | **Cartography depth** | W2 second ring: furniture + plate composer, thematic editors, SVG export, **plus the terrain scatter/analysis/detail-normal items deferred from M4** | L |
 | M9 | **R1 native repair** *(landed)* | W8-R1: `TerrainScene::render_viewer_terrain` repaints correctly — Z-up mesh mode, cached per-terrain `ViewerResources`, Z-up sun direction matching `decode_lighting`, colormap LUTs in the engine's ramp encoding, world-span fitting; gate tests in `native_viewport.rs`/`native_viewer_path.rs` prove frames are byte-reproducible, terrain actually shades, and grazing light differs from overhead | M |

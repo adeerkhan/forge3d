@@ -12,6 +12,12 @@ pub struct StatusParts<'a> {
     pub software: bool,
     pub frame_ms: Option<f32>,
     pub busy: bool,
+    /// M6: long-render progress — `Some((Some(fraction), label))` for a
+    /// measurable pass, `Some((None, label))` for one that reports only that
+    /// it is running (the path tracer).
+    pub progress: Option<(Option<f32>, &'a str)>,
+    /// M6: the active quality mode, when one is on (`Path traced`, `offline`).
+    pub quality: Option<&'a str>,
     pub selection: Option<&'a str>,
     pub status: Option<&'a str>,
     pub latest_error: Option<&'a str>,
@@ -47,6 +53,26 @@ pub fn status_bar(ui: &mut Ui, icons: &Icons, parts: &StatusParts<'_>) -> bool {
         if parts.busy {
             ui.add(egui::Spinner::new().size(11.0));
             ui.label(RichText::new("working…").size(11.5).weak());
+        }
+        if let Some((fraction, label)) = parts.progress {
+            match fraction {
+                Some(fraction) => {
+                    ui.add(
+                        egui::ProgressBar::new(fraction.clamp(0.0, 1.0))
+                            .desired_width(120.0)
+                            .text(format!("{label} · {:.0}%", fraction * 100.0)),
+                    );
+                }
+                None => {
+                    ui.add(egui::Spinner::new().size(11.0));
+                    ui.label(RichText::new(label).size(11.5).weak());
+                }
+            }
+        }
+        if let Some(quality) = parts.quality {
+            ui.separator();
+            ui.label(RichText::new(quality).size(11.5).weak())
+                .on_hover_text("Render quality mode (Render ▸ Render quality…)");
         }
         if let Some(selection) = parts.selection {
             ui.separator();

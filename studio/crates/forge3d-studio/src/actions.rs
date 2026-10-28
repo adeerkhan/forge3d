@@ -164,6 +164,12 @@ pub enum Action {
     LayerToBottom,
     // Render
     RenderFrame,
+    /// M6: one-shot raster (with optional offline accumulation).
+    RenderModeRaster,
+    /// M6: converged hybrid-ReSTIR path trace.
+    RenderModePathTraced,
+    /// M6: offline/path-trace quality settings window.
+    RenderQuality,
     /// M5: sign a RenderCertificate for every terrain render.
     RequestCertificate,
     // Tools
@@ -542,6 +548,33 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Render frame",
         icon: Some(Icon::Image),
         shortcut: Some(Shortcut::new(true, false, Key::R)),
+        menu: Some(Menu::Render),
+        checkable: false,
+        need: Need::Nothing,
+    },
+    ActionDef {
+        action: Action::RenderModeRaster,
+        label: "Raster (PBR + POM)",
+        icon: Some(Icon::MountainSnow),
+        shortcut: None,
+        menu: Some(Menu::Render),
+        checkable: true,
+        need: Need::Nothing,
+    },
+    ActionDef {
+        action: Action::RenderModePathTraced,
+        label: "Path traced (hybrid ReSTIR)",
+        icon: Some(Icon::Sun),
+        shortcut: None,
+        menu: Some(Menu::Render),
+        checkable: true,
+        need: Need::Nothing,
+    },
+    ActionDef {
+        action: Action::RenderQuality,
+        label: "Render quality…",
+        icon: Some(Icon::SlidersHorizontal),
+        shortcut: Some(Shortcut::new(true, true, Key::Q)),
         menu: Some(Menu::Render),
         checkable: false,
         need: Need::Nothing,

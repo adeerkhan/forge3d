@@ -25,8 +25,8 @@ pub mod native_viewport;
 pub use native_viewport::NativeViewport;
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use studio_project::{CameraParams, SunParams};
+use pyo3::types::{PyCFunction, PyDict};
+use studio_project::{CameraParams, RenderMode, RenderQuality, SunParams};
 
 /// Command sent from the UI to the engine worker.
 #[derive(Debug, Clone)]
@@ -47,10 +47,18 @@ pub enum Command {
     /// M4: project-level `TerrainRenderParams` overrides for the terrain
     /// viewport (validated by `terrain.params_validate` before they arrive).
     SetRenderParams(serde_json::Value),
+    /// M6: render mode + offline/path-trace quality for the next frames.
+    SetRenderQuality(RenderQuality),
     /// Render one terrain frame at the requested size and ship RGBA bytes.
+    ///
+    /// `force` renders even when nothing changed: quality renders (offline
+    /// accumulation, path tracing) are explicit stills, so asking for one
+    /// must not be swallowed by the dirty check that throttles live camera
+    /// motion.
     RenderFrame {
         width: u32,
         height: u32,
+        force: bool,
     },
     /// Render terrain at the requested size and write a PNG to disk.
     RenderToFile {
@@ -98,6 +106,10 @@ pub enum Event {
         height: u32,
         rgba: Vec<u8>,
         render_ms: f32,
+        /// M6: what produced the frame when the render used a quality path
+        /// (offline accumulation or path tracing): samples, frames, denoiser,
+        /// convergence. `None` for the plain one-shot raster frame.
+        quality: Option<serde_json::Value>,
     },
     /// An offline PNG export finished successfully.
     ExportFinished {
@@ -105,6 +117,13 @@ pub enum Event {
         width: u32,
         height: u32,
         render_ms: f32,
+        quality: Option<serde_json::Value>,
+    },
+    /// M6: progress of a long render (accumulation batches, path-trace tiles).
+    /// `fraction` is `None` when the engine reports no measurable progress.
+    Progress {
+        fraction: Option<f32>,
+        label: String,
     },
     /// A PNG export failed after rendering; nothing was written.
     ExportFailed {
@@ -138,6 +157,22 @@ pub struct EngineHandle {
     tx: Sender<Command>,
     join: std::sync::Arc<std::sync::Mutex<Option<JoinHandle<()>>>>,
     next_job: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// Distinguishes this process's engines when they share the temp directory.
+///
+/// Each worker renders through a scratch PNG (and feeds `IBL.from_hdr` a probe
+/// HDR), so two engines in one process — the integration tests spawn several —
+/// must not name those files alike or one render reads the other's pixels.
+static ENGINE_SCRATCH_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A file-name stem no other engine in this process will produce.
+fn scratch_tag() -> String {
+    format!(
+        "{}-{}",
+        std::process::id(),
+        ENGINE_SCRATCH_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
 }
 
 impl EngineHandle {
@@ -213,9 +248,11 @@ const BRIDGE_SOURCE: &str = r##"
 import dataclasses
 import inspect
 import json
+import math
 import os
 import sys
 import tempfile
+import time
 import traceback
 
 import numpy as np
@@ -249,6 +286,23 @@ _overlay = None
 _overlay_cmap_key = None
 _heightmap = None  # np.ndarray float32 [H, W]
 _domain = (0.0, 1.0)
+
+
+def _emit_progress(payload):
+    """Report render progress to the host, when a host sink is installed.
+
+    M6: the Rust worker installs `_studio_progress` (a closure that forwards
+    to the UI) around a render command and clears it afterwards, so the same
+    bridge source runs headless with no sink.
+    """
+    sink = globals().get("_studio_progress")
+    if sink is None:
+        return
+    try:
+        sink(json.dumps(payload, sort_keys=True, default=str))
+    except Exception:
+        # Progress is advisory; a broken sink must never fail a render.
+        pass
 
 
 def studio_probe(p=None):
@@ -744,15 +798,24 @@ def _op_terrain_params_validate(p):
     return {"valid": True, "fields": len(kwargs)}
 
 
-def _op_terrain_render(p):
-    if _heightmap is None:
-        raise RuntimeError("no terrain loaded")
-    hdr_path = p.get("hdr_path") or os.path.join(
-        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
-    )
+def _terrain_hdr(hdr_path):
     if not os.path.exists(hdr_path):
         _write_default_hdr(hdr_path)
     _ensure_session(hdr_path)
+    return hdr_path
+
+
+def _terrain_span(domain):
+    return float(max(domain[1] - domain[0], 1.0) * 6.0)
+
+
+def _terrain_params(p, *, aa_samples=None, denoise=None, aov=None):
+    """Shared `TerrainRenderParams` construction for every raster render.
+
+    M6: `aa_samples`, `denoise` and `aov` are the offline-accumulation knobs
+    that `forge3d.render_offline` reads; `_op_terrain_render` passes none of
+    them, so the one-shot frame is exactly the pre-M6 call.
+    """
     camera = dict(p["camera"])
     sun = p["sun"]
     # Pan offset lives on the ground plane; the engine's cam_target is the
@@ -761,7 +824,7 @@ def _op_terrain_render(p):
         camera["cam_target"] = camera.pop("target")
     domain = p.get("domain") or [_domain[0], _domain[1]]
     overlay = _ensure_overlay(p.get("colormap"), domain)
-    span = float(p.get("terrain_span") or max(domain[1] - domain[0], 1.0) * 6.0)
+    span = float(p.get("terrain_span") or _terrain_span(domain))
     # Project params first, then the Studio defaults for anything unset, and
     # last the values the viewport pipeline owns (geometry, camera, sun,
     # colormap overlay) so no project param can override them. With an empty
@@ -785,12 +848,27 @@ def _op_terrain_render(p):
         "sun_intensity": float(sun["intensity"]),
         "overlays": [overlay],
     })
-    config = make_terrain_params_config(**kwargs)
+    if aa_samples is not None:
+        kwargs["aa_samples"] = max(1, int(aa_samples))
+    if denoise is not None:
+        kwargs["denoise"] = denoise
+    if aov is not None:
+        kwargs["aov"] = aov
+    return f3d.TerrainRenderParams(make_terrain_params_config(**kwargs)), span
+
+
+def _op_terrain_render(p):
+    if _heightmap is None:
+        raise RuntimeError("no terrain loaded")
+    _terrain_hdr(p.get("hdr_path") or os.path.join(
+        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
+    ))
+    params, span = _terrain_params(p)
     certificate = p.get("certificate_path")
     frame = _renderer.render_terrain_pbr_pom(
         material_set=_material,
         env_maps=_ibl,
-        params=f3d.TerrainRenderParams(config),
+        params=params,
         heightmap=_heightmap,
         target=None,
         water_mask=None,
@@ -807,6 +885,326 @@ def _op_terrain_clear(p):
     global _heightmap
     _heightmap = None
     return {"cleared": True}
+
+
+# --- ops: render quality (M6) ------------------------------------------------
+# Two engine paths beyond the one-shot raster frame:
+#   * `forge3d.render_offline` — TV12 accumulation on the terrain renderer,
+#     with the optional A-trous / OIDN denoiser (the `mapscene_offline_quality`
+#     example's path, driven here with an explicit progress callback).
+#   * `forge3d.render_terrain_poster` — the converged hybrid-ReSTIR path trace
+#     (`southeast_europe_population_pt_native` / `swiss_landcover_pt_oblique`).
+# Neither is reimplemented here: Studio only builds their public arguments.
+
+_DENOISERS = ("none", "atrous", "oidn")
+
+
+def _oidn_available():
+    try:
+        from forge3d.denoise_oidn import oidn_available
+    except Exception:
+        return False
+    try:
+        return bool(oidn_available())
+    except Exception:
+        return False
+
+
+def _op_offline_capabilities(p):
+    """Report what this engine environment can actually render.
+
+    The UI only offers a denoiser or a render mode the engine can run, so a
+    missing OIDN build or a native module without the hybrid tracer is said
+    out loud instead of failing after the user commits to a slow render.
+    """
+    return {
+        "denoisers": [d for d in _DENOISERS if d != "oidn" or _oidn_available()],
+        "offline_accumulation": True,
+        "path_tracing": bool(hasattr(f3d, "render_terrain_poster")),
+        "path_tracing_native": _path_tracer_native() is not None,
+    }
+
+
+def _path_tracer_native():
+    try:
+        from forge3d import _forge3d as native
+    except Exception:
+        return None
+    return getattr(native, "hybrid_render_terrain_reference", None)
+
+
+def _denoise_settings(method):
+    if method == "oidn" and not _oidn_available():
+        raise RuntimeError(
+            "the OIDN denoiser is not installed in this engine environment "
+            "(forge3d.denoise_oidn could not import a backend); choose A-trous or None"
+        )
+    return _tp.DenoiseSettings(
+        enabled=method != "none", method=method
+    )
+
+
+def _op_terrain_render_offline(p):
+    """TV12 offline accumulation on the terrain renderer."""
+    if _heightmap is None:
+        raise RuntimeError("no terrain loaded")
+    quality = dict(p.get("offline") or {})
+    samples = max(1, int(quality.get("samples", 16)))
+    method = str(quality.get("denoiser", "none")).lower()
+    if method not in _DENOISERS:
+        raise ValueError(
+            "unknown denoiser {!r}; Studio offers {}".format(method, ", ".join(_DENOISERS))
+        )
+    _terrain_hdr(p.get("hdr_path") or os.path.join(
+        tempfile.gettempdir(), "forge3d-studio-ibl.hdr"
+    ))
+    denoise = _denoise_settings(method)
+    # A denoised result needs the albedo/normal guidance AOVs; MapScene's
+    # `_mapscene_aov_settings(force_guidance=denoise_enabled)` does the same.
+    aov = None
+    if method != "none":
+        aov = _tp.AovSettings(
+            enabled=True, albedo=True, normal=True, depth=True, format="exr"
+        )
+    params, span = _terrain_params(
+        p, aa_samples=samples, denoise=denoise, aov=aov
+    )
+    settings = f3d.OfflineQualitySettings(
+        enabled=True,
+        adaptive=False,
+        max_samples=samples,
+        min_samples=min(4, samples),
+        batch_size=max(1, min(4, samples)),
+    )
+
+    def progress(update):
+        _emit_progress(
+            {
+                "fraction": float(update.samples_so_far) / max(1, int(update.max_samples)),
+                "label": "accumulating {}/{} samples".format(
+                    update.samples_so_far, update.max_samples
+                ),
+                "samples": int(update.samples_so_far),
+                "max_samples": int(update.max_samples),
+                "p95_delta": float(update.p95_delta),
+                "converged_ratio": float(update.converged_ratio),
+            }
+        )
+
+    certificate = p.get("certificate_path")
+    started = time.perf_counter()
+    result = f3d.render_offline(
+        _renderer,
+        _material,
+        _ibl,
+        params,
+        _heightmap,
+        settings=settings,
+        progress_callback=progress,
+        certificate=str(certificate) if certificate else False,
+    )
+    result.frame.save(str(p["out_png"]))
+    metadata = dict(result.metadata or {})
+    metadata.update(
+        {
+            "mode": "raster_offline",
+            "png": str(p["out_png"]),
+            "terrain_span": span,
+            "render_ms": (time.perf_counter() - started) * 1000.0,
+            "requested_denoiser": method,
+        }
+    )
+    if certificate:
+        metadata["certificate_path"] = str(certificate)
+    return metadata
+
+
+def _path_trace_camera(p):
+    """Orbit camera in the path tracer's Y-up world.
+
+    The terrain renderer's screen mode and the hybrid tracer agree on the
+    frame: ground plane XZ, +Y up, heights scaled by the same exaggeration.
+    The bridge's `cam_target` is already `(x, 0, z)`, so the only work is
+    building eye/up from the orbit angles.
+    """
+    cam = dict(p["camera"])
+    target = cam.get("cam_target") or cam.get("target") or (0.0, 0.0, 0.0)
+    target = (float(target[0]), 0.0, float(target[2]))
+    phi = math.radians(float(cam["phi_deg"]))
+    theta = math.radians(float(cam["theta_deg"]))
+    radius = max(float(cam["radius"]), 1e-3)
+    eye = (
+        target[0] + radius * math.sin(theta) * math.cos(phi),
+        target[1] + radius * math.cos(theta),
+        target[2] + radius * math.sin(theta) * math.sin(phi),
+    )
+    # Straight down the orbit degenerates; look down -Z instead of dividing.
+    up = (0.0, 1.0, 0.0) if abs(math.sin(theta)) > 1e-4 else (0.0, 0.0, -1.0)
+    return {
+        "model": "pinhole",
+        "origin": eye,
+        "look_at": target,
+        "up": up,
+        "fov_y": float(cam["fov_deg"]),
+    }
+
+
+_PT_ALBEDO_MAX_TEXELS = 2048 * 2048
+
+
+def _srgb_to_linear(rgb):
+    clipped = np.clip(rgb, 0.0, 1.0)
+    return np.where(
+        clipped <= 0.04045,
+        clipped / 12.92,
+        ((clipped + 0.055) / 1.055) ** 2.4,
+    )
+
+
+def _ramp_rgb(cmap_name):
+    """Display-encoded RGB rows of the active ramp (engine colormap or the
+    Studio relief stops), matching what the raster overlay samples."""
+    if cmap_name:
+        cmap = f3d.get_colormap(cmap_name if ":" in cmap_name else "forge3d:" + cmap_name)
+        return np.asarray(cmap.rgba, dtype=np.float64)[:, :3]
+    stops = _DEFAULT_CMAP_STOPS
+    rows = np.empty((256, 3), dtype=np.float64)
+    for i in range(256):
+        t = i / 255.0
+        rgb = stops[-1][1]
+        for lo, hi in zip(stops, stops[1:]):
+            if lo[0] <= t <= hi[0]:
+                span = max(hi[0] - lo[0], 1e-6)
+                f = (t - lo[0]) / span
+                left = np.array([int(lo[1][k:k + 2], 16) for k in (1, 3, 5)])
+                right = np.array([int(hi[1][k:k + 2], 16) for k in (1, 3, 5)])
+                rgb = (left + f * (right - left)) / 255.0
+                break
+        rows[i] = rgb
+    return rows
+
+
+def _path_trace_albedo(p, enabled):
+    """Per-texel albedo from the document's ramp, in linear RGB.
+
+    The path tracer takes reflectance, so the display-encoded ramp is decoded
+    to linear before it is handed over. Large DEMs fall back to the constant
+    albedo and say so in the metadata instead of allocating gigabytes.
+    """
+    if not enabled:
+        return None, "constant (colormap albedo disabled)"
+    height, width = _heightmap.shape
+    if int(height) * int(width) > _PT_ALBEDO_MAX_TEXELS:
+        return None, (
+            "constant (DEM {}x{} exceeds the 2048x2048 colormap-albedo cap)".format(
+                width, height
+            )
+        )
+    rows = _ramp_rgb(p.get("colormap"))
+    lo, hi = _domain
+    span = max(float(hi) - float(lo), 1e-6)
+    index = np.clip(
+        ((_heightmap - float(lo)) / span * (len(rows) - 1) + 0.5).astype(np.int32),
+        0,
+        len(rows) - 1,
+    )
+    linear = _srgb_to_linear(rows[index])
+    albedo = np.concatenate(
+        [linear, np.ones(linear.shape[:-1] + (1,), dtype=np.float64)], axis=-1
+    )
+    return np.ascontiguousarray(albedo, dtype=np.float32), "colormap ramp (linear)"
+
+
+def _op_path_trace_render(p):
+    """Converged hybrid-ReSTIR poster of the loaded DEM."""
+    if _heightmap is None:
+        raise RuntimeError("no terrain loaded")
+    if _path_tracer_native() is None:
+        raise RuntimeError(
+            "this forge3d build has no native hybrid terrain tracer "
+            "(hybrid_render_terrain_reference); path tracing is unavailable"
+        )
+    quality = dict(p.get("path_trace") or {})
+    width = max(2, int(p["width"]))
+    height = max(2, int(p["height"]))
+    tile = max(16, int(quality.get("tile", 1024)))
+    spp = max(1, int(quality.get("spp", 1)))
+    min_frames = max(1, int(quality.get("min_frames", 8)))
+    max_frames = max(min_frames, int(quality.get("max_frames", 32)))
+    variance = float(quality.get("variance_threshold", 1e-2))
+    seed = int(quality.get("seed", 7))
+    env_intensity = float(quality.get("env_intensity", 0.35))
+    exaggeration = float(
+        _params_to_kwargs(p.get("params")).get(
+            "z_scale", _STUDIO_RENDER_DEFAULTS["z_scale"]
+        )
+    )
+    domain = p.get("domain") or [_domain[0], _domain[1]]
+    span = float(p.get("terrain_span") or _terrain_span(domain))
+    rows, cols = _heightmap.shape
+    spacing = (span / max(cols - 1, 1), span / max(rows - 1, 1))
+    albedo_map, albedo_note = _path_trace_albedo(
+        p, bool(quality.get("colormap_albedo", True))
+    )
+    certificate = p.get("certificate_path")
+    _emit_progress(
+        {
+            "fraction": None,
+            "label": "path tracing {}x{} ({}-{} frames, {} spp)".format(
+                width, height, min_frames, max_frames, spp
+            ),
+        }
+    )
+    started = time.perf_counter()
+    result = f3d.render_terrain_poster(
+        _heightmap,
+        width,
+        height,
+        tile=tile,
+        camera=_path_trace_camera(p),
+        spacing=spacing,
+        exaggeration=exaggeration,
+        albedo_map=albedo_map,
+        albedo_sampling="nearest",
+        sun_azimuth_deg=float(p["sun"]["azimuth_deg"]),
+        sun_elevation_deg=float(p["sun"]["elevation_deg"]),
+        sun_intensity=float(p["sun"]["intensity"]),
+        env_intensity=env_intensity,
+        spp=spp,
+        min_frames=min_frames,
+        max_frames=max_frames,
+        variance_threshold=variance,
+        seed=seed,
+        certificate=str(certificate) if certificate else False,
+    )
+    from forge3d.helpers.offscreen import save_png_deterministic
+
+    save_png_deterministic(str(p["out_png"]), result["rgba"], bit_depth=8)
+    tiles = list(result.get("tiles") or [])
+    frames = max((int(t.get("frames", 0)) for t in tiles), default=0)
+    variance_seen = max((float(t.get("variance", 0.0)) for t in tiles), default=0.0)
+    metadata = {
+        "mode": "path_traced",
+        "png": str(p["out_png"]),
+        "terrain_span": span,
+        "tiles": len(tiles),
+        "tile_size": tile,
+        "samples_used": frames,
+        "target_samples": max_frames,
+        "frames": frames,
+        "spp": spp,
+        "variance": variance_seen,
+        "variance_threshold": variance,
+        "converged": all(bool(t.get("converged")) for t in tiles) if tiles else False,
+        "seed": seed,
+        "albedo": albedo_note,
+        "denoiser_used": "none",
+        "render_ms": (time.perf_counter() - started) * 1000.0,
+    }
+    if certificate:
+        metadata["certificate_path"] = str(certificate)
+        metadata["certificate_payload_sha256"] = result.get("certificate_digest")
+    return metadata
 
 
 # --- ops: MapScene cartography ------------------------------------------------
@@ -1657,7 +2055,10 @@ _OPS = {
     "terrain.load": _op_terrain_load,
     "terrain.info": _op_terrain_info,
     "terrain.render": _op_terrain_render,
+    "terrain.render_offline": _op_terrain_render_offline,
     "terrain.clear": _op_terrain_clear,
+    "path_trace.render": _op_path_trace_render,
+    "offline.capabilities": _op_offline_capabilities,
     "terrain.params_schema": _op_terrain_params_schema,
     "terrain.params_validate": _op_terrain_params_validate,
     "scene.compile": _op_scene_compile,
@@ -1798,6 +2199,8 @@ struct WorkerState {
     request_certificate: bool,
     /// M4: project-level terrain params handed to `terrain.render`.
     render_params: serde_json::Value,
+    /// M6: render mode + offline/path-trace quality for viewport and exports.
+    quality: RenderQuality,
     terrain_visible: bool,
     dirty: bool,
     has_terrain: bool,
@@ -1964,18 +2367,23 @@ fn run_worker(
             .unwrap_or(false),
     });
 
-    let hdr_path = std::env::temp_dir().join("forge3d-studio-ibl.hdr");
+    // Scratch files are per engine, not per process: two workers in one process
+    // (the integration tests spawn a handful) would otherwise render to and
+    // read from the same PNG, so one test could ship the other's frame.
+    let tag = scratch_tag();
+    let hdr_path = std::env::temp_dir().join(format!("forge3d-studio-{tag}-ibl.hdr"));
     write_probe_hdr(&hdr_path)?;
 
     let mut engine = WorkerState {
         bridge: bridge.clone().unbind(),
         hdr_path,
-        scratch_png: std::env::temp_dir().join("forge3d-studio-frame.png"),
+        scratch_png: std::env::temp_dir().join(format!("forge3d-studio-{tag}-frame.png")),
         camera: CameraParams::default(),
         sun: SunParams::default(),
         colormap: None,
         request_certificate: false,
         render_params: serde_json::Value::Object(serde_json::Map::new()),
+        quality: RenderQuality::default(),
         terrain_visible: true,
         dirty: true,
         has_terrain: false,
@@ -2058,8 +2466,20 @@ fn run_worker(
                 engine.render_params = params;
                 engine.dirty = true;
             }
-            Command::RenderFrame { width, height } => {
-                if engine.dirty && engine.has_terrain {
+            Command::SetRenderQuality(quality) => {
+                // Only a real change invalidates the frame: the app re-sends
+                // the project's settings whenever the project is edited.
+                if engine.quality != quality {
+                    engine.quality = quality;
+                    engine.dirty = true;
+                }
+            }
+            Command::RenderFrame {
+                width,
+                height,
+                force,
+            } => {
+                if engine.has_terrain && (force || engine.dirty) {
                     engine.dirty = false;
                     render_terrain_frame(py, &mut engine, events, width, height, None);
                 }
@@ -2077,13 +2497,14 @@ fn run_worker(
                         message: "no terrain loaded".to_owned(),
                     });
                 } else {
-                    match render_terrain_png(py, &mut engine, width, height, &path) {
-                        Ok(()) => {
+                    match render_frame_png(py, &mut engine, events, width, height, &path) {
+                        Ok(quality) => {
                             let _ = events.send(Event::ExportFinished {
                                 path,
                                 width,
                                 height,
                                 render_ms: started.elapsed().as_secs_f32() * 1000.0,
+                                quality,
                             });
                         }
                         Err(message) => {
@@ -2110,13 +2531,98 @@ fn run_worker(
     Ok(())
 }
 
-fn render_terrain_png(
+/// Install the bridge's progress sink for one render.
+///
+/// The sink is a PyO3 closure forwarding to the UI channel; `_emit_progress`
+/// in BRIDGE_SOURCE reads it from the bridge globals and stays a no-op when
+/// none is installed (the bridge also runs headless in tests).
+fn install_progress_sink(
     py: Python<'_>,
-    engine: &mut WorkerState,
+    bridge: &Bound<'_, PyDict>,
+    events: &Sender<Event>,
+) -> Result<(), String> {
+    let sender = events.clone();
+    let sink = PyCFunction::new_closure_bound(
+        py,
+        Some("studio_progress"),
+        Some("Forge3D Studio render-progress sink"),
+        move |args, _kwargs| -> PyResult<()> {
+            let payload: String = args.get_item(0)?.extract()?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload).unwrap_or(serde_json::Value::Null);
+            let _ = sender.send(Event::Progress {
+                fraction: parsed
+                    .get("fraction")
+                    .and_then(|value| value.as_f64())
+                    .map(|value| value as f32),
+                label: parsed
+                    .get("label")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("rendering")
+                    .to_owned(),
+            });
+            Ok(())
+        },
+    )
+    .map_err(|err| format!("progress sink: {err}"))?;
+    bridge
+        .set_item("_studio_progress", sink)
+        .map_err(|err| format!("progress sink: {err}"))
+}
+
+/// Drop the progress sink so a later op cannot stream into a dead render.
+fn clear_progress_sink(bridge: &Bound<'_, PyDict>) {
+    // Removing the only reference drops the closure now, so its channel
+    // sender does not outlive the render.
+    let _ = bridge.del_item("_studio_progress");
+}
+
+/// Render arguments every quality path shares: view, sun, ramp and targets.
+fn render_args(
+    engine: &WorkerState,
     width: u32,
     height: u32,
     out: &Path,
-) -> Result<(), String> {
+    certificate_path: Option<&Path>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "width": width,
+        "height": height,
+        "camera": {
+            "phi_deg": engine.camera.phi_deg,
+            "theta_deg": engine.camera.theta_deg,
+            "radius": engine.camera.radius,
+            "fov_deg": engine.camera.fov_deg,
+            "target": [engine.camera.target_x, 0.0, engine.camera.target_z],
+        },
+        "sun": {
+            "azimuth_deg": engine.sun.azimuth_deg,
+            "elevation_deg": engine.sun.elevation_deg,
+            "intensity": engine.sun.intensity,
+        },
+        "domain": [engine.domain.0, engine.domain.1],
+        "colormap": engine.colormap,
+        "params": engine.render_params,
+        "hdr_path": engine.hdr_path.to_string_lossy(),
+        "out_png": out.to_string_lossy(),
+        "certificate_path": certificate_path
+            .map(|path| path.to_string_lossy().into_owned()),
+    })
+}
+
+/// Render one frame through the op the current quality settings select.
+///
+/// Returns the render's own quality metadata for the offline and path-traced
+/// paths (`None` for the plain one-shot raster frame, which has nothing extra
+/// to report).
+fn render_frame_png(
+    py: Python<'_>,
+    engine: &mut WorkerState,
+    events: &Sender<Event>,
+    width: u32,
+    height: u32,
+    out: &Path,
+) -> Result<Option<serde_json::Value>, String> {
     if !engine.has_terrain {
         return Err("no terrain loaded".to_owned());
     }
@@ -2129,36 +2635,41 @@ fn render_terrain_png(
         let _ = std::fs::remove_file(&path);
         path
     });
-    dispatch(
-        py,
-        engine.bridge.bind(py),
-        "terrain.render",
-        &serde_json::json!({
-            "width": width,
-            "height": height,
-            "camera": {
-                "phi_deg": engine.camera.phi_deg,
-                "theta_deg": engine.camera.theta_deg,
-                "radius": engine.camera.radius,
-                "fov_deg": engine.camera.fov_deg,
-                "target": [engine.camera.target_x, 0.0, engine.camera.target_z],
-            },
-            "sun": {
-                "azimuth_deg": engine.sun.azimuth_deg,
-                "elevation_deg": engine.sun.elevation_deg,
-                "intensity": engine.sun.intensity,
-            },
-            "domain": [engine.domain.0, engine.domain.1],
-            "colormap": engine.colormap,
-            "params": engine.render_params,
-            "hdr_path": engine.hdr_path.to_string_lossy(),
-            "out_png": out.to_string_lossy(),
-            "certificate_path": certificate_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-        }),
-    )
-    .map(|_| ())
+    let quality = engine.quality.clone();
+    let (op, quality_args) = match (quality.mode, quality.offline.enabled) {
+        (RenderMode::PathTraced, _) => (
+            "path_trace.render",
+            serde_json::json!({ "path_trace": quality.path_trace }),
+        ),
+        (RenderMode::Raster, true) => (
+            "terrain.render_offline",
+            serde_json::json!({ "offline": quality.offline }),
+        ),
+        (RenderMode::Raster, false) => ("terrain.render", serde_json::json!({})),
+    };
+    let mut args = render_args(engine, width, height, out, certificate_path.as_deref());
+    if let (Some(target), Some(extra)) = (args.as_object_mut(), quality_args.as_object()) {
+        for (key, value) in extra {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    let bridge = engine.bridge.bind(py);
+    // Only the quality paths report progress; the one-shot frame renders once
+    // and the UI already shows its "working…" spinner.
+    let sink_installed = op != "terrain.render";
+    if sink_installed {
+        install_progress_sink(py, bridge, events)?;
+    }
+    let outcome = dispatch(py, bridge, op, &args);
+    if sink_installed {
+        clear_progress_sink(bridge);
+    }
+    let metadata = outcome?;
+    Ok(if op == "terrain.render" {
+        None
+    } else {
+        Some(metadata)
+    })
 }
 
 /// Render via the dispatcher, then decode the output PNG into RGBA bytes and
@@ -2174,18 +2685,19 @@ fn render_terrain_frame(
 ) {
     let out = force_out.unwrap_or_else(|| engine.scratch_png.clone());
     let started = Instant::now();
-    let result = render_terrain_png(py, engine, width, height, &out).and_then(|()| {
+    let result = render_frame_png(py, engine, events, width, height, &out).and_then(|quality| {
         image::open(&out)
             .map_err(|err| format!("decoding rendered PNG: {err}"))
-            .map(|img| img.to_rgba8().into_raw())
+            .map(|img| (img.to_rgba8().into_raw(), quality))
     });
     match result {
-        Ok(rgba) => {
+        Ok((rgba, quality)) => {
             let _ = events.send(Event::FrameReady {
                 width,
                 height,
                 rgba,
                 render_ms: started.elapsed().as_secs_f32() * 1000.0,
+                quality,
             });
         }
         Err(message) => {

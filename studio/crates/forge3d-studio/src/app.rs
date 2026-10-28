@@ -9,11 +9,6 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use egui::{Color32, ColorImage, Context, Response, Slider, TextureHandle, TextureOptions, Ui};
-use studio_engine::{Command, EngineHandle, Event};
-use studio_project::document::{DocHistory, LayerId, LayerKind};
-use studio_project::{CameraParams, Layer, Project, SunParams};
-
 use crate::actions::Action;
 use crate::icons::Icons;
 use crate::ui::dock::{self, DockState, LayoutPreset};
@@ -22,6 +17,10 @@ use crate::ui::panels::layers::{self, LayersCommand, LayersState, LayersView};
 use crate::ui::status::StatusParts;
 use crate::ui::theme::{self, Tokens};
 use crate::ui::{menu, shortcuts, status, toolbar};
+use egui::{Color32, ColorImage, Context, Response, Slider, TextureHandle, TextureOptions, Ui};
+use studio_engine::{Command, EngineHandle, Event};
+use studio_project::document::{DocHistory, LayerId, LayerKind};
+use studio_project::{CameraParams, Layer, Project, RenderMode, SunParams};
 
 const RENDER_DEBOUNCE: Duration = Duration::from_millis(120);
 /// M4: how long a terrain-parameter edit settles before it is re-validated
@@ -58,6 +57,9 @@ struct PendingRender {
     width: u32,
     height: u32,
     requested_at: Instant,
+    /// M6: render even when the worker's scene is not marked dirty. Set for
+    /// quality stills and for resize-driven renders the dirty flag cannot see.
+    force: bool,
 }
 
 /// Which scene pipeline the viewport is showing.
@@ -65,6 +67,12 @@ struct PendingRender {
 enum SceneMode {
     Terrain,
     MapScene,
+}
+
+/// M6: one progress report from a long render (accumulation or path tracing).
+struct ProgressReport {
+    fraction: Option<f32>,
+    label: String,
 }
 
 /// What a dispatched engine job was for, so `JobDone` can be routed.
@@ -104,6 +112,8 @@ enum PendingJob {
     ParamsSchema,
     /// M4: validation of the current terrain params against the engine.
     ParamsValidate,
+    /// M6: what this engine environment can render (denoisers, tracing).
+    OfflineCaps,
 }
 
 /// One baked camera-rig keyframe in renderer world units.
@@ -327,6 +337,18 @@ pub struct StudioApp {
     certificates: Vec<CertRecord>,
     /// M5: last diagnostics snapshot (degradations + memory).
     stats: Option<serde_json::Value>,
+    /// M6: the view changed while a quality render was on screen, so the frame
+    /// is stale until the next explicit render (quality renders are stills).
+    quality_stale: bool,
+    /// M6: the render-quality window is open.
+    quality_window: bool,
+    /// M6: the engine's report of what this environment can render
+    /// (`offline.capabilities`) — denoisers, path tracing.
+    offline_caps: Option<serde_json::Value>,
+    /// M6: the last quality render's own metadata (offline or path traced).
+    quality_meta: Option<serde_json::Value>,
+    /// M6: latest progress report from a long render.
+    progress: Option<ProgressReport>,
     compare_texture: Option<TextureHandle>,
     /// U4: the gallery entry waiting for its dataset to load.
     pending_example: Option<crate::ui::examples::ExampleEntry>,
@@ -538,6 +560,11 @@ impl StudioApp {
             request_certificate: false,
             certificates: Vec::new(),
             stats: None,
+            quality_stale: false,
+            quality_window: false,
+            offline_caps: None,
+            quality_meta: None,
+            progress: None,
             compare_texture: None,
             pending_example: None,
             pending_mapscene_camera: None,
@@ -632,6 +659,14 @@ impl StudioApp {
                             .call("terrain.params_schema", serde_json::json!({})),
                         PendingJob::ParamsSchema,
                     );
+                    // M6: ask what this environment can actually render, so
+                    // the quality window offers no denoiser or tracer it
+                    // would then fail to run.
+                    self.pending_jobs.insert(
+                        self.engine
+                            .call("offline.capabilities", serde_json::json!({})),
+                        PendingJob::OfflineCaps,
+                    );
                 }
                 Event::TerrainLoaded {
                     path,
@@ -668,7 +703,8 @@ impl StudioApp {
                     // the bridge's world scale (`max(range, 1) * 6`).
                     let span = (height_max - height_min).abs().max(1.0) * 6.0;
                     self.load_native_dem(&path, span);
-                    self.request_viewport_render();
+                    // A fresh DEM is always worth a frame, quality mode too.
+                    self.force_viewport_render();
                     self.set_status(format!("Loaded {} ({}×{})", path.display(), width, height));
                     if self.pending_example.is_some() {
                         self.apply_pending_example();
@@ -693,6 +729,7 @@ impl StudioApp {
                     height,
                     rgba,
                     render_ms,
+                    quality,
                 } => {
                     // M5: the worker writes a signed certificate next to the
                     // scratch frame when signing is on; record it.
@@ -738,6 +775,13 @@ impl StudioApp {
                         );
                     }
                     self.last_frame_ms = Some(render_ms);
+                    // M6: a finished quality render reports what it actually
+                    // did (samples, denoiser, convergence); a one-shot frame
+                    // clears the previous report so the panel cannot claim a
+                    // quality it is no longer showing.
+                    self.quality_meta = quality;
+                    self.quality_stale = false;
+                    self.progress = None;
                     ctx.request_repaint();
                 }
                 Event::ExportFinished {
@@ -745,13 +789,26 @@ impl StudioApp {
                     width,
                     height,
                     render_ms,
+                    quality,
                 } => {
+                    let mode = quality
+                        .as_ref()
+                        .and_then(|meta| meta.get("mode"))
+                        .and_then(|mode| mode.as_str())
+                        .unwrap_or("raster")
+                        .to_owned();
+                    self.quality_meta = quality;
+                    self.progress = None;
                     self.set_status(format!(
-                        "Exported {} ({}×{}, {render_ms:.0} ms)",
+                        "Exported {} ({}×{}, {render_ms:.0} ms, {mode})",
                         path.display(),
                         width,
                         height
                     ));
+                }
+                Event::Progress { fraction, label } => {
+                    self.progress = Some(ProgressReport { fraction, label });
+                    ctx.request_repaint();
                 }
                 Event::ExportFailed { path, message } => {
                     self.push_error(format!("Exporting {}", path.display()), message);
@@ -777,22 +834,39 @@ impl StudioApp {
     // -------------------------------------------------------------- actions
 
     fn request_viewport_render(&mut self) {
+        self.request_viewport_render_inner(false);
+    }
+
+    /// Force a render even in a quality mode (offline accumulation or path
+    /// tracing), where camera motion only marks the still as stale.
+    fn force_viewport_render(&mut self) {
+        self.request_viewport_render_inner(true);
+    }
+
+    fn request_viewport_render_inner(&mut self, force: bool) {
+        // M6: an offline or path-traced frame is a still. Re-rendering it on
+        // every orbit tick would queue minutes of work behind the pointer, so
+        // motion marks the frame stale and the status bar asks for Ctrl+R.
+        if !force && self.quality_mode_active() {
+            self.quality_stale = true;
+            return;
+        }
         // M10: with a live native viewport the frame is drawn on the engine's
         // own device, so the request is just "the view changed".
         if self.native_paints() {
             self.native.mark_dirty();
             return;
         }
-        if self.busy {
+        if self.busy && !force {
             return;
         }
-        self.queue_viewport_render();
+        self.queue_viewport_render(force);
     }
 
     /// Queue a viewport render regardless of the busy flag. Used when a job's
     /// own completion invalidates the frame: `JobDone` arrives before
     /// `Busy(false)`, so the gated request would be dropped.
-    fn queue_viewport_render(&mut self) {
+    fn queue_viewport_render(&mut self, force: bool) {
         let size = self.viewport_rect.size();
         let width = (size.x.round() as u32).max(1);
         let height = (size.y.round() as u32).max(1);
@@ -800,6 +874,7 @@ impl StudioApp {
             width,
             height,
             requested_at: Instant::now(),
+            force,
         });
     }
 
@@ -807,7 +882,9 @@ impl StudioApp {
     /// layer visibility changes where the old image must not linger).
     fn invalidate_viewport(&mut self) {
         self.viewport_texture = None;
-        self.request_viewport_render();
+        self.quality_stale = false;
+        self.progress = None;
+        self.force_viewport_render();
     }
 
     fn flush_pending_render(&mut self) {
@@ -824,17 +901,51 @@ impl StudioApp {
             self.engine.send(Command::RenderFrame {
                 width: pending.width,
                 height: pending.height,
+                force: pending.force,
             });
         }
     }
 
-    // ------------------------------------------------- M10: native GPU path
+    /// M6: true when the frame comes from a quality path (offline
+    /// accumulation or the path tracer) rather than the one-shot raster.
+    fn quality_mode_active(&self) -> bool {
+        self.project.render_quality.mode == RenderMode::PathTraced
+            || self.project.render_quality.offline.enabled
+    }
+
+    /// Hand the project's quality settings to the worker.
+    fn sync_engine_quality(&mut self) {
+        self.engine.send(Command::SetRenderQuality(
+            self.project.render_quality.clone(),
+        ));
+    }
+
+    /// M6: change the render mode and render the new still immediately.
+    fn set_render_mode(&mut self, mode: RenderMode) {
+        if self.project.render_quality.mode == mode {
+            return;
+        }
+        self.project.render_quality.mode = mode;
+        self.project_dirty = true;
+        self.sync_engine_quality();
+        self.quality_meta = None;
+        let label = mode.label();
+        if self.project.terrain.is_some() {
+            self.invalidate_viewport();
+            self.set_status(format!("Render mode: {label} — rendering a still…"));
+        } else {
+            self.set_status(format!("Render mode: {label}"));
+        }
+    }
 
     /// True when the viewport paints from the native scene: terrain mode with
     /// a loaded native terrain. MapScene renders through the bridge and owns
-    /// the panel in its own mode.
+    /// the panel in its own mode, and a quality render is always a bridge
+    /// still (the native viewer has no accumulation or tracer).
     fn native_paints(&self) -> bool {
-        self.scene_mode == SceneMode::Terrain && self.native.is_live()
+        self.scene_mode == SceneMode::Terrain
+            && self.native.is_live()
+            && !self.quality_mode_active()
     }
 
     /// Image the viewport paints: the native scene's texture when it is live,
@@ -904,7 +1015,7 @@ impl StudioApp {
         if !already_reported {
             self.push_error("Native viewport", error);
         }
-        self.queue_viewport_render();
+        self.queue_viewport_render(false);
     }
 
     /// Drop the egui registration of the native texture.
@@ -1359,12 +1470,17 @@ impl StudioApp {
                     if self.native_paints() {
                         self.native.mark_dirty();
                     } else {
-                        self.queue_viewport_render();
+                        self.queue_viewport_render(self.quality_mode_active());
                     }
                 }
                 if had_error {
                     self.set_status("Terrain parameters valid again");
                 }
+            }
+            Some(PendingJob::OfflineCaps) => {
+                // The quality window offers only what this environment can
+                // render; a missing OIDN build or tracer is named, not hidden.
+                self.offline_caps = Some(result);
             }
             None => {
                 self.set_status(format!("Engine op '{op}' finished"));
@@ -1967,6 +2083,8 @@ impl StudioApp {
     fn sync_engine_state(&mut self) {
         self.engine.send(Command::SetCamera(self.project.camera));
         self.engine.send(Command::SetSun(self.project.sun));
+        // M6: the project's render quality travels with it.
+        self.sync_engine_quality();
         // M4: the project's terrain params travel with it. They were validated
         // by the pages when they were last edited; a hand-edited project file
         // surfaces the engine's own error on the first render.
@@ -2082,6 +2200,10 @@ impl StudioApp {
             Action::ToolZoom => self.viewport_tool == crate::ui::viewport::ViewportTool::Zoom,
             Action::ToggleSafeFrame => self.show_safe_frame,
             Action::ToggleCompare => self.compare_mode,
+            Action::RenderModeRaster => self.project.render_quality.mode == RenderMode::Raster,
+            Action::RenderModePathTraced => {
+                self.project.render_quality.mode == RenderMode::PathTraced
+            }
             _ => false,
         }
     }
@@ -2944,6 +3066,61 @@ impl StudioApp {
         if let Some(ms) = self.last_frame_ms {
             ui.label(theme::meta(format!("last terrain frame: {ms:.0} ms")));
         }
+        // M6: the quality path is part of the frame's provenance, so the
+        // panel reports what produced the still, not just how long it took.
+        ui.add_space(4.0);
+        ui.label(theme::group_label("Render quality"));
+        ui.label(theme::meta(format!(
+            "mode: {}",
+            self.project.render_quality.mode.label()
+        )));
+        if self.project.render_quality.mode == RenderMode::Raster
+            && self.project.render_quality.offline.enabled
+        {
+            ui.label(theme::meta(format!(
+                "accumulation: ×{} samples, denoiser {}",
+                self.project.render_quality.offline.samples,
+                self.project.render_quality.offline.denoiser
+            )));
+        }
+        if let Some(meta) = &self.quality_meta {
+            for (key, label) in [
+                ("mode", "last still"),
+                ("samples_used", "samples used"),
+                ("target_samples", "target samples"),
+                ("frames", "frames"),
+                ("spp", "spp"),
+                ("denoiser_used", "denoiser used"),
+                ("converged", "converged"),
+                ("converged_ratio", "converged tiles"),
+                ("final_p95_delta", "p95 delta"),
+                ("variance", "variance"),
+                ("variance_threshold", "variance gate"),
+                ("tiles", "tiles"),
+                ("tile_size", "tile edge"),
+                ("albedo", "albedo"),
+                ("render_ms", "render ms"),
+                ("certificate_payload_sha256", "certificate sha256"),
+            ] {
+                let Some(value) = meta.get(key) else {
+                    continue;
+                };
+                let text = match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                ui.label(theme::meta(format!("{label}: {text}")));
+            }
+        } else {
+            ui.weak("No quality still yet — Render ▸ Render quality… then Ctrl+R.");
+        }
+        if self.quality_stale {
+            ui.label(
+                egui::RichText::new("stale: the view changed since this still (Ctrl+R)")
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+            );
+        }
         ui.add_space(4.0);
         let Some(stats) = &self.stats else {
             ui.weak("Press 'refresh stats' in the Certificates tab (or render) to collect.");
@@ -2975,6 +3152,251 @@ impl StudioApp {
             for (key, value) in memory {
                 let v = value.as_f64().unwrap_or(0.0);
                 ui.label(theme::meta(format!("{key}: {v:.0}")));
+            }
+        }
+    }
+
+    /// M6: render mode plus the offline/path-trace quality settings.
+    ///
+    /// Only what the engine reports it can run is offered: `offline.capabilities`
+    /// decides whether OIDN and the path tracer appear, and a missing backend
+    /// is named where its control would be instead of failing after the user
+    /// commits to a long render.
+    fn quality_window(&mut self, ctx: &Context) {
+        let mut open = self.quality_window;
+        egui::Window::new("Render quality")
+            .open(&mut open)
+            .default_width(340.0)
+            .resizable(false)
+            .show(ctx, |ui| self.quality_body(ui));
+        self.quality_window = open;
+    }
+
+    fn quality_body(&mut self, ui: &mut Ui) {
+        let caps = self.offline_caps.clone();
+        let mut quality = self.project.render_quality.clone();
+        let mut changed = false;
+        let tracing_available = caps
+            .as_ref()
+            .and_then(|caps| caps.get("path_tracing"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true);
+
+        ui.label(theme::group_label("Render mode"));
+        for mode in [RenderMode::Raster, RenderMode::PathTraced] {
+            let enabled = mode == RenderMode::Raster || tracing_available;
+            let selected = quality.mode == mode;
+            if ui
+                .add_enabled(enabled, egui::SelectableLabel::new(selected, mode.label()))
+                .clicked()
+                && !selected
+            {
+                quality.mode = mode;
+                changed = true;
+            }
+        }
+        if !tracing_available {
+            ui.label(
+                egui::RichText::new(
+                    "This forge3d build has no native hybrid terrain tracer, so path \
+                     tracing is unavailable here.",
+                )
+                .small()
+                .color(ui.visuals().warn_fg_color),
+            );
+        }
+        ui.label(
+            egui::RichText::new(
+                "A quality render is a still: camera motion only marks it stale — press \
+                 Ctrl+R (or 'Render still') to draw the current view.",
+            )
+            .small()
+            .weak(),
+        );
+
+        ui.add_space(6.0);
+        ui.label(theme::group_label("Offline accumulation (raster)"));
+        changed |= ui
+            .checkbox(
+                &mut quality.offline.enabled,
+                "Accumulate frames instead of one pass",
+            )
+            .changed();
+        ui.add_enabled_ui(quality.offline.enabled, |ui| {
+            ui.add(
+                egui::DragValue::new(&mut quality.offline.samples)
+                    .clamp_range(1..=512)
+                    .prefix("samples: "),
+            )
+            .on_hover_text("Target accumulated frames (the engine's aa_samples)");
+            let available: Vec<String> = caps
+                .as_ref()
+                .and_then(|caps| caps.get("denoisers"))
+                .and_then(|value| value.as_array())
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_else(|| vec![quality.offline.denoiser.clone()]);
+            egui::ComboBox::from_id_source("offline_denoiser")
+                .selected_text(quality.offline.denoiser.clone())
+                .show_ui(ui, |ui| {
+                    for denoiser in &available {
+                        if ui
+                            .selectable_value(
+                                &mut quality.offline.denoiser,
+                                denoiser.clone(),
+                                denoiser,
+                            )
+                            .changed()
+                        {
+                            changed = true;
+                        }
+                    }
+                });
+            if !available.contains(&quality.offline.denoiser) {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "'{}' is not available in this engine environment; pick one of {}.",
+                        quality.offline.denoiser,
+                        available.join(", ")
+                    ))
+                    .small()
+                    .color(ui.visuals().warn_fg_color),
+                );
+            }
+            ui.label(
+                egui::RichText::new(
+                    "A denoised accumulation also renders the albedo/normal guidance AOVs \
+                     the denoiser needs.",
+                )
+                .small()
+                .weak(),
+            );
+        });
+
+        ui.add_space(6.0);
+        ui.label(theme::group_label("Path tracing"));
+        ui.add_enabled_ui(quality.mode == RenderMode::PathTraced, |ui| {
+            let trace = &mut quality.path_trace;
+            let mut trace_changed = false;
+            egui::Grid::new("path_trace_grid")
+                .num_columns(2)
+                .spacing([8.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Samples per frame");
+                    trace_changed |= ui
+                        .add(egui::DragValue::new(&mut trace.spp).clamp_range(1..=16))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Frames (min / max)");
+                    ui.horizontal(|ui| {
+                        trace_changed |= ui
+                            .add(egui::DragValue::new(&mut trace.min_frames).clamp_range(1..=4096))
+                            .changed();
+                        trace_changed |= ui
+                            .add(egui::DragValue::new(&mut trace.max_frames).clamp_range(1..=4096))
+                            .changed();
+                    });
+                    ui.end_row();
+                    ui.label("Variance threshold");
+                    trace_changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut trace.variance_threshold)
+                                .clamp_range(1e-6..=1.0)
+                                .speed(1e-4),
+                        )
+                        .on_hover_text(
+                            "A tile that has not converged by max frames raises instead of \
+                             presenting an unconverged plate",
+                        )
+                        .changed();
+                    ui.end_row();
+                    ui.label("Tile edge (px)");
+                    trace_changed |= ui
+                        .add(egui::DragValue::new(&mut trace.tile).clamp_range(64..=4096))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Seed");
+                    trace_changed |= ui
+                        .add(egui::DragValue::new(&mut trace.seed).clamp_range(0..=u32::MAX))
+                        .changed();
+                    ui.end_row();
+                    ui.label("Environment");
+                    trace_changed |= ui
+                        .add(Slider::new(&mut trace.env_intensity, 0.0..=2.0))
+                        .changed();
+                    ui.end_row();
+                });
+            trace_changed |= ui
+                .checkbox(
+                    &mut trace.colormap_albedo,
+                    "Colormap-derived albedo (linear RGB)",
+                )
+                .on_hover_text(
+                    "Samples the document ramp as per-texel reflectance; DEMs over 2048² \
+                     fall back to constant albedo and say so in the metadata",
+                )
+                .changed();
+            if trace.min_frames > trace.max_frames {
+                trace.min_frames = trace.max_frames;
+                trace_changed = true;
+            }
+            changed |= trace_changed;
+        });
+        if let Some(caps) = caps.as_ref() {
+            let native = caps
+                .get("path_tracing_native")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            ui.label(
+                egui::RichText::new(format!(
+                    "Engine: accumulation available, denoisers [{}], tracer {}",
+                    caps.get("denoisers")
+                        .and_then(|value| value.as_array())
+                        .map(|list| list
+                            .iter()
+                            .filter_map(|value| value.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "))
+                        .unwrap_or_else(|| "?".to_owned()),
+                    if native { "native" } else { "python" }
+                ))
+                .small()
+                .weak(),
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Asking the engine what it can render…")
+                    .small()
+                    .weak(),
+            );
+        }
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.project.terrain.is_some(),
+                    egui::Button::new("Render still"),
+                )
+                .clicked()
+            {
+                self.invalidate_viewport();
+                self.set_status("Rendering the current view at the selected quality…");
+            }
+            if ui.button("Close").clicked() {
+                self.quality_window = false;
+            }
+        });
+
+        if changed {
+            self.project.render_quality = quality;
+            self.project_dirty = true;
+            self.sync_engine_quality();
+            if self.quality_mode_active() && self.project.terrain.is_some() {
+                self.quality_stale = true;
             }
         }
     }
@@ -3019,6 +3441,29 @@ impl StudioApp {
                     ui.label(text);
                 }
             });
+    }
+
+    /// M6: the status bar's quality chip (`None` for the plain one-shot raster).
+    fn quality_label(&self) -> Option<String> {
+        let quality = &self.project.render_quality;
+        match quality.mode {
+            RenderMode::PathTraced => Some(if self.quality_stale {
+                "path traced · stale".to_owned()
+            } else {
+                "path traced".to_owned()
+            }),
+            RenderMode::Raster if quality.offline.enabled => {
+                let mut label = format!("offline ×{}", quality.offline.samples);
+                if quality.offline.denoiser != "none" {
+                    label.push_str(&format!(" · {}", quality.offline.denoiser));
+                }
+                if self.quality_stale {
+                    label.push_str(" · stale");
+                }
+                Some(label)
+            }
+            RenderMode::Raster => None,
+        }
     }
 
     /// Label describing the current selection for the status bar.
@@ -3316,6 +3761,7 @@ impl StudioApp {
         let mut clear = false;
         egui::TopBottomPanel::bottom("studio_status").show(ctx, |ui| {
             ui.add_space(1.0);
+            let quality = self.quality_label();
             let parts = StatusParts {
                 adapter: self.gpu.as_ref().map(|gpu| gpu.adapter.as_str()),
                 backend: self.gpu.as_ref().map(|gpu| gpu.backend.as_str()),
@@ -3326,6 +3772,11 @@ impl StudioApp {
                     .unwrap_or(false),
                 frame_ms: self.last_frame_ms,
                 busy: self.busy,
+                progress: self
+                    .progress
+                    .as_ref()
+                    .map(|report| (report.fraction, report.label.as_str())),
+                quality: quality.as_deref(),
                 selection: selection.as_deref(),
                 status: self.status.as_deref(),
                 latest_error: self.errors.back().map(String::as_str),
@@ -3463,6 +3914,7 @@ impl StudioApp {
 
                     self.handle_viewport_input(&response);
                     self.paint_hud(ui);
+                    self.paint_quality_badge(ui);
                     self.paint_gizmo(ui);
                     if self.show_safe_frame {
                         Self::paint_safe_frame(ui, rect);
@@ -3485,6 +3937,31 @@ impl StudioApp {
                     });
                 }
             });
+    }
+
+    /// M6: a corner badge naming the quality path that drew this still, and
+    /// saying so when the view has moved since (quality renders are stills).
+    fn paint_quality_badge(&self, ui: &mut Ui) {
+        if !self.quality_mode_active() {
+            return;
+        }
+        let Some(text) = self.quality_label() else {
+            return;
+        };
+        let pos = self.viewport_rect.left_top() + egui::vec2(12.0, 12.0);
+        let painter = ui.painter();
+        let galley = painter.layout_no_wrap(
+            text,
+            egui::FontId::monospace(11.0),
+            Color32::from_white_alpha(220),
+        );
+        let background = egui::Rect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
+        painter.rect_filled(background, 4.0, Color32::from_black_alpha(150));
+        painter.galley(
+            pos + egui::vec2(6.0, 3.0),
+            galley,
+            Color32::from_white_alpha(220),
+        );
     }
 
     /// U3: zoom read-out, cursor read-out, scale bar and render time.
@@ -3948,6 +4425,9 @@ impl StudioApp {
                     );
                 }
             }
+            Action::RenderModeRaster => self.set_render_mode(RenderMode::Raster),
+            Action::RenderModePathTraced => self.set_render_mode(RenderMode::PathTraced),
+            Action::RenderQuality => self.quality_window = true,
             Action::ShowExamples => {
                 self.gallery.open = true;
                 self.prefetch_gallery_thumbnails();
@@ -4499,6 +4979,9 @@ impl eframe::App for StudioApp {
         self.render_native_viewport(ctx);
         self.viewport_panel(ctx);
         self.import_window(ctx);
+        if self.quality_window {
+            self.quality_window(ctx);
+        }
         if let Some(action) = crate::ui::palette::window(ctx, &mut self.palette) {
             self.run_action(ctx, action);
         }
@@ -4518,8 +5001,11 @@ impl eframe::App for StudioApp {
 
         // Kick the very first render once the GPU is up. With a live native
         // viewport there is nothing to queue: it redraws only when its view
-        // changes (`invalidate_viewport` marks it dirty).
+        // changes (`invalidate_viewport` marks it dirty). Quality stills are
+        // explicit renders, never an automatic per-frame request.
         if !self.native_paints()
+            && !self.quality_mode_active()
+            && !self.busy
             && self.gpu.is_some()
             && self.viewport_texture.is_none()
             && self.pending_render.is_none()
@@ -4536,7 +5022,7 @@ impl eframe::App for StudioApp {
             );
             if (tw as u32, th as u32) != want && self.pending_render.is_none() && !self.busy {
                 self.viewport_texture = None;
-                self.request_viewport_render();
+                self.force_viewport_render();
             }
         }
         self.flush_params_validate();

@@ -120,6 +120,99 @@ impl Default for ExportSettings {
     }
 }
 
+/// M6: which engine renderer draws the interactive frame and exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderMode {
+    /// The one-shot PBR+POM terrain frame (`render_terrain_pbr_pom`), or the
+    /// TV12 accumulation path when [`OfflineSettings::enabled`].
+    #[default]
+    Raster,
+    /// The converged hybrid-ReSTIR path trace (`render_terrain_poster`).
+    PathTraced,
+}
+
+impl RenderMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Raster => "Raster (PBR + POM)",
+            Self::PathTraced => "Path traced (hybrid ReSTIR)",
+        }
+    }
+}
+
+/// Denoisers Studio may ask for. The engine reports which of them this
+/// environment can actually run (`offline.capabilities`), so `oidn` is only
+/// offered when the backend imports.
+pub const DENOISERS: [&str; 3] = ["none", "atrous", "oidn"];
+
+/// TV12 offline accumulation on the terrain renderer (M6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OfflineSettings {
+    /// Off: the viewport keeps the one-shot frame. On: every frame is an
+    /// accumulation of `samples` frames plus the optional denoiser.
+    pub enabled: bool,
+    pub samples: u32,
+    /// `none` | `atrous` | `oidn` (validated against the engine's report).
+    pub denoiser: String,
+}
+
+impl Default for OfflineSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            samples: 16,
+            denoiser: "none".to_owned(),
+        }
+    }
+}
+
+/// Hybrid-ReSTIR path-trace settings (M6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PathTraceSettings {
+    /// Camera samples per accumulated frame.
+    pub spp: u32,
+    pub min_frames: u32,
+    pub max_frames: u32,
+    /// Stop early once the estimated variance of the mean frame luminance is
+    /// below this. The engine raises rather than faking convergence, so a
+    /// value that is too tight surfaces as an error the UI shows verbatim.
+    pub variance_threshold: f32,
+    /// Poster tile edge in pixels; tiles are byte-identical to one frame.
+    pub tile: u32,
+    pub seed: u32,
+    pub env_intensity: f32,
+    /// Sample the document's colormap as per-texel albedo (decoded to linear)
+    /// instead of a constant grey.
+    pub colormap_albedo: bool,
+}
+
+impl Default for PathTraceSettings {
+    fn default() -> Self {
+        Self {
+            spp: 1,
+            min_frames: 8,
+            max_frames: 32,
+            variance_threshold: 1e-2,
+            tile: 1024,
+            seed: 7,
+            env_intensity: 0.35,
+            colormap_albedo: true,
+        }
+    }
+}
+
+/// Everything the render-quality switch owns.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RenderQuality {
+    pub mode: RenderMode,
+    pub offline: OfflineSettings,
+    pub path_trace: PathTraceSettings,
+}
+
 /// Reference to a terrain dataset on disk. The file itself is never copied
 /// into the project; only the path and the metadata captured at import time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -176,6 +269,9 @@ pub struct Project {
     /// means "engine defaults"; unknown keys are rejected on load into the
     /// engine rather than silently dropped.
     pub terrain_params: serde_json::Value,
+    /// v3 (additive, M6): render mode plus the offline/path-trace quality
+    /// settings the viewport and exports use.
+    pub render_quality: RenderQuality,
     /// v3: the scene document — the ordered layer tree the Layers panel edits.
     /// Migrated from the v2 fields (terrain reference, dataset list, serialized
     /// recipe) when absent.
@@ -198,6 +294,7 @@ impl Default for Project {
             datasets: Vec::new(),
             camera_rig_json: None,
             terrain_params: serde_json::Value::Object(serde_json::Map::new()),
+            render_quality: RenderQuality::default(),
             document: Document::default(),
         }
     }
@@ -662,5 +759,56 @@ mod tests {
         assert!(project.datasets.is_empty());
         assert!(project.camera_rig_json.is_none());
         assert_eq!(project.colormap.as_deref(), Some("forge3d:viridis"));
+        assert_eq!(
+            project.render_quality,
+            RenderQuality::default(),
+            "a v2 file renders one-shot raster, exactly as before M6"
+        );
+    }
+
+    #[test]
+    fn m6_render_quality_round_trips_and_defaults_to_one_shot_raster() {
+        // Defaults are the pre-M6 behaviour: one-shot raster, no accumulation
+        // and no path trace, so an old project renders exactly as before.
+        let quality = RenderQuality::default();
+        assert_eq!(quality.mode, RenderMode::Raster);
+        assert!(!quality.offline.enabled);
+        assert_eq!(quality.path_trace.max_frames, 32);
+
+        let mut project = Project::new();
+        project.render_quality = RenderQuality {
+            mode: RenderMode::PathTraced,
+            offline: OfflineSettings {
+                enabled: true,
+                samples: 24,
+                denoiser: "atrous".to_owned(),
+            },
+            path_trace: PathTraceSettings {
+                spp: 2,
+                min_frames: 4,
+                max_frames: 64,
+                variance_threshold: 5e-3,
+                tile: 512,
+                seed: 11,
+                env_intensity: 0.5,
+                colormap_albedo: false,
+            },
+        };
+        let json = serde_json::to_string(&project).expect("serialize");
+        let parsed: Project = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, project);
+        assert_eq!(parsed.render_quality.mode, RenderMode::PathTraced);
+        assert_eq!(parsed.render_quality.offline.samples, 24);
+        assert_eq!(parsed.render_quality.path_trace.tile, 512);
+        assert!(!parsed.render_quality.path_trace.colormap_albedo);
+        // The file is v3: the settings are a real field, not a serde default.
+        assert!(json.contains("\"render_quality\""));
+    }
+
+    #[test]
+    fn m6_render_mode_labels_name_the_engine_path() {
+        assert!(RenderMode::Raster.label().contains("PBR"));
+        assert!(RenderMode::PathTraced.label().contains("ReSTIR"));
+        assert_eq!(DENOISERS, ["none", "atrous", "oidn"]);
     }
 }

@@ -79,6 +79,7 @@ fn engine_loads_dem_and_renders_frames() {
     engine.send(Command::RenderFrame {
         width: 320,
         height: 240,
+        force: true,
     });
     let (w, h, rgba) = wait_for(
         &events,
@@ -160,6 +161,7 @@ fn render_params_reach_the_renderer() {
         engine.send(Command::RenderFrame {
             width: 320,
             height: 240,
+            force: true,
         });
         wait_for(
             &events,
