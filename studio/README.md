@@ -79,22 +79,19 @@ the worker executes a fixed bridge script (`BRIDGE_SOURCE` in
 Prerequisites (Fedora):
 
 - Rust toolchain (edition 2021; GPUI needs a current stable)
-- `libxkbcommon-devel` and `libxkbcommon-x11-devel` (GPUI links these
-  directly). If only the runtime libraries are installed, the link step fails
-  with `unable to find library -lxkbcommon`; create symlinks in a directory and
-  point the linker at it:
-
-  ```bash
-  mkdir -p ~/.local/lib/gpui-compat
-  ln -sf /usr/lib64/libxkbcommon.so.0 ~/.local/lib/gpui-compat/libxkbcommon.so
-  ln -sf /usr/lib64/libxkbcommon-x11.so.0 ~/.local/lib/gpui-compat/libxkbcommon-x11.so
-  export RUSTFLAGS="-L $HOME/.local/lib/gpui-compat"
-  ```
+- `libxkbcommon` and `libxkbcommon-x11` runtime libraries (GPUI links them
+  directly). No development package and no environment variable is required:
+  `crates/forge3d-studio/build.rs` links the versioned runtime object when the
+  unversioned development symlink is absent, and prints a warning naming the
+  package that would remove the workaround. 
 - The engine checkout's `.venv` with `forge3d` + `numpy` installed
   (`maturin develop` inside the repo creates it), **including** the Python
   development headers (uv-managed Pythons ship them)
 - A GPU adapter (Vulkan; software fallbacks work but render slowly)
 - A Wayland or X11 session
+
+The engine crate prints its own deprecation/dead-code warnings on newer
+toolchains; they are warnings from a dependency, not build failures.
 
 ```bash
 cd studio
