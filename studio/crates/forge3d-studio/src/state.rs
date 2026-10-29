@@ -57,6 +57,8 @@ pub struct ExampleEntry {
     pub unlock: String,
     pub scene: Option<serde_json::Value>,
     pub thumbnail: Option<String>,
+    /// Bridge ops the scene needs, as declared by the index.
+    pub ops: Vec<String>,
 }
 
 /// Blender-style workspaces: one row of tabs, each a working arrangement
@@ -364,6 +366,9 @@ pub struct Studio {
     pub thumbnails: std::collections::HashMap<String, Option<Arc<gpui_kit::RenderImage>>>,
     /// A running `git lfs pull`, so the UI can say it is working.
     pub lfs_fetch: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    /// Ops the bridge actually implements (`ops.list`), so a card can check
+    /// its declared ops instead of failing at click time.
+    pub available_ops: std::collections::HashSet<String>,
 
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
@@ -445,6 +450,7 @@ impl Studio {
             gallery_selected: None,
             thumbnails: std::collections::HashMap::new(),
             lfs_fetch: None,
+            available_ops: std::collections::HashSet::new(),
             focus_handle,
             drag: None,
             last_export: None,
@@ -487,6 +493,7 @@ impl Studio {
         studio
             .engine
             .call("mapscene.templates", serde_json::json!({}));
+        studio.engine.call("ops.list", serde_json::json!({}));
 
         window.focus(&studio.focus_handle, &mut *cx);
         studio
@@ -1728,6 +1735,21 @@ impl Studio {
         cx.notify();
     }
 
+    /// Declared ops this bridge does not implement (empty = the scene's engine
+    /// surface is present).
+    pub fn missing_ops(&self, entry: &ExampleEntry) -> Vec<String> {
+        if self.available_ops.is_empty() {
+            // The catalog has not arrived yet: do not claim a scene is broken.
+            return Vec::new();
+        }
+        entry
+            .ops
+            .iter()
+            .filter(|op| !self.available_ops.contains(*op))
+            .cloned()
+            .collect()
+    }
+
     /// Everything a gallery scene needs from disk, with its status.
     ///
     /// The index names assets as repo-relative paths inside `scene` (dem,
@@ -2806,6 +2828,17 @@ impl Studio {
                     })
                     .unwrap_or_default();
             }
+            "ops.list" => {
+                self.available_ops = result
+                    .get("ops")
+                    .and_then(|value| value.as_array())
+                    .map(|ops| {
+                        ops.iter()
+                            .filter_map(|op| op.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
             "mapscene.templates" => {
                 self.mapscene.templates = result
                     .get("templates")
@@ -3341,6 +3374,15 @@ fn load_examples() -> Vec<ExampleEntry> {
                             .get("thumbnail")
                             .and_then(|value| value.as_str())
                             .map(str::to_owned),
+                        ops: entry
+                            .get("ops")
+                            .and_then(|value| value.as_array())
+                            .map(|ops| {
+                                ops.iter()
+                                    .filter_map(|op| op.as_str().map(str::to_owned))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 })
                 .collect()

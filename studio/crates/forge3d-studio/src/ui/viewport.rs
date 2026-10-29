@@ -34,6 +34,10 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let studio_live = studio.clone();
 
     let mode = state.scene_mode;
+    let live_viewport = state.live_viewport;
+    let show_gizmo = state.show_gizmo;
+    let show_hud = state.show_hud;
+    let frame_size = state.frame_size;
     let tools = h_flex()
         .w_full()
         .justify_between()
@@ -83,8 +87,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     Button::new("viewport-gizmo-toggle")
                         .icon(IconName::Compass)
                         .xsmall()
-                        .when(state.show_gizmo, |button| button.outline())
-                        .when(!state.show_gizmo, |button| button.ghost())
+                        .when(show_gizmo, |button| button.outline())
+                        .when(!show_gizmo, |button| button.ghost())
                         .tooltip("Navigation gizmo")
                         .on_click(move |_, _, cx| {
                             let _ = studio_gizmo.update(cx, |studio, cx| studio.toggle_gizmo(cx));
@@ -94,8 +98,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     Button::new("viewport-hud-toggle")
                         .icon(IconName::Info)
                         .xsmall()
-                        .when(state.show_hud, |button| button.outline())
-                        .when(!state.show_hud, |button| button.ghost())
+                        .when(show_hud, |button| button.outline())
+                        .when(!show_hud, |button| button.ghost())
                         .tooltip("HUD")
                         .on_click(move |_, _, cx| {
                             let _ = studio_hud.update(cx, |studio, cx| {
@@ -106,14 +110,14 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 )
                 .child(
                     Button::new("viewport-live-toggle")
-                        .icon(if state.live_viewport {
+                        .icon(if live_viewport {
                             IconName::Pause
                         } else {
                             IconName::Play
                         })
                         .xsmall()
-                        .when(state.live_viewport, |button| button.outline())
-                        .when(!state.live_viewport, |button| button.ghost())
+                        .when(live_viewport, |button| button.outline())
+                        .when(!live_viewport, |button| button.ghost())
                         .tooltip("Live viewport (Ctrl+L)")
                         .on_click(move |_, _, cx| {
                             let _ = studio_live
@@ -159,7 +163,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     IconName::Box,
                     |studio, cx| studio.preset_camera(45.0, 35.0, cx),
                 ))
-                .child(live_button(studio, state.live_viewport)),
+                .child(live_button(studio, live_viewport)),
         )
         .child(
             // Fixed widths: a readout that changes width would resize the
@@ -172,7 +176,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     div()
                         .w(px(76.))
                         .text_right()
-                        .child(format!("{} × {}", state.frame_size.0, state.frame_size.1)),
+                        .child(format!("{} × {}", frame_size.0, frame_size.1)),
                 )
                 .child(
                     div()
@@ -290,7 +294,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
             let _ = studio_scroll.update(cx, |studio, cx| studio.zoom_by(delta, cx));
         })
         .child(body_content)
-        .when(state.show_hud, |body| {
+        .when(show_hud, |body| {
             body.child(
                 h_flex()
                     .absolute()
@@ -302,14 +306,85 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     .child(hud_left),
             )
         })
-        .when(state.show_gizmo, |body| {
+        .when(show_gizmo, |body| {
             body.child(crate::ui::gizmo::gizmo(&studio_entity, cx))
         });
+
+    let studio_fit = studio.clone();
+    let studio_zoom_in = studio.clone();
+    let studio_zoom_out = studio.clone();
+    let studio_iso = studio.clone();
+    let studio_live_rail = studio.clone();
+    let rail = v_flex()
+        .w(px(32.))
+        .h_full()
+        .items_center()
+        .gap_1()
+        .py_1()
+        .border_r_1()
+        .border_color(cx.theme().colors.border)
+        .child(
+            Button::new("rail-fit")
+                .icon(IconName::Maximize)
+                .xsmall()
+                .ghost()
+                .tooltip("Fit view (F)")
+                .on_click(move |_, _, cx| {
+                    let _ = studio_fit.update(cx, |studio, cx| studio.fit_camera(cx));
+                }),
+        )
+        .child(
+            Button::new("rail-zoom-in")
+                .icon(IconName::ZoomIn)
+                .xsmall()
+                .ghost()
+                .tooltip("Zoom in")
+                .on_click(move |_, _, cx| {
+                    let _ = studio_zoom_in.update(cx, |studio, cx| studio.zoom_by(120.0, cx));
+                }),
+        )
+        .child(
+            Button::new("rail-zoom-out")
+                .icon(IconName::ZoomOut)
+                .xsmall()
+                .ghost()
+                .tooltip("Zoom out")
+                .on_click(move |_, _, cx| {
+                    let _ = studio_zoom_out.update(cx, |studio, cx| studio.zoom_by(-120.0, cx));
+                }),
+        )
+        .child(
+            Button::new("rail-iso")
+                .icon(IconName::Box)
+                .xsmall()
+                .ghost()
+                .tooltip("Isometric view (0)")
+                .on_click(move |_, _, cx| {
+                    let _ =
+                        studio_iso.update(cx, |studio, cx| studio.preset_camera(45.0, 35.0, cx));
+                }),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("rail-live")
+                .icon(if live_viewport {
+                    IconName::Pause
+                } else {
+                    IconName::Play
+                })
+                .xsmall()
+                .ghost()
+                .tooltip("Live viewport (Ctrl+L)")
+                .on_click(move |_, _, cx| {
+                    let _ =
+                        studio_live_rail.update(cx, |studio, cx| studio.toggle_live_viewport(cx));
+                }),
+        );
 
     v_flex()
         .size_full()
         .child(tools)
-        .child(body)
+        .child(h_flex().flex_1().w_full().child(rail).child(body))
         .into_any_element()
 }
 

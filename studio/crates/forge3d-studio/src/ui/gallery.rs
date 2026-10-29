@@ -112,6 +112,7 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
 
     for entry in &entries {
         let runnable = entry.tier == 'A';
+        let missing_ops = studio.update(cx, |studio, _| studio.missing_ops(entry));
         let state = cards.get(&entry.id).cloned().unwrap_or(CardState::Idle);
         let thumbnail = studio.update(cx, |studio, cx| studio.example_thumbnail(entry, cx));
         let studio_card = studio.clone();
@@ -155,7 +156,8 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
             (CardState::Loading, _) => ("opening…", cx.theme().colors.warning),
             (CardState::Loaded, _) => ("opened", cx.theme().colors.success),
             (CardState::Failed(_), _) => ("failed", cx.theme().colors.danger),
-            (_, 'A') => ("runs today", cx.theme().colors.success),
+            (_, 'A') if missing_ops.is_empty() => ("runs today", cx.theme().colors.success),
+            (_, 'A') => ("engine op missing", cx.theme().colors.danger),
             (_, tier) => (
                 if tier == 'B' {
                     "needs a milestone"
@@ -243,6 +245,8 @@ pub fn carousel_dialog(studio: Entity<Studio>, cx: &mut App) {
         };
 
         let assets = studio.read(cx).example_assets(&entry);
+        let missing_ops = studio.update(cx, |studio, _| studio.missing_ops(&entry));
+        let declared_ops = entry.ops.clone();
         let thumbnail = studio.update(cx, |studio, cx| studio.example_thumbnail(&entry, cx));
         let card_state = studio
             .read(cx)
@@ -250,7 +254,7 @@ pub fn carousel_dialog(studio: Entity<Studio>, cx: &mut App) {
             .get(&entry.id)
             .cloned()
             .unwrap_or(CardState::Idle);
-        let runnable = entry.tier == 'A';
+        let runnable = entry.tier == 'A' && missing_ops.is_empty();
         let ready = assets.iter().all(|asset| asset.ready());
         let fetchable = assets
             .iter()
@@ -328,15 +332,54 @@ pub fn carousel_dialog(studio: Entity<Studio>, cx: &mut App) {
                 .child(asset_rows(&assets, cx)),
         );
 
+        if !declared_ops.is_empty() {
+            let mut ops = v_flex().gap_1().child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .child(format!("Engine ops ({})", declared_ops.len())),
+            );
+            for op in &declared_ops {
+                let missing = missing_ops.contains(op);
+                ops = ops.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(if missing {
+                            IconName::CircleX
+                        } else {
+                            IconName::CircleCheck
+                        })
+                        .child(div().text_xs().child(op.clone()))
+                        .child(muted(
+                            if missing {
+                                "missing from this bridge"
+                            } else {
+                                ""
+                            },
+                            cx,
+                        )),
+                );
+            }
+            body = body.child(ops);
+        }
+
         if !runnable {
             body = body.child(
                 div()
                     .text_xs()
                     .text_color(cx.theme().colors.warning)
-                    .child(format!(
-                        "This workflow needs {} — its engine surface is not in Studio yet, so it cannot open.",
-                        entry.unlock
-                    )),
+                    .child(if missing_ops.is_empty() {
+                        format!(
+                            "This workflow needs {} — its engine surface is not in Studio yet, so it cannot open.",
+                            entry.unlock
+                        )
+                    } else {
+                        format!(
+                            "This bridge does not implement {} — the card stays closed until it does.",
+                            missing_ops.join(", ")
+                        )
+                    }),
             );
         }
 

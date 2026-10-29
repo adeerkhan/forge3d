@@ -2663,6 +2663,9 @@ _OPS = {
     "smoke.load": _op_smoke_load,
     "smoke.clear": _op_smoke_clear,
     "smoke.composite": _op_smoke_composite,
+    # The op catalog itself: the UI checks an example's declared ops instead of
+    # discovering a missing one at click time.
+    "ops.list": lambda p: {"ops": sorted(_OPS.keys())},
 }
 
 
