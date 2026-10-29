@@ -15,7 +15,9 @@ use crate::state::Studio;
 
 impl Render for Studio {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // action handlers are installed once in `Studio::new`;
+        let started = std::env::var_os("FORGE3D_STUDIO_UI_TIMING")
+            .is_some()
+            .then(std::time::Instant::now);
         let title = format!(
             "Forge3D Studio — {}{}",
             self.project.name,
@@ -77,7 +79,7 @@ impl Render for Studio {
             );
         }
 
-        v_flex()
+        let root = v_flex()
             .size_full()
             .bg(cx.theme().colors.background)
             .child(title_bar)
@@ -89,7 +91,16 @@ impl Render for Studio {
                     .min_h(px(0.))
                     .child(self.dock_area.clone()),
             )
-            .child(self.status_bar(cx))
+            .child(self.status_bar(cx));
+
+        // Dev hook: how long the UI tree takes to rebuild. If this is
+        // milliseconds per pointer event, the CPU — not the GPU — is what
+        // makes an orbit feel slow.
+        if let Some(started) = started {
+            self.ui_timing
+                .record(started.elapsed().as_secs_f32() * 1000.0);
+        }
+        root
     }
 }
 

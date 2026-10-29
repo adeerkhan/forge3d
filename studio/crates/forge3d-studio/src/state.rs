@@ -319,6 +319,33 @@ pub struct MapSceneState {
     pub last_requested_present: bool,
 }
 
+/// Rolling UI rebuild timing (dev hook, `FORGE3D_STUDIO_UI_TIMING`).
+#[derive(Default)]
+pub struct UiTiming {
+    samples: u32,
+    total_ms: f32,
+    max_ms: f32,
+}
+
+impl UiTiming {
+    pub fn record(&mut self, ms: f32) {
+        self.samples += 1;
+        self.total_ms += ms;
+        self.max_ms = self.max_ms.max(ms);
+        if self.samples.is_multiple_of(30) {
+            log::info!(
+                "ui render: {:.1} ms avg, {:.1} ms max over {} rebuilds",
+                self.total_ms / self.samples as f32,
+                self.max_ms,
+                self.samples
+            );
+            self.samples = 0;
+            self.total_ms = 0.0;
+            self.max_ms = 0.0;
+        }
+    }
+}
+
 /// One certificate this session produced.
 #[derive(Clone, Debug)]
 pub struct SessionCertificate {
@@ -380,7 +407,7 @@ pub enum PendingJob {
     DiagnosticsSnapshot,
     Capabilities,
     SequenceFrame,
-    MapSceneTemplate,
+    MapSceneTemplate { render_after: bool },
     MapSceneValidate,
     MapSceneRender,
     MapSceneFurniture { render_after: bool },
@@ -492,6 +519,7 @@ pub struct Studio {
     /// its declared ops instead of failing at click time.
     pub available_ops: std::collections::HashSet<String>,
 
+    pub ui_timing: UiTiming,
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
     pub last_export: Option<PathBuf>,
@@ -579,6 +607,7 @@ impl Studio {
             thumbnails: std::collections::HashMap::new(),
             lfs_fetch: None,
             available_ops: std::collections::HashSet::new(),
+            ui_timing: UiTiming::default(),
             focus_handle,
             drag: None,
             last_export: None,
@@ -861,6 +890,18 @@ impl Studio {
         if self.selection.is_empty() {
             return;
         }
+        if let Some(id) = self.primary_layer() {
+            if self
+                .project
+                .document
+                .layer(id)
+                .map(|layer| layer.locked)
+                .unwrap_or(false)
+            {
+                self.set_status("Layer is locked — unlock it to delete");
+                return;
+            }
+        }
         let before = self.project.document.clone();
         for id in self.selection.clone() {
             self.project.document.remove(id);
@@ -918,6 +959,10 @@ impl Studio {
     /// or path tracing), because that is what the engine's progress, denoiser
     /// and certificate provenance describe.
     pub fn request_still(&mut self, cx: &mut Context<Self>) {
+        if self.scene_mode == SceneMode::MapScene {
+            self.render_mapscene(cx);
+            return;
+        }
         if self.quality_mode() {
             let (width, height) =
                 render_size(self.viewport_size.get().0, self.viewport_size.get().1);
@@ -939,6 +984,19 @@ impl Studio {
         self.request_frame(cx, true);
     }
 
+    /// Send the terrain layer's visibility/opacity to the viewport worker.
+    fn sync_layer_style(&mut self) {
+        let (visible, opacity) = self
+            .project
+            .document
+            .terrain_layer()
+            .map(|layer| (layer.visible, layer.opacity))
+            .unwrap_or((true, 1.0));
+        self.viewport
+            .send(ViewportCommand::SetLayerStyle { visible, opacity });
+        self.viewport_dirty = true;
+    }
+
     pub fn toggle_layer_visible(&mut self, id: LayerId, cx: &mut Context<Self>) {
         let before = self.project.document.clone();
         if let Some(layer) = self.project.document.layer_mut(id) {
@@ -950,6 +1008,7 @@ impl Studio {
         }
         self.history.record(before);
         self.project_dirty = true;
+        self.sync_layer_style();
         self.invalidate_viewport(cx);
         cx.notify();
     }
@@ -957,7 +1016,7 @@ impl Studio {
     // ----------------------------------------------------------------- camera
 
     /// Apply a camera edit: the document, the live scene, and one frame.
-    pub fn set_camera(&mut self, camera: CameraParams, cx: &mut Context<Self>) {
+    pub fn set_camera(&mut self, camera: CameraParams, _cx: &mut Context<Self>) {
         self.project.camera = camera;
         self.project_dirty = true;
         self.viewport.send(ViewportCommand::SetView {
@@ -965,7 +1024,11 @@ impl Studio {
             sun: self.project.sun,
         });
         self.viewport_dirty = true;
-        cx.notify();
+        // No notify here on purpose: a pointer drag fires hundreds of events a
+        // second, and the only thing that changes on screen is the next frame.
+        // The frame event repaints; the state pump requests at most one frame
+        // per tick. This is what keeps an orbit from repainting the whole UI
+        // per mouse event.
     }
 
     /// Send the camera and sun to the bridge as well, once an interaction
@@ -1319,8 +1382,13 @@ impl Studio {
     /// and hands it back through [`attach_rename_input`](Self::attach_rename_input),
     /// so the text and cursor survive re-renders.
     pub fn begin_rename(&mut self, id: LayerId, cx: &mut Context<Self>) {
-        if self.project.document.layer(id).is_none() {
-            return;
+        match self.project.document.layer(id) {
+            None => return,
+            Some(layer) if layer.locked => {
+                self.set_status("Layer is locked — unlock it to rename");
+                return;
+            }
+            Some(_) => {}
         }
         self.selection = vec![id];
         self.layers.renaming = Some(id);
@@ -1370,6 +1438,16 @@ impl Studio {
 
     /// A drag started: snapshot the document so the whole drag is one undo step.
     pub fn begin_layer_drag(&mut self, id: LayerId, cx: &mut Context<Self>) {
+        if self
+            .project
+            .document
+            .layer(id)
+            .map(|layer| layer.locked)
+            .unwrap_or(false)
+        {
+            self.set_status("Layer is locked — unlock it to reorder");
+            return;
+        }
         self.layers.dragging = Some(id);
         self.layers.drag_before = Some(self.project.document.clone());
         self.layers.drop_target = None;
@@ -1494,6 +1572,17 @@ impl Studio {
         if self.selection.is_empty() {
             return;
         }
+        let locked = self.selection.iter().all(|id| {
+            self.project
+                .document
+                .layer(*id)
+                .map(|layer| layer.locked)
+                .unwrap_or(false)
+        });
+        if locked {
+            self.set_status("Layer is locked — unlock it to change opacity");
+            return;
+        }
         let before = self.project.document.clone();
         for id in self.selection.clone() {
             if let Some(layer) = self.project.document.layer_mut(id) {
@@ -1506,6 +1595,15 @@ impl Studio {
     }
 
     // ----------------------------------------------------------------- quality
+
+    /// Whether the interactive native viewport should paint at all.
+    ///
+    /// Terrain mode paints on the engine's device; MapScene mode and the
+    /// quality modes are stills (the bridge renders them), so the native path
+    /// must stay out of the way instead of painting over the recipe.
+    pub fn native_paints(&self) -> bool {
+        self.scene_mode == SceneMode::Terrain && !self.quality_mode()
+    }
 
     /// A quality mode is a still: the native viewport stops painting and the
     /// image comes from the bridge (offline accumulation or path tracing).
@@ -1870,7 +1968,17 @@ impl Studio {
             SceneMode::MapScene => "mapscene".to_owned(),
         };
         self.project_dirty = true;
-        self.invalidate_viewport(cx);
+        if mode == SceneMode::MapScene {
+            // The native frame is not the map; clear it so the viewport can
+            // say what to do instead of showing terrain that is not the recipe.
+            self.frame = None;
+            self.viewport_dirty = false;
+            if self.mapscene.recipe_json.is_some() {
+                self.render_mapscene(cx);
+            }
+        } else {
+            self.invalidate_viewport(cx);
+        }
         self.set_status(match mode {
             SceneMode::Terrain => "Terrain mode",
             SceneMode::MapScene => "MapScene mode — build and render a recipe",
@@ -2501,7 +2609,8 @@ impl Studio {
             }
         }
         let job = self.engine.call("mapscene.template", params);
-        self.pending_jobs.insert(job, PendingJob::MapSceneTemplate);
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneTemplate { render_after: true });
         self.set_status("Building MapScene recipe…");
         cx.notify();
     }
@@ -2943,7 +3052,7 @@ impl Studio {
         // With the live viewport off, a drag only marks the view dirty; the
         // gesture end (or Ctrl+R) draws it.
         let dragging_without_live = self.drag.is_some() && !self.live_viewport;
-        if self.project.terrain.is_some() && !dragging_without_live && !self.quality_mode() {
+        if self.project.terrain.is_some() && !dragging_without_live && self.native_paints() {
             let (width, height) = self.viewport_size.get();
             let size = render_size(width, height);
             if width > 1.0
@@ -3394,7 +3503,7 @@ impl Studio {
             PendingJob::Capabilities => {
                 self.offline_caps = Some(result.clone());
             }
-            PendingJob::MapSceneTemplate => {
+            PendingJob::MapSceneTemplate { render_after } => {
                 let recipe = result
                     .get("recipe")
                     .or_else(|| result.get("recipe_json"))
@@ -3414,6 +3523,10 @@ impl Studio {
                             Some("Recipe built from the template".to_owned());
                         self.busy = false;
                         self.set_status("Recipe built — validate or render it");
+                        if render_after && std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_none()
+                        {
+                            self.render_mapscene(cx);
+                        }
                         if std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_some() {
                             // Dev hook: apply a full furniture set and render,
                             // so the cartography path is exercised end to end.

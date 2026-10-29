@@ -232,6 +232,9 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     cx.theme().colors.muted_foreground
                 })
                 .when(selected, |name| name.font_semibold())
+                .when(layer.locked, |name| {
+                    name.text_color(cx.theme().colors.muted_foreground)
+                })
                 .child(layer.name.clone())
                 .into_any_element()
         };
@@ -359,6 +362,11 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     })
                     .xsmall()
                     .ghost()
+                    .tooltip(if layer.locked {
+                        "Locked: rename, reorder, delete and opacity are blocked"
+                    } else {
+                        "Lock this layer"
+                    })
                     .on_click(move |_, _, cx| {
                         studio_lock.update(cx, |studio, cx| studio.toggle_layer_lock(id, cx));
                     }),
@@ -372,6 +380,11 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                     })
                     .xsmall()
                     .ghost()
+                    .tooltip(if layer.visible {
+                        "Hide this layer"
+                    } else {
+                        "Show this layer"
+                    })
                     .on_click(move |_, _, cx| {
                         studio_eye.update(cx, |studio, cx| studio.toggle_layer_visible(id, cx));
                     }),

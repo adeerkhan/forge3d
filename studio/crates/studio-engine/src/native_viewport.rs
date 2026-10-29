@@ -70,6 +70,11 @@ pub struct NativeViewport {
     last_render_ms: f32,
     /// Linear (stored u8) → sRGB u8, computed once.
     srgb_lut: [u8; 256],
+    layer_visible: bool,
+    layer_opacity: f32,
+    /// Last sun intensity pushed into the scene: the viewer clears to
+    /// `(i*0.5, i*0.7, i*0.9)`, which is the backdrop a faded layer shows.
+    sun_intensity: f32,
 }
 
 impl NativeViewport {
@@ -96,6 +101,9 @@ impl NativeViewport {
             has_terrain: false,
             last_render_ms: 0.0,
             srgb_lut: srgb_encode_table(),
+            layer_visible: true,
+            layer_opacity: 1.0,
+            sun_intensity: 1.0,
         })
     }
 
@@ -148,9 +156,16 @@ impl NativeViewport {
             .map_err(|error| format!("native viewport colormap: {error}"))
     }
 
+    /// Apply the outliner's terrain style (visibility and opacity).
+    pub fn set_layer_style(&mut self, visible: bool, opacity: f32) {
+        self.layer_visible = visible;
+        self.layer_opacity = opacity.clamp(0.0, 1.0);
+    }
+
     /// Push the document's camera and sun into the scene. Cheap; call every
     /// frame before [`render_rgba`](Self::render_rgba).
     pub fn set_view(&mut self, camera: &CameraParams, sun: &SunParams) {
+        self.sun_intensity = sun.intensity;
         self.scene.set_viewer_camera(
             camera.phi_deg,
             camera.theta_deg,
@@ -241,6 +256,23 @@ impl NativeViewport {
             .map_err(|_| "readback channel closed".to_owned())?
             .map_err(|error| format!("readback map: {error}"))?;
 
+        // Layer opacity fades the frame toward the backdrop the render already
+        // cleared to; a hidden layer shows only that backdrop. Doing it here
+        // keeps it honest: the pixels the UI shows are the pixels the engine
+        // drew, composited by one documented rule.
+        let intensity = self.sun_intensity.clamp(0.0, 1.0);
+        let background = [
+            self.srgb_lut[(intensity * 0.5 * 255.0) as usize] as u32,
+            self.srgb_lut[(intensity * 0.7 * 255.0) as usize] as u32,
+            self.srgb_lut[(intensity * 0.9 * 255.0) as usize] as u32,
+        ];
+        let opacity = if self.layer_visible {
+            self.layer_opacity
+        } else {
+            0.0
+        };
+        let keep = (opacity * 255.0).round() as u32;
+
         let mut rgba = Vec::with_capacity((unpadded * height) as usize);
         {
             let mapped = slice.get_mapped_range();
@@ -249,9 +281,11 @@ impl NativeViewport {
                 let end = start + unpadded as usize;
                 for pixel in mapped[start..end].as_chunks::<4>().0 {
                     // Alpha stays opaque; RGB is linear storage → sRGB display.
-                    rgba.push(self.srgb_lut[pixel[0] as usize]);
-                    rgba.push(self.srgb_lut[pixel[1] as usize]);
-                    rgba.push(self.srgb_lut[pixel[2] as usize]);
+                    for channel in 0..3 {
+                        let source = self.srgb_lut[pixel[channel] as usize] as u32;
+                        let mixed = (source * keep + background[channel] * (255 - keep)) / 255;
+                        rgba.push(mixed as u8);
+                    }
                     rgba.push(255);
                 }
             }
@@ -321,6 +355,12 @@ pub enum ViewportCommand {
     },
     ClearDem,
     SetColormap(Option<String>),
+    /// Terrain layer style from the outliner: a hidden layer paints the
+    /// backdrop, an opacity below 1 fades the frame toward it.
+    SetLayerStyle {
+        visible: bool,
+        opacity: f32,
+    },
     SetView {
         camera: CameraParams,
         sun: SunParams,
@@ -472,6 +512,9 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
                 viewport.clear_dem();
                 rendered_once = false;
                 let _ = tx.send(ViewportEvent::TerrainCleared);
+            }
+            ViewportCommand::SetLayerStyle { visible, opacity } => {
+                viewport.set_layer_style(visible, opacity);
             }
             ViewportCommand::SetColormap(name) => {
                 log::info!("viewport colormap request: {name:?}");

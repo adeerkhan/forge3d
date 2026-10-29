@@ -398,6 +398,37 @@ fn native_viewport_body() {
         "a rejected colormap must leave the previous palette in place"
     );
 
+    // The outliner's visibility and opacity reach the pixels the UI shows:
+    // hidden means the backdrop the renderer clears to, and a faded layer sits
+    // between the backdrop and the full frame.
+    viewport.set_view(&camera, &sun);
+    let full = viewport.render_rgba(96, 64).expect("baseline render");
+    viewport.set_layer_style(false, 1.0);
+    let hidden = viewport.render_rgba(96, 64).expect("hidden render");
+    let first = &hidden.rgba[0..3];
+    assert!(
+        hidden
+            .rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|px| px[..3] == *first),
+        "a hidden layer must paint the flat backdrop"
+    );
+    assert_ne!(full.rgba, hidden.rgba, "hiding must change the frame");
+
+    viewport.set_layer_style(true, 0.5);
+    let faded = viewport.render_rgba(96, 64).expect("faded render");
+    assert_ne!(faded.rgba, full.rgba, "opacity must change the frame");
+    assert_ne!(faded.rgba, hidden.rgba, "half opacity is not hidden");
+
+    viewport.set_layer_style(true, 1.0);
+    let restored = viewport.render_rgba(96, 64).expect("restored render");
+    assert_eq!(
+        restored.rgba, full.rgba,
+        "full opacity is the original frame"
+    );
+
     viewport.clear_dem();
     assert!(!viewport.has_terrain());
     assert!(

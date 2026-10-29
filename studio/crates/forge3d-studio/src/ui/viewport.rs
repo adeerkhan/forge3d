@@ -118,7 +118,11 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                         .xsmall()
                         .when(live_viewport, |button| button.outline())
                         .when(!live_viewport, |button| button.ghost())
-                        .tooltip("Live viewport (Ctrl+L)")
+                        .tooltip(if live_viewport {
+                            "Live: redraws while you move. Ctrl+L pauses it."
+                        } else {
+                            "Paused: draws once when you let go. Ctrl+L resumes."
+                        })
                         .on_click(move |_, _, cx| {
                             let _ = studio_live
                                 .update(cx, |studio, cx| studio.toggle_live_viewport(cx));
@@ -192,32 +196,51 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
             .size_full()
             .object_fit(ObjectFit::Contain)
             .into_any_element(),
-        None => v_flex()
-            .size_full()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().colors.muted_foreground)
-                    .child(if has_terrain {
-                        "Rendering the first frame…"
-                    } else {
-                        "No terrain loaded"
-                    }),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().colors.muted_foreground)
-                    .child(if has_terrain {
-                        "The engine is compiling the terrain pipeline."
-                    } else {
-                        "File ▸ Import DEM… to start a scene."
-                    }),
-            )
-            .into_any_element(),
+        None => {
+            let studio_build = studio.clone();
+            v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().colors.muted_foreground)
+                        .child(if mode == crate::state::SceneMode::MapScene {
+                            "No map rendered yet"
+                        } else if has_terrain {
+                            "Rendering the first frame…"
+                        } else {
+                            "No terrain loaded"
+                        }),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().colors.muted_foreground)
+                        .child(match mode {
+                            crate::state::SceneMode::MapScene => {
+                                "Cartography ▸ Build recipe renders the map here."
+                            }
+                            _ if has_terrain => "The engine is compiling the terrain pipeline.",
+                            _ => "File ▸ Import DEM… to start a scene.",
+                        }),
+                )
+                .when(mode == crate::state::SceneMode::MapScene, |body| {
+                    body.child(
+                        Button::new("viewport-build-map")
+                            .label("Build recipe")
+                            .small()
+                            .primary()
+                            .on_click(move |_, _, cx| {
+                                let _ =
+                                    studio_build.update(cx, |studio, cx| studio.build_mapscene(cx));
+                            }),
+                    )
+                })
+                .into_any_element()
+        }
     };
 
     let studio_down = studio.clone();
@@ -228,10 +251,17 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let studio_scroll = studio.clone();
     let size_for_layout = size_cell.clone();
 
-    let hud_left = format!(
-        "Orbit {:.0}° · Elev {:.0}° · Dist {:.0}",
-        camera.phi_deg, camera.theta_deg, camera.radius
-    );
+    let hud_left = if live_viewport {
+        format!(
+            "Orbit {:.0}° · Elev {:.0}° · Dist {:.0}",
+            camera.phi_deg, camera.theta_deg, camera.radius
+        )
+    } else {
+        format!(
+            "Orbit {:.0}° · Elev {:.0}° · Dist {:.0} · paused (draws on release)",
+            camera.phi_deg, camera.theta_deg, camera.radius
+        )
+    };
 
     let body = div()
         .relative()
