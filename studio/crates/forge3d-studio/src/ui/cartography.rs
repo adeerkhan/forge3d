@@ -86,6 +86,7 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
     let studio_interval_inc = studio.clone();
     let studio_apply = studio.clone();
     let studio_render = studio.clone();
+    let studio_export = studio.clone();
 
     let mut body = v_flex().w_full().gap_3();
 
@@ -289,6 +290,15 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
                     .primary()
                     .on_click(move |_, _, cx| {
                         studio_render.update(cx, |studio, cx| studio.apply_furniture(true, cx));
+                    }),
+            )
+            .child(
+                Button::new("map-export")
+                    .label("Export map…")
+                    .xsmall()
+                    .outline()
+                    .on_click(move |_, _, cx| {
+                        studio_export.update(cx, |studio, cx| studio.export_map(cx));
                     }),
             )
             .when(!has_recipe, |row| {

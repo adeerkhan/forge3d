@@ -192,6 +192,85 @@ pub fn mapscene(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
             cx,
         ));
 
+    if mapscene.template == "terrain_vector_labels" {
+        let studio_color = studio.clone();
+        let studio_width_dec = studio.clone();
+        let studio_width_inc = studio.clone();
+        let mut colors = h_flex().gap_1();
+        for (name, hex) in [
+            ("White", "#ffffff"),
+            ("Orange", "#ff8a3d"),
+            ("Red", "#e5484d"),
+            ("Blue", "#3d8bff"),
+        ] {
+            let selected = mapscene.line_color == hex;
+            let studio_pick = studio_color.clone();
+            let hex_owned = hex.to_owned();
+            colors = colors.child(
+                Button::new(format!("vector-color-{name}"))
+                    .label(name)
+                    .xsmall()
+                    .when(selected, |button| button.primary())
+                    .when(!selected, |button| button.outline())
+                    .on_click(move |_, _, cx| {
+                        let hex = hex_owned.clone();
+                        studio_pick.update(cx, |studio, cx| {
+                            studio.mapscene.line_color = hex;
+                            studio.project_dirty = true;
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        body = body.child(
+            v_flex()
+                .gap_1()
+                .child(title("Vector style", cx))
+                .child(colors)
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(note("Width", cx))
+                        .child(
+                            Button::new("vector-width-dec")
+                                .label("−")
+                                .xsmall()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    studio_width_dec.update(cx, |studio, cx| {
+                                        studio.mapscene.line_width =
+                                            (studio.mapscene.line_width - 0.5).clamp(0.5, 12.0);
+                                        studio.project_dirty = true;
+                                        cx.notify();
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .w(px(40.))
+                                .text_xs()
+                                .text_center()
+                                .child(format!("{:.1}", mapscene.line_width)),
+                        )
+                        .child(
+                            Button::new("vector-width-inc")
+                                .label("+")
+                                .xsmall()
+                                .ghost()
+                                .on_click(move |_, _, cx| {
+                                    studio_width_inc.update(cx, |studio, cx| {
+                                        studio.mapscene.line_width =
+                                            (studio.mapscene.line_width + 0.5).clamp(0.5, 12.0);
+                                        studio.project_dirty = true;
+                                        cx.notify();
+                                    });
+                                }),
+                        ),
+                ),
+        );
+    }
+
     if let Some(status) = &mapscene.last_status {
         body = body.child(note(status.clone(), cx));
     }

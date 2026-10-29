@@ -309,9 +309,14 @@ pub struct MapSceneState {
     pub label_text: String,
     /// Recipe camera (gallery scenes pin one; the template has defaults).
     pub camera: Option<MapSceneCamera>,
+    /// Vector line style for the vector+labels template.
+    pub line_color: String,
+    pub line_width: f32,
     pub recipe_json: Option<String>,
     pub last_status: Option<String>,
     pub certificate_sha: Option<String>,
+    /// True when the next render should also be shown in the viewport.
+    pub last_requested_present: bool,
 }
 
 /// One certificate this session produced.
@@ -558,6 +563,8 @@ impl Studio {
             furniture: Furniture::default(),
             mapscene: MapSceneState {
                 template: "terrain".to_owned(),
+                line_color: "#ff8a3d".to_owned(),
+                line_width: 2.0,
                 label_text: "Studio".to_owned(),
                 ..MapSceneState::default()
             },
@@ -2471,6 +2478,8 @@ impl Studio {
             .map(|path| path.to_string_lossy().into_owned());
         let mut params = serde_json::json!({
             "template": self.mapscene.template,
+            "line_color": self.mapscene.line_color,
+            "line_width": self.mapscene.line_width,
             "dem_path": terrain.path.to_string_lossy(),
             "raster_path": raster,
             "width": self.project.export.width,
@@ -2538,28 +2547,57 @@ impl Studio {
         cx.notify();
     }
 
-    /// `mapscene.render`: the certified `gpu_terrain` path.
+    /// `mapscene.render`: the certified `gpu_terrain` path. Without a path the
+    /// frame goes to a prompt file and is shown in the viewport; with one it is
+    /// the map export.
     pub fn render_mapscene(&mut self, cx: &mut Context<Self>) {
-        let Some(recipe) = self.mapscene.recipe_json.clone() else {
-            self.push_error("MapScene", "build a recipe first");
-            return;
-        };
         let out = std::env::temp_dir().join(format!(
             "studio-mapscene-{}-{}.png",
             std::process::id(),
             self.certificates.len()
         ));
+        self.render_mapscene_to(out, true, cx);
+    }
+
+    /// Cartography ▸ Export map…: render the recipe straight to a file.
+    pub fn export_map(&mut self, cx: &mut Context<Self>) {
+        if self.mapscene.recipe_json.is_none() {
+            self.push_error("Cartography", "build a MapScene recipe first");
+            return;
+        }
+        let directory = std::env::current_dir().unwrap_or_default();
+        let name = format!("{}.png", slug(&self.project.name));
+        let rx = cx.prompt_for_new_path(&directory, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let picked = one_path(rx.await.ok().and_then(|result| result.ok()));
+            if let Some(path) = picked {
+                let _ = this.update(cx, |this, cx| this.render_mapscene_to(path, false, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn render_mapscene_to(&mut self, path: PathBuf, present: bool, cx: &mut Context<Self>) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("MapScene", "build a recipe first");
+            return;
+        };
         self.busy = true;
         let job = self.engine.call(
             "mapscene.render",
             serde_json::json!({
                 "recipe_json": recipe,
-                "out_png": out.to_string_lossy(),
+                "out_png": path.to_string_lossy(),
                 "certificate": self.sign_renders,
             }),
         );
         self.pending_jobs.insert(job, PendingJob::MapSceneRender);
-        self.set_status("Rendering the recipe through MapScene…");
+        self.mapscene.last_requested_present = present;
+        self.set_status(if present {
+            "Rendering the recipe through MapScene…".to_owned()
+        } else {
+            format!("Exporting map to {}", path.display())
+        });
         cx.notify();
     }
 
@@ -3474,7 +3512,11 @@ impl Studio {
                 self.mapscene.last_status = Some(format!("rendered: {status}"));
                 if let Some(path) = png {
                     log::info!("mapscene frame written: {}", path.display());
-                    self.present_png(&path);
+                    if self.mapscene.last_requested_present {
+                        self.present_png(&path);
+                    } else {
+                        self.last_export = Some(path.clone());
+                    }
                 }
                 self.set_status("MapScene frame rendered");
             }

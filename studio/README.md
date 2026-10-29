@@ -195,6 +195,10 @@ UI runtime (GUI.md Part X):
       reads a built recipe's furniture back instead of keeping its own copy.
       The furniture is the engine's `MapFurnitureLayer`, so it is drawn over
       the finished frame with label keep-outs, not faked in the viewport.
+      Vector scenes expose line colour/width, and **Export map…** renders the
+      recipe straight to a chosen PNG. Auto-derived legends (classifying the
+      raster instead of typing swatches) are the next step and need a
+      raster-classes op.
 - [x] **G11 Blender-shaped shell** — workspace tabs, one editor per dock slot,
       a properties icon strip (Layer, Terrain, Render, World, Scene,
       Statistics), outliner icon tabs (Layers/Examples), bottom strip

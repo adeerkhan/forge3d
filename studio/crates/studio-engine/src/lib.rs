@@ -1886,13 +1886,22 @@ def _op_mapscene_template(p):
                 "priority_class": "cities",
             }
         ]
+        line_color = str(p.get("line_color") or "#ffffff")
+        line_width = float(p.get("line_width", 2.0))
         layers = [
             f3d.VectorOverlay(
                 layer_id="lines",
                 crs=crs,
                 features=features,
                 style={"version": 8, "layers": [
-                    {"id": "lines", "type": "line", "paint": {"line-color": "#ffffff"}}
+                    {
+                        "id": "lines",
+                        "type": "line",
+                        "paint": {
+                            "line-color": line_color,
+                            "line-width": line_width,
+                        },
+                    }
                 ]},
                 metadata={"source_id": "studio-vector-overlay"},
             ),
