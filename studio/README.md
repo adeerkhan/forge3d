@@ -182,6 +182,17 @@ UI runtime (GUI.md Part X):
       (see GUI.md Part X).
 - [x] **G9 Retire the old shell** — no egui module, dependency or doc reference
       remains in `studio/`.
+- [x] **G10 Examples that open** — a card now applies its whole scene (the
+      `TerrainLoaded` hand-off used to be dropped), carries loading/opened/
+      failed state, and opens a download carousel that discloses every asset
+      with its size and status, fetches git-LFS pointers through
+      `git lfs pull`, and refuses to open when a declared engine op is missing
+      (`ops.list`).
+- [x] **G11 Blender-shaped shell** — workspace tabs, one editor per dock slot,
+      a properties icon strip (Layer, Terrain, Render, World, Scene,
+      Statistics), outliner icon tabs (Layers/Examples), bottom strip
+      (Timeline/Console/Certificates), viewport mode header and tool rail, and
+      a navigation gizmo whose axis projection is unit-tested.
 
 Engine-facing milestones from GUI.md section 12:
 
