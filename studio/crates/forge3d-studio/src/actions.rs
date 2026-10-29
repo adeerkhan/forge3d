@@ -40,6 +40,9 @@ gpui_kit::actions!(
         CameraTop,
         CameraFront,
         CameraRight,
+        CameraBack,
+        CameraLeft,
+        ToggleOrtho,
         CameraIsometric,
         ResetCamera,
         RenderFrame,
@@ -125,6 +128,9 @@ macro_rules! studio_action_table {
             CameraTop, "Top", View, true, Some("7");
             CameraFront, "Front", View, false, Some("1");
             CameraRight, "Right", View, false, Some("3");
+            CameraBack, "Back", View, false, Some("ctrl-1");
+            CameraLeft, "Left", View, false, Some("ctrl-3");
+            ToggleOrtho, "Orthographic (approximate)", View, false, Some("5");
             CameraIsometric, "Isometric", View, false, Some("0");
             ResetCamera, "Reset camera", View, true, None;
             ToggleTheme, "Dark / light theme", View, true, None;
@@ -311,25 +317,44 @@ impl StudioAction for FitView {
 
 impl StudioAction for CameraTop {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
-        studio.preset_camera(90.0, 89.0, cx);
+        // The UI speaks elevation; the engine's theta is polar from +Z.
+        studio.preset_view(90.0, 90.0, cx);
+    }
+}
+
+impl StudioAction for CameraBack {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.preset_view(90.0, 1.0, cx);
+    }
+}
+
+impl StudioAction for CameraLeft {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.preset_view(180.0, 1.0, cx);
+    }
+}
+
+impl StudioAction for ToggleOrtho {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.toggle_ortho(cx);
     }
 }
 
 impl StudioAction for CameraFront {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
-        studio.preset_camera(0.0, 1.0, cx);
+        studio.preset_view(270.0, 1.0, cx);
     }
 }
 
 impl StudioAction for CameraRight {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
-        studio.preset_camera(90.0, 1.0, cx);
+        studio.preset_view(0.0, 1.0, cx);
     }
 }
 
 impl StudioAction for CameraIsometric {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
-        studio.preset_camera(45.0, 35.0, cx);
+        studio.preset_view(45.0, 35.0, cx);
     }
 }
 

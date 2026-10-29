@@ -607,6 +607,15 @@ pub struct Studio {
     pub preview_ms: f32,
     pub preview_size: (u32, u32),
     preview_started: Option<std::time::Instant>,
+    /// Approximate orthographic projection: the engine's viewer is perspective
+    /// only, so ortho is a 2° field of view with the distance scaled to keep
+    /// the framing (`viewport_math::radius_for_fov`). The UI says so.
+    pub ortho: bool,
+    persp_fov: f32,
+    /// Dev hook bookkeeping so a smoke shot fires once, not per frame.
+    pick_smoke_done: bool,
+    /// Ground point under the pointer, for the HUD readout.
+    pub hover_ground: Option<(f32, f32)>,
     /// A still was requested, so the next bridge frame is presented even when
     /// it carries no quality metadata (a plain one-pass raster render).
     awaiting_still: bool,
@@ -706,6 +715,10 @@ impl Studio {
             preview_size: (0, 0),
             preview_started: None,
             awaiting_still: false,
+            ortho: false,
+            persp_fov: 54.0,
+            pick_smoke_done: false,
+            hover_ground: None,
             ui_timing: UiTiming::default(),
             focus_handle,
             drag: None,
@@ -1163,6 +1176,13 @@ impl Studio {
         self.commit_view();
     }
 
+    /// Snap to an orthogonal view. `elevation_deg` is what the user sees; the
+    /// engine's polar theta is derived in `viewport_math`.
+    pub fn preset_view(&mut self, phi_deg: f32, elevation_deg: f32, cx: &mut Context<Self>) {
+        let theta = crate::ui::viewport_math::theta_from_elevation(elevation_deg);
+        self.preset_camera(phi_deg, theta, cx);
+    }
+
     pub fn preset_camera(&mut self, phi: f32, theta: f32, cx: &mut Context<Self>) {
         self.viewport_image = ViewportImage::Live;
         let mut camera = self.project.camera;
@@ -1220,6 +1240,105 @@ impl Studio {
         cx.notify();
     }
 
+    // --------------------------------------------------------------- picking
+
+    /// Viewport aspect ratio from the last laid-out size.
+    fn viewport_aspect(&self) -> f32 {
+        let (width, height) = self.viewport_size.get();
+        if width < 2.0 || height < 2.0 {
+            1.0
+        } else {
+            width / height
+        }
+    }
+
+    /// World point under a pixel in the viewport, if the ray meets the ground.
+    pub fn ground_at(&self, x: f32, y: f32) -> Option<(f32, f32)> {
+        let (width, height) = self.viewport_size.get();
+        if width < 2.0 || height < 2.0 {
+            return None;
+        }
+        let camera = self.project.camera;
+        let aspect = self.viewport_aspect();
+        let ndc = (2.0 * x / width - 1.0, 1.0 - 2.0 * y / height);
+        crate::ui::viewport_math::pick_ground(
+            glam::Vec2::new(camera.target_x, camera.target_z),
+            camera.phi_deg,
+            camera.theta_deg,
+            camera.radius,
+            camera.fov_deg,
+            aspect,
+            glam::Vec2::new(ndc.0, ndc.1),
+        )
+        .map(|point| (point.x, point.y))
+    }
+
+    /// Pointer moved without a drag: keep the HUD's ground readout current.
+    pub fn hover_at(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let ground = self.ground_at(x, y);
+        if ground != self.hover_ground {
+            self.hover_ground = ground;
+            cx.notify();
+        }
+    }
+
+    /// A click in the viewport: put the orbit target where the click landed and
+    /// select the layer that owns the terrain, so the 3D view drives the
+    /// outliner instead of only being driven by it.
+    pub fn click_select(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if self.scene_mode != SceneMode::Terrain {
+            self.set_status("MapScene is a still; switch to Terrain to pick in 3D");
+            cx.notify();
+            return;
+        }
+        let Some((gx, gy)) = self.ground_at(x, y) else {
+            self.set_status("Nothing under the cursor (the ray misses the ground)");
+            cx.notify();
+            return;
+        };
+        let mut camera = self.project.camera;
+        camera.target_x = gx;
+        camera.target_z = gy;
+        self.set_camera(camera, cx);
+        self.commit_view();
+        if let Some(id) = self.project.document.terrain_layer().map(|layer| layer.id) {
+            self.select_layer_row(id, false, false, cx);
+        }
+        self.set_status(format!("Target {gx:.0}, {gy:.0}"));
+        cx.notify();
+    }
+
+    /// Toggle the approximate orthographic projection.
+    pub fn toggle_ortho(&mut self, cx: &mut Context<Self>) {
+        let mut camera = self.project.camera;
+        if self.ortho {
+            self.ortho = false;
+            camera.fov_deg = self.persp_fov;
+            camera.radius = crate::ui::viewport_math::radius_for_fov(
+                camera.radius,
+                crate::ui::viewport_math::ORTHO_FOV_DEG,
+                self.persp_fov,
+            );
+        } else {
+            self.persp_fov = camera.fov_deg;
+            self.ortho = true;
+            camera.radius = crate::ui::viewport_math::radius_for_fov(
+                camera.radius,
+                camera.fov_deg,
+                crate::ui::viewport_math::ORTHO_FOV_DEG,
+            );
+            camera.fov_deg = crate::ui::viewport_math::ORTHO_FOV_DEG;
+        }
+        self.set_camera(camera, cx);
+        self.commit_view();
+        self.set_status(if self.ortho {
+            "Orthographic (approximated by a narrow field of view)"
+        } else {
+            "Perspective"
+        });
+        cx.notify();
+    }
+
     // ------------------------------------------------------------------- drag
 
     /// Pointer moved while a drag is active. Orbit changes the camera; pan
@@ -1256,9 +1375,32 @@ impl Studio {
     /// Wheel zoom: one step scales the orbit radius around the target.
     pub fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
         self.viewport_image = ViewportImage::Live;
+        self.zoom_at(None, delta, cx);
+    }
+
+    /// Zoom by one wheel step, keeping the point under `cursor` fixed when the
+    /// pointer is known (Blender's behaviour) instead of always zooming to the
+    /// middle.
+    pub fn zoom_at(&mut self, cursor: Option<(f32, f32)>, delta: f32, cx: &mut Context<Self>) {
         let mut camera = self.project.camera;
         let factor = (-delta * 0.0015).exp().clamp(0.5, 2.0);
-        camera.radius = (camera.radius * factor).clamp(10.0, 200_000.0);
+        let ground = cursor.and_then(|(x, y)| self.ground_at(x, y));
+        match ground {
+            Some((gx, gy)) => {
+                let (target, radius) = crate::ui::viewport_math::zoom_to_cursor(
+                    glam::Vec2::new(camera.target_x, camera.target_z),
+                    glam::Vec2::new(gx, gy),
+                    camera.radius,
+                    factor,
+                );
+                camera.target_x = target.x;
+                camera.target_z = target.y;
+                camera.radius = radius.clamp(10.0, 200_000.0);
+            }
+            None => {
+                camera.radius = (camera.radius * factor).clamp(10.0, 200_000.0);
+            }
+        }
         self.set_camera(camera, cx);
     }
 
@@ -3326,6 +3468,30 @@ impl Studio {
                 self.frame = None;
             }
             ViewportEvent::Frame(frame) => {
+                if std::env::var_os("FORGE3D_STUDIO_PICK_SMOKE").is_some() && !self.pick_smoke_done
+                {
+                    // Dev hook: one click below the middle of the viewport (on
+                    // the terrain in front), reporting where the target landed.
+                    self.pick_smoke_done = true;
+                    let (width, height) = self.viewport_size.get();
+                    self.click_select(width * 0.55, height * 0.62, cx);
+                    log::info!(
+                        "pick smoke: target ({:.0}, {:.0})",
+                        self.project.camera.target_x,
+                        self.project.camera.target_z
+                    );
+                }
+                if std::env::var_os("FORGE3D_STUDIO_ORTHO_SMOKE").is_some() && !self.ortho {
+                    self.toggle_ortho(cx);
+                    log::info!(
+                        "ortho smoke: fov {:.1}, radius {:.0}, elevation {:.1}",
+                        self.project.camera.fov_deg,
+                        self.project.camera.radius,
+                        crate::ui::viewport_math::elevation_from_theta(
+                            self.project.camera.theta_deg
+                        )
+                    );
+                }
                 self.render_in_flight = false;
                 self.frame_ms = frame.render_ms;
                 if std::env::var_os("FORGE3D_STUDIO_FRAME_LOG").is_some() {

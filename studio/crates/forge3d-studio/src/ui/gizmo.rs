@@ -10,6 +10,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::state::Studio;
@@ -68,19 +69,21 @@ pub fn axis_offsets(phi_deg: f32, theta_deg: f32) -> [AxisHandle; 6] {
         let sy = axis[0] * up[0] + axis[1] * up[1] + axis[2] * up[2];
         // Positive side.
         let depth = axis[0] * forward[0] + axis[1] * forward[1] + axis[2] * forward[2];
+        let (positive_phi, positive_theta) = preset_for(index, true).unwrap_or((45.0, 55.0));
+        let negative = preset_for(index, false);
         handles.push(AxisHandle {
             dir: (sx, -sy),
             depth,
-            phi_deg: preset_for(index, true).0,
-            theta_deg: preset_for(index, true).1,
+            phi_deg: positive_phi,
+            theta_deg: positive_theta,
             positive: true,
             axis: index,
         });
         handles.push(AxisHandle {
             dir: (-sx, sy),
             depth: -depth,
-            phi_deg: preset_for(index, false).0,
-            theta_deg: preset_for(index, false).1,
+            phi_deg: negative.map(|preset| preset.0).unwrap_or(45.0),
+            theta_deg: negative.map(|preset| preset.1).unwrap_or(55.0),
             positive: false,
             axis: index,
         });
@@ -90,19 +93,23 @@ pub fn axis_offsets(phi_deg: f32, theta_deg: f32) -> [AxisHandle; 6] {
     ]
 }
 
-/// The orbit angles that look along `axis` from its positive or negative side.
-fn preset_for(axis: usize, positive: bool) -> (f32, f32) {
+/// The orbit angles that look along `axis` from its side, in the engine's
+/// convention (theta polar from +Z, so 89 is the horizon).
+///
+/// Looking from below is not possible: the viewer orbits above the ground
+/// plane, so the negative Z handle is shown but does nothing.
+fn preset_for(axis: usize, positive: bool) -> Option<(f32, f32)> {
     match (axis, positive) {
-        // +Z looks down from above, -Z looks up from below.
-        (2, true) => (90.0, 89.0),
-        (2, false) => (90.0, 1.0),
-        // +X from the front of the grid, -X from behind.
-        (0, true) => (0.0, 1.0),
-        (0, false) => (180.0, 1.0),
-        // +Y from the right, -Y from the left.
-        (1, true) => (90.0, 1.0),
-        (1, false) => (270.0, 1.0),
-        _ => (45.0, 35.0),
+        // +Z looks straight down; there is no under-ground view.
+        (2, true) => Some((90.0, 1.0)),
+        (2, false) => None,
+        // +X is the right view, -X the left.
+        (0, true) => Some((0.0, 89.0)),
+        (0, false) => Some((180.0, 89.0)),
+        // +Y is the back view, -Y the front.
+        (1, true) => Some((90.0, 89.0)),
+        (1, false) => Some((270.0, 89.0)),
+        _ => None,
     }
 }
 
@@ -130,6 +137,7 @@ pub fn gizmo(studio: &Entity<Studio>, cx: &mut App) -> AnyElement {
     for handle in handles {
         let studio_click = studio.clone();
         let (phi, theta) = (handle.phi_deg, handle.theta_deg);
+        let enabled = preset_for(handle.axis, handle.positive).is_some();
         let size = 10.0 + 5.0 * (handle.depth.clamp(-1.0, 1.0) + 1.0) / 2.0;
         let left = RADIUS + 8.0 + handle.dir.0 * RADIUS - size / 2.0;
         let top = RADIUS + 8.0 + handle.dir.1 * RADIUS - size / 2.0;
@@ -149,9 +157,12 @@ pub fn gizmo(studio: &Entity<Studio>, cx: &mut App) -> AnyElement {
                 .bg(axis_color(handle.axis, handle.positive, cx))
                 .border_1()
                 .border_color(cx.theme().colors.border)
-                .cursor_pointer()
+                .when(enabled, |dot| dot.cursor_pointer())
+                .when(!enabled, |dot| dot.opacity(0.25))
                 .on_click(move |_, _, cx| {
-                    studio_click.update(cx, |studio, cx| studio.preset_camera(phi, theta, cx));
+                    if enabled {
+                        studio_click.update(cx, |studio, cx| studio.preset_camera(phi, theta, cx));
+                    }
                 }),
         );
     }
@@ -253,9 +264,19 @@ mod tests {
 
     #[test]
     fn handles_snap_to_the_matching_orthogonal_view() {
+        // theta is polar from +Z here, so "top" is theta 1, not 89.
         let handles = axis_offsets(12.0, 30.0);
         let top = find(&handles, 2, true);
         assert_eq!(top.phi_deg, 90.0);
-        assert!(top.theta_deg > 80.0);
+        assert!(
+            top.theta_deg < 5.0,
+            "top view looks down: {}",
+            top.theta_deg
+        );
+        let right = find(&handles, 0, true);
+        assert_eq!(right.phi_deg, 0.0);
+        assert!(right.theta_deg > 80.0, "a side view sits on the horizon");
+        // Looking from below is impossible; the handle is inert.
+        assert_eq!(preset_for(2, false), None);
     }
 }

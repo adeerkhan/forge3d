@@ -191,6 +191,15 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P2 · selection & viewport parity** — click (not drag) picks the ground
+      point under the cursor, moves the orbit target there and selects the
+      terrain row, so the 3D view drives the outliner; hovering shows ground
+      coordinates in the HUD; the wheel zooms about the cursor; view presets are
+      Top/Front/Right/Back/Left/Isometric plus an approximate orthographic
+      toggle (2° field of view at a compensated distance, labelled as such).
+      The camera convention is now explicit: the engine's `theta` is polar from
+      +Z, the UI shows elevation (90 − θ) — which also fixes Top, previously
+      drawn as a horizon view because the two conventions were mixed.
 - [x] **P1 · three labelled tiers** — live terrain preview (instant),
       **debounced low-res MapScene preview** (≤640 px wide, 600 ms after an
       edit, coalesced while one renders) and the full render (F12). The

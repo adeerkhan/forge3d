@@ -39,6 +39,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let show_gizmo = state.show_gizmo;
     let show_hud = state.show_hud;
     let image_tier = state.viewport_image;
+    let ortho = state.ortho;
     let preview_ms = state.preview_ms;
     let preview_size = state.preview_size;
     let showing_render = image_tier != crate::state::ViewportImage::Live;
@@ -163,29 +164,30 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     "top",
                     "Top",
                     IconName::ArrowUp,
-                    |studio, cx| studio.preset_camera(90.0, 89.0, cx),
+                    |studio, cx| studio.preset_view(90.0, 90.0, cx),
                 ))
                 .child(tool_button(
                     studio,
                     "front",
                     "Front",
                     IconName::Square,
-                    |studio, cx| studio.preset_camera(0.0, 1.0, cx),
+                    |studio, cx| studio.preset_view(270.0, 1.0, cx),
                 ))
                 .child(tool_button(
                     studio,
                     "right",
                     "Right",
                     IconName::SquareArrowRight,
-                    |studio, cx| studio.preset_camera(90.0, 1.0, cx),
+                    |studio, cx| studio.preset_view(0.0, 1.0, cx),
                 ))
                 .child(tool_button(
                     studio,
                     "iso",
                     "Isometric",
                     IconName::Box,
-                    |studio, cx| studio.preset_camera(45.0, 35.0, cx),
+                    |studio, cx| studio.preset_view(45.0, 35.0, cx),
                 ))
+                .child(ortho_button(studio, ortho))
                 .child(live_button(studio, live_viewport)),
         )
         .child(
@@ -270,6 +272,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         }
     };
 
+    let press_at = std::rc::Rc::new(std::cell::Cell::new(None::<(f32, f32)>));
+    let press_for_down = press_at.clone();
     let studio_down = studio.clone();
     let studio_down_middle = studio.clone();
     let studio_move = studio.clone();
@@ -278,6 +282,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let studio_scroll = studio.clone();
     let size_for_layout = size_cell.clone();
 
+    let hover = state.hover_ground;
+    let target = (camera.target_x, camera.target_z);
     let hud_left = if showing_render {
         "render result — move the view to return to the live preview".to_owned()
     } else if live_viewport {
@@ -287,8 +293,10 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         )
     } else {
         format!(
-            "Orbit {:.0}° · Elev {:.0}° · Dist {:.0} · paused (draws on release)",
-            camera.phi_deg, camera.theta_deg, camera.radius
+            "Az {:.0}° · Elev {:.0}° · Dist {:.0} · paused (draws on release)",
+            camera.phi_deg,
+            crate::ui::viewport_math::elevation_from_theta(camera.theta_deg),
+            camera.radius
         )
     };
 
@@ -311,6 +319,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .on_mouse_down(MouseButton::Left, move |event, _, cx| {
             let x = f32::from(event.position.x);
             let y = f32::from(event.position.y);
+            press_for_down.set(Some((x, y)));
             let _ = studio_down.update(cx, |studio, cx| {
                 studio.drag = Some(ViewDrag::Orbit {
                     last_x: x,
@@ -342,11 +351,28 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .on_mouse_move(move |event, _, cx| {
             let x = f32::from(event.position.x);
             let y = f32::from(event.position.y);
-            let _ = studio_move.update(cx, |studio, cx| studio.drag_to(x, y, cx));
+            let dragging = studio_move
+                .upgrade()
+                .map(|entity| entity.read(cx).drag.is_some())
+                .unwrap_or(false);
+            if dragging {
+                let _ = studio_move.update(cx, |studio, cx| studio.drag_to(x, y, cx));
+            } else {
+                let _ = studio_move.update(cx, |studio, cx| studio.hover_at(x, y, cx));
+            }
         })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+        .on_mouse_up(MouseButton::Left, move |event, _, cx| {
+            let release = (f32::from(event.position.x), f32::from(event.position.y));
+            let pressed = press_at.get();
+            let moved = pressed
+                .map(|(x, y)| (x - release.0).abs().max((y - release.1).abs()))
+                .unwrap_or(f32::MAX);
             let _ = studio_up_left.update(cx, |studio, cx| {
                 studio.end_gesture(cx);
+                // A click that did not drag picks; a drag only orbits.
+                if moved <= 4.0 {
+                    studio.click_select(release.0, release.1, cx);
+                }
                 cx.notify();
             });
         })
@@ -361,7 +387,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 ScrollDelta::Pixels(point) => f32::from(point.y),
                 ScrollDelta::Lines(point) => point.y * 30.0,
             };
-            let _ = studio_scroll.update(cx, |studio, cx| studio.zoom_by(delta, cx));
+            let cursor = (f32::from(event.position.x), f32::from(event.position.y));
+            let _ = studio_scroll.update(cx, |studio, cx| studio.zoom_at(Some(cursor), delta, cx));
         })
         .child(body_content)
         .when(show_hud, |body| {
@@ -373,7 +400,12 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     .gap_2()
                     .text_xs()
                     .text_color(cx.theme().colors.muted_foreground)
-                    .child(hud_left),
+                    .child(hud_left)
+                    .when(ortho, |row| row.child("· ortho"))
+                    .child(match hover {
+                        Some((x, y)) => format!("· ground x {x:.0} y {y:.0}"),
+                        None => format!("· target x {:.0} y {:.0}", target.0, target.1),
+                    }),
             )
         })
         .when(show_gizmo, |body| {
@@ -463,6 +495,27 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .child(rail)
                 .child(body),
         )
+        .into_any_element()
+}
+
+/// Approximate orthographic projection (the engine's viewer is perspective
+/// only, so this is a 2° field of view at a distance that keeps the framing).
+fn ortho_button(studio: StudioRef<'_>, ortho: bool) -> AnyElement {
+    let studio = studio.clone();
+    Button::new("viewport-ortho")
+        .icon(IconName::Scan)
+        .label("Ortho")
+        .xsmall()
+        .when(ortho, |button| button.primary())
+        .when(!ortho, |button| button.ghost())
+        .tooltip(if ortho {
+            "Orthographic (approximate) — click for perspective (5)"
+        } else {
+            "Perspective — click for (approximate) orthographic (5)"
+        })
+        .on_click(move |_, _, cx| {
+            let _ = studio.update(cx, |studio, cx| studio.toggle_ortho(cx));
+        })
         .into_any_element()
 }
 

@@ -232,7 +232,7 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
             .child(stepper(
                 studio,
                 "cam-phi",
-                "Orbit",
+                "Azimuth",
                 format!("{:.0}°", camera.phi_deg),
                 |studio, cx| studio.step_camera(-5.0, 0.0, 1.0, 1.0, cx),
                 |studio, cx| studio.step_camera(5.0, 0.0, 1.0, 1.0, cx),
@@ -241,12 +241,38 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
             .child(stepper(
                 studio,
                 "cam-theta",
+                // The document stores the engine's polar theta; people think
+                // in elevation, so the control and its label convert.
                 "Elevation",
-                format!("{:.0}°", camera.theta_deg),
-                |studio, cx| studio.step_camera(0.0, -2.0, 1.0, 1.0, cx),
+                format!(
+                    "{:.0}°",
+                    crate::ui::viewport_math::elevation_from_theta(camera.theta_deg)
+                ),
                 |studio, cx| studio.step_camera(0.0, 2.0, 1.0, 1.0, cx),
+                |studio, cx| studio.step_camera(0.0, -2.0, 1.0, 1.0, cx),
                 cx,
             ))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .gap_2()
+                    .py(px(1.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().colors.muted_foreground)
+                            .child("Target"),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().colors.foreground)
+                            .child(format!(
+                                "x {:.0} · y {:.0}",
+                                camera.target_x, camera.target_z
+                            )),
+                    ),
+            )
             .child(stepper(
                 studio,
                 "cam-radius",

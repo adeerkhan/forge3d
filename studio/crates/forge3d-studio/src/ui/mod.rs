@@ -14,6 +14,7 @@ pub mod scene;
 pub mod shell;
 pub mod timeline;
 pub mod viewport;
+pub mod viewport_math;
 
 use std::rc::Rc;
 
