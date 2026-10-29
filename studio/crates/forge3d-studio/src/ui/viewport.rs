@@ -32,11 +32,13 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let studio_gizmo = studio.clone();
     let studio_hud = studio.clone();
     let studio_live = studio.clone();
+    let studio_back = studio.clone();
 
     let mode = state.scene_mode;
     let live_viewport = state.live_viewport;
     let show_gizmo = state.show_gizmo;
     let show_hud = state.show_hud;
+    let showing_render = state.showing_render;
     let frame_size = state.frame_size;
     let tools = h_flex()
         .w_full()
@@ -108,6 +110,20 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                             });
                         }),
                 )
+                .when(showing_render, |row| {
+                    let studio_back = studio_back.clone();
+                    row.child(
+                        Button::new("viewport-back")
+                            .icon(IconName::MonitorPlay)
+                            .label("Render result — back to viewport")
+                            .xsmall()
+                            .outline()
+                            .on_click(move |_, _, cx| {
+                                let _ = studio_back
+                                    .update(cx, |studio, cx| studio.back_to_viewport(cx));
+                            }),
+                    )
+                })
                 .child(
                     Button::new("viewport-live-toggle")
                         .icon(if live_viewport {
@@ -251,7 +267,9 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let studio_scroll = studio.clone();
     let size_for_layout = size_cell.clone();
 
-    let hud_left = if live_viewport {
+    let hud_left = if showing_render {
+        "render result — move the view to return to the live preview".to_owned()
+    } else if live_viewport {
         format!(
             "Orbit {:.0}° · Elev {:.0}° · Dist {:.0}",
             camera.phi_deg, camera.theta_deg, camera.radius

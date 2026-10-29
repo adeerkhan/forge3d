@@ -12,7 +12,9 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::Disableable as _;
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
+use gpui_kit::component::{
+    h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _, WindowExt as _,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -169,11 +171,11 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
         };
 
         card = card
-            .on_click(move |_, _, c| {
+            .on_click(move |_, window, c| {
                 let id = id.clone();
                 let entity = studio_card.clone();
                 entity.update(c, |studio, cx| studio.preview_example(id, cx));
-                carousel_dialog(entity, c);
+                carousel_dialog(entity, window, c);
             })
             .child(
                 v_flex()
@@ -195,7 +197,15 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
                             )
                             .child(div().text_xs().text_color(badge.1).child(badge.0)),
                     )
-                    .child(muted(entry.description.clone(), cx)),
+                    .child(muted(entry.description.clone(), cx))
+                    .when(matches!(&state, CardState::Failed(_)), |card| {
+                        card.child(div().text_xs().text_color(cx.theme().colors.danger).child(
+                            match &state {
+                                CardState::Failed(message) => message.clone(),
+                                _ => String::new(),
+                            },
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -228,8 +238,8 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
 /// The carousel dialog for the selected example: assets, provenance, actions.
 ///
 /// It rebuilds from live state on every paint, so Prev/Next page in place.
-pub fn carousel_dialog(studio: Entity<Studio>, cx: &mut App) {
-    crate::ui::open_dialog(cx, move |dialog, _, cx| {
+pub fn carousel_dialog(studio: Entity<Studio>, window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let Some(id) = studio.read(cx).gallery_selected.clone() else {
             return dialog
                 .title("Examples")
@@ -483,7 +493,7 @@ fn asset_rows(assets: &[AssetStatus], cx: &App) -> AnyElement {
 
 /// Open the carousel for the current selection (called by the panel's card
 /// click, and by the Examples menu action).
-pub fn open_carousel(studio: &Entity<Studio>, cx: &mut App) {
+pub fn open_carousel(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) {
     let entity = studio.clone();
     // Default to the first visible card when nothing is selected.
     studio.update(cx, |studio, cx| {
@@ -494,5 +504,5 @@ pub fn open_carousel(studio: &Entity<Studio>, cx: &mut App) {
         }
         cx.notify();
     });
-    carousel_dialog(entity, cx);
+    carousel_dialog(entity, window, cx);
 }

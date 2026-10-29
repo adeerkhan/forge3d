@@ -518,6 +518,14 @@ the G-table above:
 | First full-size frame | 88–195 ms | 16.9 ms (Rainier 2111², 954×630) |
 | Live switch off | not available | no renders while dragging; one frame when the gesture ends |
 
+The viewport is a **live preview**, like Blender's viewport shading: Terrain
+mode always paints on the engine's device and stays interactive. Offline
+accumulation and path tracing describe the *render*, not the viewport, so
+choosing them no longer freezes the preview — a still appears when you ask for
+one (Render ▸ Render still, `Ctrl+R`), the header says "Render result — back to
+viewport", and moving the camera returns to the live view. MapScene mode stays
+a composed still by definition.
+
 The viewport now renders on the **discrete** adapter: the engine's default
 `PowerPreference::LowPower` landed on the integrated GPU while the UI
 composited on the discrete one, so every frame crossed PCIe. Studio sets

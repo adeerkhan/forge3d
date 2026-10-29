@@ -432,7 +432,15 @@ impl StudioAction for OpenExamples {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.focus_examples(cx);
         let entity = cx.entity();
-        crate::ui::gallery::open_carousel(&entity, cx);
+        // A menu action has no window in hand; the focused one is the target.
+        let Some(window) = cx.active_window() else {
+            log::warn!("examples gallery: no active window to open the carousel in");
+            cx.notify();
+            return;
+        };
+        let _ = window.update(cx, |_, window, cx| {
+            crate::ui::gallery::open_carousel(&entity, window, cx);
+        });
     }
 }
 

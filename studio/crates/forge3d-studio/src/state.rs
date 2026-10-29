@@ -519,6 +519,9 @@ pub struct Studio {
     /// its declared ops instead of failing at click time.
     pub available_ops: std::collections::HashSet<String>,
 
+    /// True while the viewport shows a rendered still (quality or MapScene)
+    /// rather than the live preview.
+    pub showing_render: bool,
     pub ui_timing: UiTiming,
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
@@ -607,6 +610,7 @@ impl Studio {
             thumbnails: std::collections::HashMap::new(),
             lfs_fetch: None,
             available_ops: std::collections::HashSet::new(),
+            showing_render: false,
             ui_timing: UiTiming::default(),
             focus_handle,
             drag: None,
@@ -1017,6 +1021,9 @@ impl Studio {
 
     /// Apply a camera edit: the document, the live scene, and one frame.
     pub fn set_camera(&mut self, camera: CameraParams, _cx: &mut Context<Self>) {
+        // Moving the view leaves any rendered still behind, like orbiting in
+        // Blender's viewport after a render.
+        self.showing_render = false;
         self.project.camera = camera;
         self.project_dirty = true;
         self.viewport.send(ViewportCommand::SetView {
@@ -1056,6 +1063,7 @@ impl Studio {
     }
 
     pub fn preset_camera(&mut self, phi: f32, theta: f32, cx: &mut Context<Self>) {
+        self.showing_render = false;
         let mut camera = self.project.camera;
         camera.phi_deg = phi;
         camera.theta_deg = theta;
@@ -1117,6 +1125,7 @@ impl Studio {
     /// moves the ground target. No engine command: the bridge is not painting
     /// this frame, and a drag would flood its queue.
     pub fn drag_to(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        self.showing_render = false;
         match self.drag {
             Some(ViewDrag::Orbit { last_x, last_y }) => {
                 let mut camera = self.project.camera;
@@ -1145,6 +1154,7 @@ impl Studio {
 
     /// Wheel zoom: one step scales the orbit radius around the target.
     pub fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
+        self.showing_render = false;
         let mut camera = self.project.camera;
         let factor = (-delta * 0.0015).exp().clamp(0.5, 2.0);
         camera.radius = (camera.radius * factor).clamp(10.0, 200_000.0);
@@ -1596,13 +1606,16 @@ impl Studio {
 
     // ----------------------------------------------------------------- quality
 
-    /// Whether the interactive native viewport should paint at all.
+    /// Whether the interactive native viewport should paint.
     ///
-    /// Terrain mode paints on the engine's device; MapScene mode and the
-    /// quality modes are stills (the bridge renders them), so the native path
-    /// must stay out of the way instead of painting over the recipe.
+    /// Terrain mode is the live preview (Blender's "solid/textured" viewport,
+    /// Eevee-style): rasterised by the engine on its own device, always
+    /// interactive. Offline accumulation and path tracing describe the
+    /// *render*, not the viewport, so choosing them must not freeze the preview
+    /// — the still appears when you ask for one, and touching the camera
+    /// returns you to the live view.
     pub fn native_paints(&self) -> bool {
-        self.scene_mode == SceneMode::Terrain && !self.quality_mode()
+        self.scene_mode == SceneMode::Terrain
     }
 
     /// A quality mode is a still: the native viewport stops painting and the
@@ -1977,6 +1990,7 @@ impl Studio {
                 self.render_mapscene(cx);
             }
         } else {
+            self.showing_render = false;
             self.invalidate_viewport(cx);
         }
         self.set_status(match mode {
@@ -2122,6 +2136,13 @@ impl Studio {
 
     pub fn set_left_tab(&mut self, tab: LeftTab, cx: &mut Context<Self>) {
         self.left_tab = tab;
+        cx.notify();
+    }
+
+    /// Drop a rendered still and go back to the live preview.
+    pub fn back_to_viewport(&mut self, cx: &mut Context<Self>) {
+        self.showing_render = false;
+        self.invalidate_viewport(cx);
         cx.notify();
     }
 
@@ -3268,6 +3289,7 @@ impl Studio {
                 if quality.is_some() {
                     self.present_rgba(width, height, rgba);
                     self.viewport_dirty = false;
+                    self.showing_render = true;
                 }
                 if let Some(path) = certificate {
                     let source = path
@@ -3703,6 +3725,7 @@ impl Studio {
         };
         let rgba = image.to_rgba8();
         self.frame_size = rgba.dimensions();
+        self.showing_render = true;
         self.frame = Some(Arc::new(gpui_kit::RenderImage::new(vec![
             image::Frame::new(rgba),
         ])));

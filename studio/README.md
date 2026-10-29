@@ -185,6 +185,10 @@ UI runtime (GUI.md Part X):
       with its size and status, fetches git-LFS pointers through
       `git lfs pull`, and refuses to open when a declared engine op is missing
       (`ops.list`).
+- [x] **Live preview vs render** — Terrain mode's viewport always paints
+      (interactive, ~60 fps); offline/PT quality settings apply only to an
+      explicit still, which shows as "Render result" with a click (or a camera
+      move) back to the preview. MapScene mode remains a still.
 - [x] **G12 Cartography panel** — Cartography workspace = recipe template +
       raster overlay + map furniture (title, legend, scale bar with position and
       units, north arrow with position, graticule interval). Applying writes the
