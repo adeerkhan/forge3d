@@ -127,6 +127,18 @@ impl NativeViewport {
         self.has_terrain
     }
 
+    /// Frame the terrain the way the app does: six-times-relief world span,
+    /// camera 1.65 spans out. Used for the first frame after a load, before
+    /// the document's own camera arrives.
+    pub fn frame_default(&mut self) {
+        let Some(terrain) = self.scene.viewer_terrain() else {
+            return;
+        };
+        let span = (terrain.domain.1 - terrain.domain.0).abs().max(1.0) * 6.0;
+        self.scene.set_viewer_camera(135.0, 30.0, span * 1.65, 54.0);
+        self.scene.set_viewer_target(0.0, 0.0);
+    }
+
     /// Select the albedo ramp (`None` = Studio's relief ramp). Returns an
     /// error for a name the engine cannot resolve, so the app reports it
     /// instead of painting the previous palette as if it were the new one.
@@ -428,12 +440,20 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
 
     let mut last_size = (0u32, 0u32);
     let mut rendered_once = false;
+    // The viewer's camera fields live in the terrain data, which a load
+    // replaces; keep the last requested view here and re-apply it so the first
+    // frame after a DEM load is framed like the one before it.
+    let mut last_view: Option<(CameraParams, SunParams)> = None;
 
     while let Ok(command) = rx.recv() {
         match command {
             ViewportCommand::LoadDem { path } => match viewport.load_dem(&path) {
                 Ok((width, height, height_min, height_max)) => {
                     rendered_once = false;
+                    match last_view {
+                        Some((camera, sun)) => viewport.set_view(&camera, &sun),
+                        None => viewport.frame_default(),
+                    }
                     let _ = tx.send(ViewportEvent::TerrainLoaded {
                         width,
                         height,
@@ -463,6 +483,7 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
                 }
             }
             ViewportCommand::SetView { camera, sun } => {
+                last_view = Some((camera, sun));
                 viewport.set_view(&camera, &sun);
             }
             ViewportCommand::Render {

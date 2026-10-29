@@ -79,7 +79,9 @@ fn provision_missing_dev_symlinks() {
     let mut missing: Vec<&str> = Vec::new();
     for lib in LAYOUT_LIBS {
         // A development symlink already on the search path: nothing to do.
-        let has_dev = search_dirs.iter().any(|dir| dir.join(format!("{lib}.so")).exists());
+        let has_dev = search_dirs
+            .iter()
+            .any(|dir| dir.join(format!("{lib}.so")).exists());
         if has_dev {
             continue;
         }
@@ -89,7 +91,10 @@ fn provision_missing_dev_symlinks() {
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| {
-                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
                 name.starts_with(&format!("{lib}.so.")) && path.is_file()
             })
             .max()

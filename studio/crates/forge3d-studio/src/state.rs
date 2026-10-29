@@ -3001,12 +3001,7 @@ impl Studio {
                 self.render_in_flight = false;
                 self.viewport_dirty = true;
                 self.viewport_dem = Some((width, height, height_min, height_max));
-                if let Some(started) = self.dem_load_started {
-                    log::info!(
-                        "viewport DEM ready: {width}×{height} in {:.0} ms (Rust reader)",
-                        started.elapsed().as_secs_f32() * 1000.0
-                    );
-                }
+                log::info!("viewport DEM ready: {width}×{height} (Rust reader)");
                 self.set_status(format!(
                     "Viewport: {width}×{height} · {:.0}–{:.0} m (engine still loading)",
                     height_min, height_max
