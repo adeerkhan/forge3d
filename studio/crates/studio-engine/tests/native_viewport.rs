@@ -329,7 +329,12 @@ fn native_viewport_body() {
 
     let dem = fuji_dem();
     assert!(dem.is_file(), "DEM fixture missing: {}", dem.display());
-    viewport.load_dem(&dem, 20798.0).expect("load DEM");
+    let (width, height, height_min, height_max) = viewport.load_dem(&dem).expect("load DEM");
+    assert!(width > 0 && height > 0, "the loader reports its grid");
+    assert!(
+        height_max > height_min,
+        "the loader reports its elevation range"
+    );
     assert!(viewport.has_terrain());
 
     let camera = CameraParams {

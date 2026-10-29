@@ -18,6 +18,15 @@ fn main() {
         .format_timestamp(None)
         .init();
 
+    // The workbench wants the discrete GPU: the engine's default LOW power
+    // preference otherwise renders the viewport on the integrated adapter while
+    // the UI composites on the discrete one, and every frame crosses PCIe.
+    // Set before any engine context exists (the bridge and the viewport worker
+    // both read it), and never override an explicit user choice.
+    if std::env::var_os("FORGE3D_GPU_POWER").is_none() {
+        std::env::set_var("FORGE3D_GPU_POWER", "high");
+    }
+
     log::info!("Forge3D Studio {} starting", env!("CARGO_PKG_VERSION"));
 
     gpui_kit::application()

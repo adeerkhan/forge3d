@@ -99,16 +99,23 @@ impl NativeViewport {
         })
     }
 
-    /// Load a DEM into the shared scene. `span` is the document's horizontal
-    /// world extent; relief is scaled by [`STUDIO_Z_SCALE`].
-    pub fn load_dem(&mut self, path: &Path, span: f32) -> Result<(), String> {
+    /// Load a DEM into the shared scene and frame it with the engine's own
+    /// world-span convention. Returns the DEM metadata for the UI.
+    pub fn load_dem(&mut self, path: &Path) -> Result<(u32, u32, f32, f32), String> {
         self.scene
             .load_terrain_for_viewer(&path.to_string_lossy())
             .map_err(|error| format!("native terrain load: {error}"))?;
+        let terrain = self
+            .scene
+            .viewer_terrain()
+            .ok_or_else(|| "native terrain load produced no heightmap".to_owned())?;
+        let (width, height) = terrain.dimensions;
+        let (height_min, height_max) = terrain.domain;
+        let span = (height_max - height_min).abs().max(1.0) * 6.0;
         self.scene
             .set_viewer_world_scale(span.max(1e-3), STUDIO_Z_SCALE);
         self.has_terrain = true;
-        Ok(())
+        Ok((width, height, height_min, height_max))
     }
 
     pub fn clear_dem(&mut self) {
@@ -299,7 +306,6 @@ fn srgb_encode_table() -> [u8; 256] {
 pub enum ViewportCommand {
     LoadDem {
         path: PathBuf,
-        span: f32,
     },
     ClearDem,
     SetColormap(Option<String>),
@@ -329,7 +335,14 @@ pub enum ViewportEvent {
         context: String,
         message: String,
     },
-    TerrainLoaded,
+    /// The DEM is in the viewport, with the metadata the UI can show before
+    /// the bridge finishes its own load.
+    TerrainLoaded {
+        width: u32,
+        height: u32,
+        height_min: f32,
+        height_max: f32,
+    },
     TerrainCleared,
     Frame(ViewportFrame),
 }
@@ -418,10 +431,15 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
 
     while let Ok(command) = rx.recv() {
         match command {
-            ViewportCommand::LoadDem { path, span } => match viewport.load_dem(&path, span) {
-                Ok(()) => {
+            ViewportCommand::LoadDem { path } => match viewport.load_dem(&path) {
+                Ok((width, height, height_min, height_max)) => {
                     rendered_once = false;
-                    let _ = tx.send(ViewportEvent::TerrainLoaded);
+                    let _ = tx.send(ViewportEvent::TerrainLoaded {
+                        width,
+                        height,
+                        height_min,
+                        height_max,
+                    });
                 }
                 Err(message) => {
                     let _ = tx.send(ViewportEvent::Failed {

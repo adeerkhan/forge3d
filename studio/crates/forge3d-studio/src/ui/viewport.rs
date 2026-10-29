@@ -237,6 +237,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .relative()
         .flex_1()
         .w_full()
+        .h_full()
+        .min_h(px(1.))
         .overflow_hidden()
         .bg(cx.theme().colors.background)
         .on_children_prepainted(move |bounds, _, _| {
@@ -261,10 +263,19 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .on_mouse_down(MouseButton::Middle, move |event, _, cx| {
             let x = f32::from(event.position.x);
             let y = f32::from(event.position.y);
+            // Blender's mapping: MMB orbits, Shift+MMB pans.
+            let pan = event.modifiers.shift;
             let _ = studio_down_middle.update(cx, |studio, cx| {
-                studio.drag = Some(ViewDrag::Pan {
-                    last_x: x,
-                    last_y: y,
+                studio.drag = Some(if pan {
+                    ViewDrag::Pan {
+                        last_x: x,
+                        last_y: y,
+                    }
+                } else {
+                    ViewDrag::Orbit {
+                        last_x: x,
+                        last_y: y,
+                    }
                 });
                 cx.notify();
             });
@@ -384,7 +395,15 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     v_flex()
         .size_full()
         .child(tools)
-        .child(h_flex().flex_1().w_full().child(rail).child(body))
+        .child(
+            h_flex()
+                .flex_1()
+                .w_full()
+                .min_h(px(0.))
+                .items_stretch()
+                .child(rail)
+                .child(body),
+        )
         .into_any_element()
 }
 

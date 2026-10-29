@@ -320,6 +320,11 @@ pub struct Studio {
     pub backend: String,
     pub software: bool,
     pub viewport_ready: bool,
+    /// DEM metadata the viewport worker read, shown while the bridge is still
+    /// loading the same file.
+    pub viewport_dem: Option<(u32, u32, f32, f32)>,
+    /// When the current DEM import started, so both load paths can be timed.
+    dem_load_started: Option<std::time::Instant>,
 
     pub log: Vec<LogEntry>,
     pub status: String,
@@ -412,6 +417,8 @@ impl Studio {
             backend: String::new(),
             software: false,
             viewport_ready: false,
+            viewport_dem: None,
+            dem_load_started: None,
             log: Vec::new(),
             status: "Ready".to_owned(),
             busy: false,
@@ -644,7 +651,16 @@ impl Studio {
     /// viewport worker (the interactive frame).
     pub fn import_dem(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.busy = true;
+        self.dem_load_started = Some(std::time::Instant::now());
         self.set_status(format!("Loading {}", path.display()));
+        // Two loads on purpose, started together: the native viewport reads the
+        // DEM in Rust and paints as soon as it is in (the fast path), while the
+        // embedded engine loads the same file for the certified renders,
+        // exports and metadata. Waiting for Python before the first frame is
+        // what made a DEM import feel slow.
+        self.viewport.send(ViewportCommand::LoadDem {
+            path: path.to_path_buf(),
+        });
         self.engine.send(Command::LoadTerrain {
             path: path.to_path_buf(),
         });
@@ -990,10 +1006,16 @@ impl Studio {
         let size = render_size(width, height);
         self.last_requested_size = size;
         self.viewport_dirty = false;
-        // During a live drag the frame is drawn at half resolution: the camera
-        // answers immediately and the release draws the full-size frame.
+        // During a live drag the frame is drawn at reduced resolution unless
+        // the last frame was fast: the camera answers immediately on a slow
+        // adapter, and a fast one keeps full resolution while orbiting.
+        let fast_last_frame = self.frame_ms < 9.0;
         let scale = if self.drag.is_some() && self.live_viewport && !force {
-            0.5
+            if fast_last_frame {
+                1.0
+            } else {
+                0.5
+            }
         } else {
             1.0
         };
@@ -2578,9 +2600,36 @@ impl Studio {
                 self.push_log(true, format!("{context}: {message}"));
                 self.set_status(format!("{context} failed"));
             }
-            ViewportEvent::TerrainLoaded => {
+            ViewportEvent::TerrainLoaded {
+                width,
+                height,
+                height_min,
+                height_max,
+            } => {
                 self.render_in_flight = false;
                 self.viewport_dirty = true;
+                self.viewport_dem = Some((width, height, height_min, height_max));
+                if let Some(started) = self.dem_load_started {
+                    log::info!(
+                        "viewport DEM ready: {width}×{height} in {:.0} ms (Rust reader)",
+                        started.elapsed().as_secs_f32() * 1000.0
+                    );
+                }
+                self.set_status(format!(
+                    "Viewport: {width}×{height} · {:.0}–{:.0} m (engine still loading)",
+                    height_min, height_max
+                ));
+                // Frame the DEM before the bridge's camera defaults arrive, so
+                // the first painted frame is usable rather than a guess.
+                if let Some(terrain) = &self.project.terrain {
+                    let _ = terrain;
+                } else {
+                    self.project.camera.radius = fit_radius(terrain_span(height_min, height_max));
+                    self.viewport.send(ViewportCommand::SetView {
+                        camera: self.project.camera,
+                        sun: self.project.sun,
+                    });
+                }
             }
             ViewportEvent::TerrainCleared => {
                 self.render_in_flight = false;
@@ -2669,11 +2718,8 @@ impl Studio {
                 self.project.sun = sun;
                 self.project_dirty = true;
 
-                // The live scene loads the same file on its own device.
-                self.viewport.send(ViewportCommand::LoadDem {
-                    path: path.clone(),
-                    span,
-                });
+                // The live scene already loaded this file on its own device
+                // (see `import_dem`); only the palette and camera follow.
                 self.viewport
                     .send(ViewportCommand::SetColormap(self.project.colormap.clone()));
                 self.viewport.send(ViewportCommand::SetView {
@@ -2681,6 +2727,12 @@ impl Studio {
                     sun: self.project.sun,
                 });
 
+                if let Some(started) = self.dem_load_started.take() {
+                    log::info!(
+                        "bridge DEM ready: {width}×{height} in {:.0} ms (embedded Python)",
+                        started.elapsed().as_secs_f32() * 1000.0
+                    );
+                }
                 self.set_status(format!(
                     "{} · {}×{} · {}–{}",
                     path.file_name()
@@ -3125,6 +3177,9 @@ impl Studio {
             .send(Command::SetColormap(self.project.colormap.clone()));
         if let Some(terrain) = &self.project.terrain {
             self.engine.send(Command::LoadTerrain {
+                path: terrain.path.clone(),
+            });
+            self.viewport.send(ViewportCommand::LoadDem {
                 path: terrain.path.clone(),
             });
         }

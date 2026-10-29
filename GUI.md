@@ -510,13 +510,23 @@ facts are at least locked today.
 Three bugs made orbiting unusable; all three are fixed and the numbers are in
 the G-table above:
 
-| Condition | Result |
-|---|---|
-| Idle (before) | 32 renders in 12 s — the HUD readout changed width, which resized the viewport, which requested another frame |
-| Idle (after) | 2 renders total, then nothing |
-| 180°/s orbit, half-res during drag (release) | ~60 fps, 14 ms per frame |
-| Full-size frame on release | ~80 ms (Rainier 2111², 878×606) |
-| Live switch off | no renders while dragging; one frame when the gesture ends |
+| Condition | iGPU (before) | discrete GPU (after) |
+|---|---|---|
+| Idle, 12 s | 32 renders | 2 renders total, then nothing |
+| 180°/s orbit | queue grew, seconds of lag | ~60 fps, 3 ms half-res / 6.6 ms full-res mean |
+| First full-size frame | 88–195 ms | 16.9 ms (Rainier 2111², 954×630) |
+| Live switch off | not available | no renders while dragging; one frame when the gesture ends |
+
+The viewport now renders on the **discrete** adapter: the engine's default
+`PowerPreference::LowPower` landed on the integrated GPU while the UI
+composited on the discrete one, so every frame crossed PCIe. Studio sets
+`FORGE3D_GPU_POWER=high` before any engine context exists (an explicit user
+value wins, and the engine default is unchanged). A DEM import also starts the
+Rust reader first and paints as soon as it is in, with the embedded-Python
+load following for exports/metadata — 1.4 s for the bridge versus a first
+frame in about the same time, instead of waiting for Python before drawing.
+Drag resolution is adaptive: half while the last frame was slower than 9 ms,
+full when the adapter keeps up.
 
 The frame-request path is now: pointer motion only marks the view dirty, a
 20 Hz pump issues at most one frame when nothing is in flight, and the drag
