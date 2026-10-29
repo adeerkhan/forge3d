@@ -10,6 +10,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -297,6 +298,12 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
                     .label("Export map…")
                     .xsmall()
                     .outline()
+                    .disabled(!has_recipe)
+                    .tooltip(if has_recipe {
+                        "Render the recipe straight to a PNG"
+                    } else {
+                        "Build the recipe first"
+                    })
                     .on_click(move |_, _, cx| {
                         studio_export.update(cx, |studio, cx| studio.export_map(cx));
                     }),

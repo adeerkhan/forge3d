@@ -8,6 +8,7 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::checkbox::Checkbox;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -35,13 +36,14 @@ fn note(text: impl Into<SharedString>, cx: &App) -> AnyElement {
 
 /// MapScene mode: templates, validation, the certified render and its camera.
 pub fn mapscene(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> AnyElement {
-    let (mode, mapscene, has_terrain, export) = {
+    let (mode, mapscene, has_terrain, export, has_recipe) = {
         let state = studio.read(cx);
         (
             state.scene_mode,
             state.mapscene.clone(),
             state.project.terrain.is_some(),
             state.project.export,
+            state.mapscene.recipe_json.is_some(),
         )
     };
 
@@ -178,6 +180,12 @@ pub fn mapscene(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
                         .label("Render")
                         .xsmall()
                         .primary()
+                        .disabled(!has_recipe)
+                        .tooltip(if has_recipe {
+                            "Render the recipe through MapScene"
+                        } else {
+                            "Build the recipe first"
+                        })
                         .on_click(move |_, _, cx| {
                             studio_render.update(cx, |studio, cx| studio.render_mapscene(cx));
                         }),

@@ -128,7 +128,7 @@ macro_rules! studio_action_table {
             CameraIsometric, "Isometric", View, false, Some("0");
             ResetCamera, "Reset camera", View, true, None;
             ToggleTheme, "Dark / light theme", View, true, None;
-            RenderFrame, "Render frame", Render, false, Some("ctrl-r");
+            RenderFrame, "Render still", Render, false, Some("ctrl-r");
             ToggleLiveViewport, "Live viewport", View, true, Some("ctrl-l");
             UseRasterMode, "Raster (PBR + POM)", Render, true, None;
             UsePathTracedMode, "Path traced", Render, false, None;
@@ -501,7 +501,10 @@ impl Default for MenuState {
 
 /// Register the keyboard map and the application menus.
 pub fn init(cx: &mut App) {
-    cx.bind_keys(keybindings());
+    let mut bindings = keybindings();
+    // F12 is what a DCC user reaches for; Ctrl+R stays as the discoverable one.
+    bindings.push(KeyBinding::new("f12", RenderFrame, None));
+    cx.bind_keys(bindings);
 
     apply_menus(MenuState::default(), cx);
 }

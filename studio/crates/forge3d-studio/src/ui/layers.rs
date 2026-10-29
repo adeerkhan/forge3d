@@ -453,59 +453,88 @@ pub fn layers(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
                 .child(list),
         )
         .child(
-            h_flex()
-                .justify_between()
+            // Two rows, because one row of "Opacity 100%" plus two buttons does
+            // not fit a dock at its narrowest and used to wrap mid-word.
+            v_flex()
+                .w_full()
+                .gap_1()
                 .px_2()
                 .py_1()
                 .border_t_1()
                 .border_color(cx.theme().colors.border)
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(if selection.is_empty() {
-                            "No selection".to_owned()
-                        } else {
-                            format!("{} selected", selection.len())
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().colors.muted_foreground)
+                                .child(if selection.is_empty() {
+                                    "No selection".to_owned()
+                                } else {
+                                    format!("{} selected", selection.len())
+                                }),
+                        )
+                        .when(anchor.is_some(), |row| {
+                            row.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().colors.muted_foreground)
+                                    .child("shift = range"),
+                            )
                         }),
                 )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .when(!selection.is_empty(), |row| {
-                            row.child(
-                                Button::new("opacity-dec")
-                                    .label("−")
-                                    .xsmall()
-                                    .ghost()
-                                    .on_click(move |_, _, cx| {
-                                        studio_dec.update(cx, |studio, cx| {
-                                            studio.step_selection_opacity(-0.1, cx)
-                                        });
-                                    }),
-                            )
+                .when(!selection.is_empty(), |footer| {
+                    footer.child(
+                        h_flex()
+                            .justify_between()
+                            .gap_2()
+                            .items_center()
                             .child(
                                 div()
-                                    .w(px(44.))
                                     .text_xs()
-                                    .text_center()
-                                    .child(format!("Opacity {:.0}%", opacity * 100.0)),
+                                    .text_color(cx.theme().colors.muted_foreground)
+                                    .child("Opacity"),
                             )
                             .child(
-                                Button::new("opacity-inc")
-                                    .label("+")
-                                    .xsmall()
-                                    .ghost()
-                                    .on_click(move |_, _, cx| {
-                                        studio_inc.update(cx, |studio, cx| {
-                                            studio.step_selection_opacity(0.1, cx)
-                                        });
-                                    }),
-                            )
-                        })
-                        .when(anchor.is_some(), |row| row.child("")),
-                ),
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        Button::new("opacity-dec")
+                                            .label("−")
+                                            .xsmall()
+                                            .ghost()
+                                            .tooltip("Less opaque")
+                                            .on_click(move |_, _, cx| {
+                                                studio_dec.update(cx, |studio, cx| {
+                                                    studio.step_selection_opacity(-0.1, cx)
+                                                });
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(52.))
+                                            .text_xs()
+                                            .text_center()
+                                            .child(format!("{:.0}%", opacity * 100.0)),
+                                    )
+                                    .child(
+                                        Button::new("opacity-inc")
+                                            .label("+")
+                                            .xsmall()
+                                            .ghost()
+                                            .tooltip("More opaque")
+                                            .on_click(move |_, _, cx| {
+                                                studio_inc.update(cx, |studio, cx| {
+                                                    studio.step_selection_opacity(0.1, cx)
+                                                });
+                                            }),
+                                    ),
+                            ),
+                    )
+                }),
         )
         .into_any_element()
 }

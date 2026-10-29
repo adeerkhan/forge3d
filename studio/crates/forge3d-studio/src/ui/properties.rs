@@ -7,7 +7,7 @@
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _};
+use gpui_kit::component::{h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
@@ -76,16 +76,48 @@ pub fn properties(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) ->
         PropertiesTab::Stats => crate::ui::panels::statistics_entity(studio, window, cx),
     };
 
+    let (_, active_title) = tab_icon(active);
+
     h_flex()
         .size_full()
         .child(strip)
         .child(
-            div()
-                .id("properties-content")
+            v_flex()
                 .flex_1()
                 .h_full()
-                .overflow_y_scroll()
-                .child(content),
+                .min_w(px(0.))
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(cx.theme().colors.border)
+                        .child(div().text_xs().font_semibold().child(active_title))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().colors.muted_foreground)
+                                .child(format!(
+                                    "{} / {}",
+                                    crate::state::Workspace::ALL
+                                        .iter()
+                                        .find(|workspace| workspace.properties_tab() == active)
+                                        .map(|workspace| workspace.label())
+                                        .unwrap_or("Custom"),
+                                    active.label()
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("properties-content")
+                        .flex_1()
+                        .min_w(px(0.))
+                        .overflow_y_scroll()
+                        .child(content),
+                ),
         )
         .into_any_element()
 }

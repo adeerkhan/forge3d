@@ -238,7 +238,7 @@ pub fn build_dock(
         area.set_dock(DockPlacement::Left, left, window, cx);
         area.set_dock_size(DockPlacement::Left, px(250.), window, cx);
         area.set_dock(DockPlacement::Right, right, window, cx);
-        area.set_dock_size(DockPlacement::Right, px(300.), window, cx);
+        area.set_dock_size(DockPlacement::Right, px(340.), window, cx);
         area.set_dock(DockPlacement::Bottom, bottom_strip, window, cx);
         area.set_dock_size(DockPlacement::Bottom, px(150.), window, cx);
         for placement in [

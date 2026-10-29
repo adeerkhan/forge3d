@@ -185,6 +185,10 @@ UI runtime (GUI.md Part X):
       with its size and status, fetches git-LFS pointers through
       `git lfs pull`, and refuses to open when a declared engine op is missing
       (`ops.list`).
+- [x] **Render still (Ctrl+R / F12)** — always one bridge render at the
+      viewport's size (one raster pass when quality is off, accumulation/denoise
+      when on), presented as "Render result" with progress and certificate;
+      moving the view returns to the live preview.
 - [x] **Live preview vs render** — Terrain mode's viewport always paints
       (interactive, ~60 fps); offline/PT quality settings apply only to an
       explicit still, which shows as "Render result" with a click (or a camera

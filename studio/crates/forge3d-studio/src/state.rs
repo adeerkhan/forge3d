@@ -83,6 +83,18 @@ impl Workspace {
         Workspace::Data,
     ];
 
+    /// The properties page this workspace opens.
+    pub fn properties_tab(self) -> PropertiesTab {
+        match self {
+            Workspace::Layout => PropertiesTab::Layer,
+            Workspace::Terrain => PropertiesTab::Terrain,
+            Workspace::Cartography => PropertiesTab::Cartography,
+            Workspace::Render => PropertiesTab::Render,
+            Workspace::Look => PropertiesTab::World,
+            Workspace::Data => PropertiesTab::Layer,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Workspace::Layout => "Layout",
@@ -522,6 +534,9 @@ pub struct Studio {
     /// True while the viewport shows a rendered still (quality or MapScene)
     /// rather than the live preview.
     pub showing_render: bool,
+    /// A still was requested, so the next bridge frame is presented even when
+    /// it carries no quality metadata (a plain one-pass raster render).
+    awaiting_still: bool,
     pub ui_timing: UiTiming,
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
@@ -611,6 +626,7 @@ impl Studio {
             lfs_fetch: None,
             available_ops: std::collections::HashSet::new(),
             showing_render: false,
+            awaiting_still: false,
             ui_timing: UiTiming::default(),
             focus_handle,
             drag: None,
@@ -3268,6 +3284,14 @@ impl Studio {
                 if self.pending_example.is_some() {
                     self.apply_pending_example(cx);
                 }
+                if std::env::var_os("FORGE3D_STUDIO_STILL_SMOKE").is_some() {
+                    // Dev hook: exercise the render path (offline accumulation)
+                    // without clicking Render.
+                    self.project.render_quality.offline.enabled = true;
+                    self.project.render_quality.offline.samples = 4;
+                    self.apply_quality(cx);
+                    self.request_still(cx);
+                }
             }
             Event::TerrainCleared => {
                 self.busy = false;
@@ -3286,10 +3310,17 @@ impl Studio {
                 self.busy = false;
                 self.render_in_flight = false;
                 // A quality still is the bridge's pixels, not the native frame.
-                if quality.is_some() {
+                let still = quality.is_some() || self.awaiting_still;
+                self.awaiting_still = false;
+                if still {
+                    log::info!(
+                        "render still received: {width}×{height} ({} bytes)",
+                        rgba.len()
+                    );
                     self.present_rgba(width, height, rgba);
                     self.viewport_dirty = false;
                     self.showing_render = true;
+                    self.set_status("Render result — move the view to return to the preview");
                 }
                 if let Some(path) = certificate {
                     let source = path
@@ -3329,6 +3360,9 @@ impl Studio {
             Event::JobDone { job, op, result } => self.handle_job_done(job, &op, result, cx),
             Event::JobFailed { op, message, .. } => {
                 self.busy = false;
+                if op.starts_with("mapscene.") {
+                    self.mapscene.last_status = Some(format!("{op}: {message}"));
+                }
                 if op == "terrain.load" {
                     if let Some(entry) = self.pending_example.take() {
                         self.gallery_cards

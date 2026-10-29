@@ -234,8 +234,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "cam-phi",
                 "Orbit",
                 format!("{:.0}°", camera.phi_deg),
-                |studio, cx| studio.step_camera(5.0, 0.0, 1.0, 1.0, cx),
                 |studio, cx| studio.step_camera(-5.0, 0.0, 1.0, 1.0, cx),
+                |studio, cx| studio.step_camera(5.0, 0.0, 1.0, 1.0, cx),
                 cx,
             ))
             .child(stepper(
@@ -243,8 +243,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "cam-theta",
                 "Elevation",
                 format!("{:.0}°", camera.theta_deg),
-                |studio, cx| studio.step_camera(0.0, 2.0, 1.0, 1.0, cx),
                 |studio, cx| studio.step_camera(0.0, -2.0, 1.0, 1.0, cx),
+                |studio, cx| studio.step_camera(0.0, 2.0, 1.0, 1.0, cx),
                 cx,
             ))
             .child(stepper(
@@ -252,8 +252,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "cam-radius",
                 "Distance",
                 format!("{:.0}", camera.radius),
-                |studio, cx| studio.step_camera(0.0, 0.0, 1.15, 1.0, cx),
                 |studio, cx| studio.step_camera(0.0, 0.0, 1.0 / 1.15, 1.0, cx),
+                |studio, cx| studio.step_camera(0.0, 0.0, 1.15, 1.0, cx),
                 cx,
             ))
             .child(stepper(
@@ -261,8 +261,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "cam-fov",
                 "Field of view",
                 format!("{:.0}°", camera.fov_deg),
-                |studio, cx| studio.step_camera(0.0, 0.0, 1.0, 1.05, cx),
                 |studio, cx| studio.step_camera(0.0, 0.0, 1.0, 1.0 / 1.05, cx),
+                |studio, cx| studio.step_camera(0.0, 0.0, 1.0, 1.05, cx),
                 cx,
             ))
             .child(
@@ -306,8 +306,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "sun-az",
                 "Azimuth",
                 format!("{:.0}°", sun.azimuth_deg),
-                |studio, cx| studio.step_sun(5.0, 0.0, 1.0, cx),
                 |studio, cx| studio.step_sun(-5.0, 0.0, 1.0, cx),
+                |studio, cx| studio.step_sun(5.0, 0.0, 1.0, cx),
                 cx,
             ))
             .child(stepper(
@@ -315,8 +315,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "sun-el",
                 "Elevation",
                 format!("{:.0}°", sun.elevation_deg),
-                |studio, cx| studio.step_sun(0.0, 2.5, 1.0, cx),
                 |studio, cx| studio.step_sun(0.0, -2.5, 1.0, cx),
+                |studio, cx| studio.step_sun(0.0, 2.5, 1.0, cx),
                 cx,
             ))
             .child(stepper(
@@ -324,8 +324,8 @@ pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> An
                 "sun-int",
                 "Intensity",
                 format!("{:.2}", sun.intensity),
-                |studio, cx| studio.step_sun(0.0, 0.0, 1.1, cx),
                 |studio, cx| studio.step_sun(0.0, 0.0, 1.0 / 1.1, cx),
+                |studio, cx| studio.step_sun(0.0, 0.0, 1.1, cx),
                 cx,
             )),
     );
