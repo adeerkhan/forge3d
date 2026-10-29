@@ -98,7 +98,7 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
                         });
                     }),
             )
-            .child(muted("runnable only", cx)),
+            .child(muted("only what runs today", cx)),
     );
 
     let mut list = v_flex().w_full();
@@ -173,6 +173,7 @@ pub fn gallery(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> A
         card = card
             .on_click(move |_, window, c| {
                 let id = id.clone();
+                log::info!("gallery: card clicked ({id})");
                 let entity = studio_card.clone();
                 entity.update(c, |studio, cx| studio.preview_example(id, cx));
                 carousel_dialog(entity, window, c);

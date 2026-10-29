@@ -601,7 +601,7 @@ impl Studio {
             },
             examples: load_examples(),
             gallery_filter: "All".to_owned(),
-            gallery_runnable_only: false,
+            gallery_runnable_only: true,
             atmosphere_meta: None,
             smoke_report: None,
             pending_example: None,
