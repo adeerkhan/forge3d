@@ -102,7 +102,7 @@ pub enum PropertiesTab {
     Terrain,
     Render,
     World,
-    Scene,
+    Cartography,
     Stats,
 }
 
@@ -112,7 +112,7 @@ impl PropertiesTab {
         PropertiesTab::Terrain,
         PropertiesTab::Render,
         PropertiesTab::World,
-        PropertiesTab::Scene,
+        PropertiesTab::Cartography,
         PropertiesTab::Stats,
     ];
 
@@ -122,7 +122,7 @@ impl PropertiesTab {
             PropertiesTab::Terrain => "terrain",
             PropertiesTab::Render => "render",
             PropertiesTab::World => "world",
-            PropertiesTab::Scene => "scene",
+            PropertiesTab::Cartography => "cartography",
             PropertiesTab::Stats => "stats",
         }
     }
@@ -194,11 +194,121 @@ impl AssetStatus {
     }
 }
 
+/// The cartography furniture, exactly the fields `MapFurnitureLayer` carries.
+///
+/// Studio edits these into the recipe; the engine draws them over the finished
+/// frame (`_compose_furniture`), with keep-outs so labels avoid them.
+#[derive(Clone, Debug)]
+pub struct Furniture {
+    /// Empty means "no title".
+    pub title: String,
+    pub legend_enabled: bool,
+    /// Comma-separated swatch labels.
+    pub legend_items: String,
+    pub scale_bar_enabled: bool,
+    pub scale_bar_position: String,
+    pub scale_bar_units: String,
+    pub north_arrow_enabled: bool,
+    pub north_arrow_position: String,
+    pub north_arrow_style: String,
+    pub graticule_enabled: bool,
+    pub graticule_interval_deg: f32,
+    /// What the last apply reported.
+    pub status: Option<String>,
+    /// Input entities for the text fields, created on first use.
+    pub inputs: std::collections::HashMap<&'static str, Entity<InputState>>,
+}
+
+/// The recipe's orbit camera, as the gallery scenes express it.
+#[derive(Clone, Copy, Debug)]
+pub struct MapSceneCamera {
+    pub distance: f32,
+    pub azimuth_deg: f32,
+    pub elevation_deg: f32,
+    pub fov_deg: f32,
+}
+
+impl Default for Furniture {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            legend_enabled: false,
+            legend_items: String::new(),
+            scale_bar_enabled: true,
+            scale_bar_position: "bottom-left".to_owned(),
+            scale_bar_units: "km".to_owned(),
+            north_arrow_enabled: true,
+            north_arrow_position: "top-right".to_owned(),
+            north_arrow_style: "arrow".to_owned(),
+            graticule_enabled: false,
+            graticule_interval_deg: 0.25,
+            status: None,
+            inputs: std::collections::HashMap::new(),
+        }
+    }
+}
+
+impl Furniture {
+    /// The `map_furniture` object sent to the bridge. `None` means "draw
+    /// nothing" for that piece, which the bridge drops.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut object = serde_json::Map::new();
+        let title = self.title.trim();
+        if !title.is_empty() {
+            object.insert("title".to_owned(), serde_json::json!(title));
+        }
+        if self.legend_enabled {
+            let items: Vec<&str> = self
+                .legend_items
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .collect();
+            if !items.is_empty() {
+                object.insert("legend".to_owned(), serde_json::json!({ "items": items }));
+            }
+        }
+        if self.scale_bar_enabled {
+            object.insert(
+                "scale_bar".to_owned(),
+                serde_json::json!({
+                    "position": self.scale_bar_position,
+                    "units": self.scale_bar_units,
+                }),
+            );
+        }
+        if self.north_arrow_enabled {
+            object.insert(
+                "north_arrow".to_owned(),
+                serde_json::json!({
+                    "position": self.north_arrow_position,
+                    "style": self.north_arrow_style,
+                }),
+            );
+        }
+        if self.graticule_enabled {
+            object.insert(
+                "graticule".to_owned(),
+                serde_json::json!({
+                    "interval_deg": self.graticule_interval_deg,
+                    "include_labels": true,
+                }),
+            );
+        }
+        serde_json::Value::Object(object)
+    }
+}
+
 /// MapScene mode state: the recipe the last build produced and its report.
 #[derive(Clone, Debug, Default)]
 pub struct MapSceneState {
     pub template: String,
     pub templates: Vec<String>,
+    /// Raster overlay draped by the `terrain_raster` template.
+    pub raster_path: Option<PathBuf>,
+    pub label_text: String,
+    /// Recipe camera (gallery scenes pin one; the template has defaults).
+    pub camera: Option<MapSceneCamera>,
     pub recipe_json: Option<String>,
     pub last_status: Option<String>,
     pub certificate_sha: Option<String>,
@@ -268,6 +378,7 @@ pub enum PendingJob {
     MapSceneTemplate,
     MapSceneValidate,
     MapSceneRender,
+    MapSceneFurniture { render_after: bool },
     AtmosphereBake,
     AstroObserve,
     SmokeLoad,
@@ -357,6 +468,7 @@ pub struct Studio {
 
     pub scene_mode: SceneMode,
     pub mapscene: MapSceneState,
+    pub furniture: Furniture,
     pub examples: Vec<ExampleEntry>,
     pub gallery_filter: String,
     pub gallery_runnable_only: bool,
@@ -443,8 +555,10 @@ impl Studio {
             show_gizmo: true,
             show_hud: true,
             scene_mode: SceneMode::Terrain,
+            furniture: Furniture::default(),
             mapscene: MapSceneState {
-                template: "terrain_raster".to_owned(),
+                template: "terrain".to_owned(),
+                label_text: "Studio".to_owned(),
                 ..MapSceneState::default()
             },
             examples: load_examples(),
@@ -1861,7 +1975,7 @@ impl Studio {
                 self.left_tab = LeftTab::Layers;
             }
             Workspace::Cartography => {
-                self.properties_tab = PropertiesTab::Scene;
+                self.properties_tab = PropertiesTab::Cartography;
                 self.left_tab = LeftTab::Layers;
             }
             Workspace::Render => {
@@ -2108,6 +2222,38 @@ impl Studio {
             let next = scene_sun(sun, self.project.sun);
             self.set_sun(next, cx);
         }
+        if let Some(raster) = scene.get("raster").and_then(|value| value.as_str()) {
+            self.mapscene.raster_path = Some(resolve_repo_path(Path::new(raster)));
+        }
+        if let Some(camera) = scene.get("camera") {
+            self.mapscene.camera = Some(MapSceneCamera {
+                distance: camera
+                    .get("distance")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(1.2) as f32,
+                azimuth_deg: camera
+                    .get("azimuth_deg")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(25.0) as f32,
+                elevation_deg: camera
+                    .get("elevation_deg")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(45.0) as f32,
+                fov_deg: camera
+                    .get("fov_deg")
+                    .and_then(|value| value.as_f64())
+                    .unwrap_or(45.0) as f32,
+            });
+        }
+        if let Some(label) = scene.get("label_text").and_then(|value| value.as_str()) {
+            self.mapscene.label_text = label.to_owned();
+        }
+        if let Some(width) = scene.get("width").and_then(|value| value.as_u64()) {
+            self.project.export.width = width as u32;
+        }
+        if let Some(height) = scene.get("height").and_then(|value| value.as_u64()) {
+            self.project.export.height = height as u32;
+        }
         if let Some(params) = scene.get("params") {
             if let Some(map) = params.as_object() {
                 for (key, value) in map {
@@ -2148,6 +2294,169 @@ impl Studio {
         cx.notify();
     }
 
+    // ------------------------------------------------------------- furniture
+
+    /// Push the panel's furniture into the recipe. With `render_after`, the
+    /// patched recipe is rendered as soon as the bridge hands it back.
+    pub fn apply_furniture(&mut self, render_after: bool, cx: &mut Context<Self>) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("Cartography", "build a MapScene recipe first");
+            return;
+        };
+        let furniture = self.furniture.to_json();
+        let job = self.engine.call(
+            "mapscene.furniture",
+            serde_json::json!({
+                "recipe_json": recipe,
+                "furniture": furniture,
+            }),
+        );
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneFurniture { render_after });
+        self.set_status("Applying map furniture…");
+        cx.notify();
+    }
+
+    pub fn set_furniture_title(&mut self, title: String, cx: &mut Context<Self>) {
+        self.furniture.title = title;
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn set_furniture_legend_items(&mut self, items: String, cx: &mut Context<Self>) {
+        self.furniture.legend_items = items;
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn toggle_furniture(&mut self, kind: &str, enabled: bool, cx: &mut Context<Self>) {
+        match kind {
+            "legend" => self.furniture.legend_enabled = enabled,
+            "scale_bar" => self.furniture.scale_bar_enabled = enabled,
+            "north_arrow" => self.furniture.north_arrow_enabled = enabled,
+            "graticule" => self.furniture.graticule_enabled = enabled,
+            _ => {}
+        }
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn set_furniture_position(&mut self, kind: &str, position: String, cx: &mut Context<Self>) {
+        match kind {
+            "scale_bar" => self.furniture.scale_bar_position = position,
+            "north_arrow" => self.furniture.north_arrow_position = position,
+            _ => {}
+        }
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn set_furniture_units(&mut self, units: String, cx: &mut Context<Self>) {
+        self.furniture.scale_bar_units = units;
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    pub fn set_furniture_graticule(&mut self, interval_deg: f32, cx: &mut Context<Self>) {
+        self.furniture.graticule_interval_deg = (interval_deg).clamp(0.01, 30.0);
+        self.project_dirty = true;
+        cx.notify();
+    }
+
+    /// The live text input for a furniture field, created on first use.
+    pub fn furniture_input(
+        &mut self,
+        key: &'static str,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        if let Some(input) = self.furniture.inputs.get(key) {
+            return input.clone();
+        }
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(match key {
+                    "title" => "Map title",
+                    _ => "Brown, Green, Snow",
+                })
+                .default_value(value.to_owned())
+        });
+        self.furniture.inputs.insert(key, input.clone());
+        cx.subscribe_in(
+            &input,
+            window,
+            move |this, input, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change | InputEvent::PressEnter { .. }) {
+                    let text = input.read(cx).value().to_string();
+                    match key {
+                        "title" => this.set_furniture_title(text, cx),
+                        "legend_items" => this.set_furniture_legend_items(text, cx),
+                        _ => {}
+                    }
+                }
+            },
+        )
+        .detach();
+        input
+    }
+
+    /// Read the furniture a recipe already carries back into the panel, so the
+    /// UI shows the scene's own values instead of its defaults.
+    fn load_furniture_from_recipe(&mut self, recipe: &serde_json::Value) {
+        let Some(furniture) = recipe
+            .get("map_furniture")
+            .and_then(|value| value.as_object())
+        else {
+            return;
+        };
+        self.furniture.title = furniture
+            .get("title")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(legend) = furniture.get("legend") {
+            self.furniture.legend_enabled = true;
+            self.furniture.legend_items = legend
+                .get("items")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+        }
+        if let Some(scale_bar) = furniture.get("scale_bar") {
+            self.furniture.scale_bar_enabled = true;
+            if let Some(position) = scale_bar.get("position").and_then(|value| value.as_str()) {
+                self.furniture.scale_bar_position = position.to_owned();
+            }
+            if let Some(units) = scale_bar.get("units").and_then(|value| value.as_str()) {
+                self.furniture.scale_bar_units = units.to_owned();
+            }
+        }
+        if let Some(arrow) = furniture.get("north_arrow") {
+            self.furniture.north_arrow_enabled = true;
+            if let Some(position) = arrow.get("position").and_then(|value| value.as_str()) {
+                self.furniture.north_arrow_position = position.to_owned();
+            }
+        }
+        if let Some(graticule) = furniture.get("graticule") {
+            self.furniture.graticule_enabled = true;
+            if let Some(interval) = graticule
+                .get("interval_deg")
+                .and_then(|value| value.as_f64())
+            {
+                self.furniture.graticule_interval_deg = interval as f32;
+            }
+        }
+        // Text inputs hold the old text; rebuild them from the recipe.
+        self.furniture.inputs.clear();
+    }
+
     /// `mapscene.template`: build the recipe the canonical example builds.
     pub fn build_mapscene(&mut self, cx: &mut Context<Self>) {
         let Some(terrain) = self.project.terrain.clone() else {
@@ -2155,18 +2464,63 @@ impl Studio {
             return;
         };
         self.busy = true;
-        let job = self.engine.call(
-            "mapscene.template",
-            serde_json::json!({
-                "template": self.mapscene.template,
-                "dem_path": terrain.path.to_string_lossy(),
-                "width": self.project.export.width,
-                "height": self.project.export.height,
-                "label_text": "Studio",
-            }),
-        );
+        let raster = self
+            .mapscene
+            .raster_path
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let mut params = serde_json::json!({
+            "template": self.mapscene.template,
+            "dem_path": terrain.path.to_string_lossy(),
+            "raster_path": raster,
+            "width": self.project.export.width,
+            "height": self.project.export.height,
+            "label_text": self.mapscene.label_text,
+        });
+        if let Some(camera) = self.mapscene.camera {
+            if let Some(map) = params.as_object_mut() {
+                map.insert("distance".to_owned(), serde_json::json!(camera.distance));
+                map.insert(
+                    "azimuth_deg".to_owned(),
+                    serde_json::json!(camera.azimuth_deg),
+                );
+                map.insert(
+                    "elevation_deg".to_owned(),
+                    serde_json::json!(camera.elevation_deg),
+                );
+                map.insert("fov_deg".to_owned(), serde_json::json!(camera.fov_deg));
+            }
+        }
+        let job = self.engine.call("mapscene.template", params);
         self.pending_jobs.insert(job, PendingJob::MapSceneTemplate);
         self.set_status("Building MapScene recipe…");
+        cx.notify();
+    }
+
+    /// Choose the raster the scene drapes over the terrain.
+    pub fn pick_raster_overlay(&mut self, cx: &mut Context<Self>) {
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose a raster overlay (GeoTIFF / COG / NPY)".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let picked = first_path(rx.await.ok().and_then(|result| result.ok()));
+            if let Some(path) = picked {
+                let _ = this.update(cx, |this, cx| {
+                    this.mapscene.raster_path = Some(path);
+                    this.project_dirty = true;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    pub fn clear_raster_overlay(&mut self, cx: &mut Context<Self>) {
+        self.mapscene.raster_path = None;
+        self.project_dirty = true;
         cx.notify();
     }
 
@@ -3019,11 +3373,24 @@ impl Studio {
                             .as_str()
                             .map(str::to_owned)
                             .unwrap_or_else(|| recipe.to_string());
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            self.load_furniture_from_recipe(&parsed);
+                        }
                         self.mapscene.recipe_json = Some(text);
                         self.mapscene.last_status =
                             Some("Recipe built from the template".to_owned());
                         self.busy = false;
                         self.set_status("Recipe built — validate or render it");
+                        if std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_some() {
+                            // Dev hook: apply a full furniture set and render,
+                            // so the cartography path is exercised end to end.
+                            self.furniture.title = "Studio cartography".to_owned();
+                            self.furniture.legend_enabled = true;
+                            self.furniture.legend_items = "Forest, Alpine, Snow".to_owned();
+                            self.furniture.graticule_enabled = true;
+                            self.furniture.graticule_interval_deg = 0.05;
+                            self.apply_furniture(true, cx);
+                        }
                     }
                     None => {
                         self.busy = false;
@@ -3053,6 +3420,39 @@ impl Studio {
                 });
                 self.set_status(format!("Recipe validation: {status}"));
             }
+            PendingJob::MapSceneFurniture { render_after } => {
+                let patched = result
+                    .get("recipe_json")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned);
+                let applied = result
+                    .get("applied")
+                    .and_then(|value| value.as_array())
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(|item| item.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                if let Some(patched) = patched {
+                    if let Ok(recipe) = serde_json::from_str::<serde_json::Value>(&patched) {
+                        self.load_furniture_from_recipe(&recipe);
+                    }
+                    self.mapscene.recipe_json = Some(patched);
+                    self.furniture.status = Some(if applied.is_empty() {
+                        "furniture cleared".to_owned()
+                    } else {
+                        format!("applied: {applied}")
+                    });
+                    self.set_status("Map furniture applied");
+                    if render_after {
+                        self.render_mapscene(cx);
+                    }
+                } else {
+                    self.push_error("Cartography", "the engine returned no patched recipe");
+                }
+            }
             PendingJob::MapSceneRender => {
                 self.busy = false;
                 let status = result
@@ -3073,6 +3473,7 @@ impl Studio {
                 }
                 self.mapscene.last_status = Some(format!("rendered: {status}"));
                 if let Some(path) = png {
+                    log::info!("mapscene frame written: {}", path.display());
                     self.present_png(&path);
                 }
                 self.set_status("MapScene frame rendered");

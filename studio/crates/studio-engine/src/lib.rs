@@ -2174,6 +2174,31 @@ def _op_mapscene_render(p):
     }
 
 
+def _op_mapscene_furniture(p):
+    """Set the recipe's map furniture (title, legend, scale bar, north arrow,
+    graticule) and hand the patched recipe back.
+
+    The furniture is the engine's own `MapFurnitureLayer` shape, which
+    `_compose_furniture` draws over the finished frame; Studio only edits those
+    fields, it never draws them itself. `None` for a piece removes it.
+    """
+    recipe = json.loads(p["recipe_json"])
+    furniture = p.get("furniture")
+    if furniture is not None and not isinstance(furniture, dict):
+        raise RuntimeError("furniture must be an object or null")
+    cleaned = {}
+    for key in ("title", "legend", "scale_bar", "north_arrow", "graticule"):
+        value = (furniture or {}).get(key)
+        if value in (None, "", {}):
+            continue
+        cleaned[key] = value
+    recipe["map_furniture"] = cleaned or None
+    return {
+        "recipe_json": json.dumps(recipe, default=str),
+        "applied": sorted(cleaned),
+    }
+
+
 def _op_mapscene_validate(p):
     recipe_data = json.loads(p["recipe_json"])
     recipe = f3d.MapScene._recipe_from_dict(recipe_data)
@@ -2647,6 +2672,7 @@ _OPS = {
     "mapscene.template": _op_mapscene_template,
     "mapscene.render": _op_mapscene_render,
     "mapscene.validate": _op_mapscene_validate,
+    "mapscene.furniture": _op_mapscene_furniture,
     "colormaps.list": _op_colormaps_list,
     "presets.list": _op_presets_list,
     "presets.get": _op_presets_get,

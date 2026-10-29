@@ -1,6 +1,7 @@
 //! The UI shell: one generic panel host, the dock layout, and the panels.
 
 pub mod bottom;
+pub mod cartography;
 pub mod certificates;
 pub mod gallery;
 pub mod gizmo;

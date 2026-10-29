@@ -20,7 +20,7 @@ pub fn tab_icon(tab: PropertiesTab) -> (IconName, &'static str) {
         PropertiesTab::Terrain => (IconName::Mountain, "Terrain parameters"),
         PropertiesTab::Render => (IconName::Aperture, "Render"),
         PropertiesTab::World => (IconName::Globe, "World & environment"),
-        PropertiesTab::Scene => (IconName::Layers, "MapScene"),
+        PropertiesTab::Cartography => (IconName::Map, "Cartography"),
         PropertiesTab::Stats => (IconName::ChartColumn, "Statistics"),
     }
 }
@@ -62,7 +62,17 @@ pub fn properties(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) ->
         PropertiesTab::Terrain => crate::ui::params::params_pages(studio, window, cx),
         PropertiesTab::Render => crate::ui::certificates::render(studio, window, cx),
         PropertiesTab::World => crate::ui::scene::environment(studio, window, cx),
-        PropertiesTab::Scene => crate::ui::scene::mapscene(studio, window, cx),
+        PropertiesTab::Cartography => {
+            let mut body = v_flex().w_full().gap_3();
+            body = body.child(crate::ui::scene::mapscene(studio, window, cx));
+            body = body.child(
+                div()
+                    .border_t_1()
+                    .border_color(cx.theme().colors.border)
+                    .child(crate::ui::cartography::furniture_panel(studio, window, cx)),
+            );
+            body.into_any_element()
+        }
         PropertiesTab::Stats => crate::ui::panels::statistics_entity(studio, window, cx),
     };
 

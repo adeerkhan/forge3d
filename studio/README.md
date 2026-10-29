@@ -188,6 +188,13 @@ UI runtime (GUI.md Part X):
       with its size and status, fetches git-LFS pointers through
       `git lfs pull`, and refuses to open when a declared engine op is missing
       (`ops.list`).
+- [x] **G12 Cartography panel** — Cartography workspace = recipe template +
+      raster overlay + map furniture (title, legend, scale bar with position and
+      units, north arrow with position, graticule interval). Applying writes the
+      recipe through `mapscene.furniture` and can render immediately; the panel
+      reads a built recipe's furniture back instead of keeping its own copy.
+      The furniture is the engine's `MapFurnitureLayer`, so it is drawn over
+      the finished frame with label keep-outs, not faked in the viewport.
 - [x] **G11 Blender-shaped shell** — workspace tabs, one editor per dock slot,
       a properties icon strip (Layer, Terrain, Render, World, Scene,
       Statistics), outliner icon tabs (Layers/Examples), bottom strip

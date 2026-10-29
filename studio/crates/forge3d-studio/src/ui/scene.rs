@@ -47,6 +47,8 @@ pub fn mapscene(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
 
     let studio_terrain = studio.clone();
     let studio_mapscene = studio.clone();
+    let studio_raster = studio.clone();
+    let studio_raster_clear = studio.clone();
     let studio_build = studio.clone();
     let studio_validate = studio.clone();
     let studio_render = studio.clone();
@@ -111,9 +113,45 @@ pub fn mapscene(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
         );
     }
 
+    let raster_label = mapscene
+        .raster_path
+        .as_ref()
+        .map(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        })
+        .unwrap_or_else(|| "none".to_owned());
+
     body = body
         .child(title("Template", cx))
         .child(templates)
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(title("Raster overlay", cx))
+                .child(note(raster_label, cx))
+                .child(
+                    Button::new("mapscene-raster-pick")
+                        .label("Choose…")
+                        .xsmall()
+                        .outline()
+                        .on_click(move |_, _, cx| {
+                            studio_raster.update(cx, |studio, cx| studio.pick_raster_overlay(cx));
+                        }),
+                )
+                .child(
+                    Button::new("mapscene-raster-clear")
+                        .label("Clear")
+                        .xsmall()
+                        .ghost()
+                        .on_click(move |_, _, cx| {
+                            studio_raster_clear
+                                .update(cx, |studio, cx| studio.clear_raster_overlay(cx));
+                        }),
+                ),
+        )
         .child(
             h_flex()
                 .gap_1()
