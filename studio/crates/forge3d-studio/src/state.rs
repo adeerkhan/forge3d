@@ -171,6 +171,17 @@ pub enum LeftTab {
     Examples,
 }
 
+/// Which tier the viewport image came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewportImage {
+    /// The native terrain preview, rendered on demand while you work.
+    Live,
+    /// A low-resolution MapScene render, refreshed shortly after an edit.
+    Preview,
+    /// A full-resolution render (F12 / Render still / MapScene Render).
+    Render,
+}
+
 /// Where a gallery card is in its open flow.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CardState {
@@ -261,6 +272,60 @@ impl Default for Furniture {
 }
 
 impl Furniture {
+    /// Read the panel state out of a recipe's `map_furniture`.
+    ///
+    /// Pure so the round-trip (recipe → panel) is testable without a window.
+    pub fn from_recipe(recipe: &serde_json::Value) -> Option<Furniture> {
+        let furniture = recipe.get("map_furniture")?.as_object()?;
+        let mut next = Furniture {
+            title: furniture
+                .get("title")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            ..Furniture::default()
+        };
+        if let Some(legend) = furniture.get("legend") {
+            next.legend_enabled = true;
+            next.legend_items = legend
+                .get("items")
+                .and_then(|value| value.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+        }
+        if let Some(scale_bar) = furniture.get("scale_bar") {
+            next.scale_bar_enabled = true;
+            if let Some(position) = scale_bar.get("position").and_then(|value| value.as_str()) {
+                next.scale_bar_position = position.to_owned();
+            }
+            if let Some(units) = scale_bar.get("units").and_then(|value| value.as_str()) {
+                next.scale_bar_units = units.to_owned();
+            }
+        }
+        if let Some(arrow) = furniture.get("north_arrow") {
+            next.north_arrow_enabled = true;
+            if let Some(position) = arrow.get("position").and_then(|value| value.as_str()) {
+                next.north_arrow_position = position.to_owned();
+            }
+        }
+        if let Some(graticule) = furniture.get("graticule") {
+            next.graticule_enabled = true;
+            if let Some(interval) = graticule
+                .get("interval_deg")
+                .and_then(|value| value.as_f64())
+            {
+                next.graticule_interval_deg = interval as f32;
+            }
+        }
+        Some(next)
+    }
+
     /// The `map_furniture` object sent to the bridge. `None` means "draw
     /// nothing" for that piece, which the bridge drops.
     pub fn to_json(&self) -> serde_json::Value {
@@ -421,7 +486,7 @@ pub enum PendingJob {
     SequenceFrame,
     MapSceneTemplate { render_after: bool },
     MapSceneValidate,
-    MapSceneRender,
+    MapSceneRender { preview: bool },
     MapSceneFurniture { render_after: bool },
     AtmosphereBake,
     AstroObserve,
@@ -531,9 +596,17 @@ pub struct Studio {
     /// its declared ops instead of failing at click time.
     pub available_ops: std::collections::HashSet<String>,
 
-    /// True while the viewport shows a rendered still (quality or MapScene)
-    /// rather than the live preview.
-    pub showing_render: bool,
+    /// What the viewport is showing: the live terrain preview, a debounced
+    /// low-resolution MapScene preview, or a full render result.
+    pub viewport_image: ViewportImage,
+    /// Debounce for the low-res MapScene preview.
+    preview_due: Option<std::time::Instant>,
+    preview_in_flight: bool,
+    /// An edit arrived while a preview was rendering: render again after it.
+    preview_pending: bool,
+    pub preview_ms: f32,
+    pub preview_size: (u32, u32),
+    preview_started: Option<std::time::Instant>,
     /// A still was requested, so the next bridge frame is presented even when
     /// it carries no quality metadata (a plain one-pass raster render).
     awaiting_still: bool,
@@ -625,7 +698,13 @@ impl Studio {
             thumbnails: std::collections::HashMap::new(),
             lfs_fetch: None,
             available_ops: std::collections::HashSet::new(),
-            showing_render: false,
+            viewport_image: ViewportImage::Live,
+            preview_due: None,
+            preview_in_flight: false,
+            preview_pending: false,
+            preview_ms: 0.0,
+            preview_size: (0, 0),
+            preview_started: None,
             awaiting_still: false,
             ui_timing: UiTiming::default(),
             focus_handle,
@@ -753,6 +832,7 @@ impl Studio {
                 for warning in warnings {
                     self.push_log(true, warning);
                 }
+                self.restore_scene_from_project(cx);
                 self.sync_engine_from_project(cx);
                 self.set_status(format!("Opened {}", path.display()));
             }
@@ -786,6 +866,11 @@ impl Studio {
 
     fn write_project(&mut self, path: &Path, cx: &mut Context<Self>) {
         self.project.sync_terrain_layer();
+        self.project.scene_recipe_json = self.mapscene.recipe_json.clone();
+        self.project.scene_mode = match self.scene_mode {
+            SceneMode::Terrain => "terrain".to_owned(),
+            SceneMode::MapScene => "mapscene".to_owned(),
+        };
         match self.project.save(path) {
             Ok(()) => {
                 self.project_path = Some(path.to_path_buf());
@@ -1039,7 +1124,7 @@ impl Studio {
     pub fn set_camera(&mut self, camera: CameraParams, _cx: &mut Context<Self>) {
         // Moving the view leaves any rendered still behind, like orbiting in
         // Blender's viewport after a render.
-        self.showing_render = false;
+        self.viewport_image = ViewportImage::Live;
         self.project.camera = camera;
         self.project_dirty = true;
         self.viewport.send(ViewportCommand::SetView {
@@ -1079,7 +1164,7 @@ impl Studio {
     }
 
     pub fn preset_camera(&mut self, phi: f32, theta: f32, cx: &mut Context<Self>) {
-        self.showing_render = false;
+        self.viewport_image = ViewportImage::Live;
         let mut camera = self.project.camera;
         camera.phi_deg = phi;
         camera.theta_deg = theta;
@@ -1141,7 +1226,7 @@ impl Studio {
     /// moves the ground target. No engine command: the bridge is not painting
     /// this frame, and a drag would flood its queue.
     pub fn drag_to(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        self.showing_render = false;
+        self.viewport_image = ViewportImage::Live;
         match self.drag {
             Some(ViewDrag::Orbit { last_x, last_y }) => {
                 let mut camera = self.project.camera;
@@ -1170,7 +1255,7 @@ impl Studio {
 
     /// Wheel zoom: one step scales the orbit radius around the target.
     pub fn zoom_by(&mut self, delta: f32, cx: &mut Context<Self>) {
-        self.showing_render = false;
+        self.viewport_image = ViewportImage::Live;
         let mut camera = self.project.camera;
         let factor = (-delta * 0.0015).exp().clamp(0.5, 2.0);
         camera.radius = (camera.radius * factor).clamp(10.0, 200_000.0);
@@ -2006,7 +2091,7 @@ impl Studio {
                 self.render_mapscene(cx);
             }
         } else {
-            self.showing_render = false;
+            self.viewport_image = ViewportImage::Live;
             self.invalidate_viewport(cx);
         }
         self.set_status(match mode {
@@ -2157,7 +2242,7 @@ impl Studio {
 
     /// Drop a rendered still and go back to the live preview.
     pub fn back_to_viewport(&mut self, cx: &mut Context<Self>) {
-        self.showing_render = false;
+        self.viewport_image = ViewportImage::Live;
         self.invalidate_viewport(cx);
         cx.notify();
     }
@@ -2556,57 +2641,118 @@ impl Studio {
     /// Read the furniture a recipe already carries back into the panel, so the
     /// UI shows the scene's own values instead of its defaults.
     fn load_furniture_from_recipe(&mut self, recipe: &serde_json::Value) {
-        let Some(furniture) = recipe
-            .get("map_furniture")
-            .and_then(|value| value.as_object())
-        else {
+        let Some(parsed) = Furniture::from_recipe(recipe) else {
             return;
         };
-        self.furniture.title = furniture
-            .get("title")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_owned();
-        if let Some(legend) = furniture.get("legend") {
-            self.furniture.legend_enabled = true;
-            self.furniture.legend_items = legend
-                .get("items")
-                .and_then(|value| value.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-        }
-        if let Some(scale_bar) = furniture.get("scale_bar") {
-            self.furniture.scale_bar_enabled = true;
-            if let Some(position) = scale_bar.get("position").and_then(|value| value.as_str()) {
-                self.furniture.scale_bar_position = position.to_owned();
-            }
-            if let Some(units) = scale_bar.get("units").and_then(|value| value.as_str()) {
-                self.furniture.scale_bar_units = units.to_owned();
-            }
-        }
-        if let Some(arrow) = furniture.get("north_arrow") {
-            self.furniture.north_arrow_enabled = true;
-            if let Some(position) = arrow.get("position").and_then(|value| value.as_str()) {
-                self.furniture.north_arrow_position = position.to_owned();
-            }
-        }
-        if let Some(graticule) = furniture.get("graticule") {
-            self.furniture.graticule_enabled = true;
-            if let Some(interval) = graticule
-                .get("interval_deg")
-                .and_then(|value| value.as_f64())
-            {
-                self.furniture.graticule_interval_deg = interval as f32;
-            }
-        }
-        // Text inputs hold the old text; rebuild them from the recipe.
+        let status = self.furniture.status.clone();
+        self.furniture = parsed;
+        self.furniture.status = status;
+        // The text boxes hold the previous scene's text; rebuild them.
         self.furniture.inputs.clear();
+    }
+
+    /// Target size for the low-resolution preview of the recipe.
+    ///
+    /// 640 px wide at most, never larger than the export, so an edit is
+    /// visible in about a second instead of waiting for a full render.
+    pub fn mapscene_preview_size(&self) -> (u32, u32) {
+        preview_size(self.project.export.width, self.project.export.height)
+    }
+
+    /// A recipe-affecting edit happened: refresh the preview shortly.
+    ///
+    /// Debounced so dragging a slider does not queue a render per change, and
+    /// coalescing so an edit during a preview renders once more after it.
+    pub fn schedule_preview(&mut self, cx: &mut Context<Self>) {
+        if self.scene_mode != SceneMode::MapScene || self.mapscene.recipe_json.is_none() {
+            return;
+        }
+        self.preview_due = Some(std::time::Instant::now() + Duration::from_millis(600));
+        if self.preview_in_flight {
+            self.preview_pending = true;
+        }
+        cx.notify();
+    }
+
+    fn flush_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(due) = self.preview_due else {
+            return;
+        };
+        if std::time::Instant::now() < due || self.preview_in_flight || self.busy {
+            return;
+        }
+        self.preview_due = None;
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            return;
+        };
+        let (width, height) = self.mapscene_preview_size();
+        let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&recipe) else {
+            return;
+        };
+        if let Some(output) = parsed
+            .get_mut("output")
+            .and_then(|value| value.as_object_mut())
+        {
+            output.insert("width".to_owned(), serde_json::json!(width));
+            output.insert("height".to_owned(), serde_json::json!(height));
+        }
+        let out = std::env::temp_dir().join(format!(
+            "studio-map-preview-{}-{}.png",
+            std::process::id(),
+            self.preview_size.0 as u64 + self.preview_size.1 as u64 + 7
+        ));
+        let job = self.engine.call(
+            "mapscene.render",
+            serde_json::json!({
+                "recipe_json": parsed.to_string(),
+                "out_png": out.to_string_lossy(),
+                "certificate": false,
+            }),
+        );
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneRender { preview: true });
+        self.preview_in_flight = true;
+        self.preview_started = Some(std::time::Instant::now());
+        self.preview_size = (width, height);
+        log::info!("preview requested: {width}×{height}");
+        self.set_status(format!("Preview {width}×{height}…"));
+        cx.notify();
+    }
+
+    /// Remember the recipe as *the project's* recipe, so saving keeps it and a
+    /// reopen restores it (with the furniture it carries).
+    fn remember_recipe(&mut self, recipe: String) {
+        self.mapscene.recipe_json = Some(recipe.clone());
+        self.project.scene_recipe_json = Some(recipe);
+        self.project_dirty = true;
+    }
+
+    /// Restore the scene a project describes: mode, recipe, furniture.
+    fn restore_scene_from_project(&mut self, cx: &mut Context<Self>) {
+        self.scene_mode = match self.project.scene_mode.as_str() {
+            "mapscene" => SceneMode::MapScene,
+            _ => SceneMode::Terrain,
+        };
+        self.mapscene.recipe_json = self.project.scene_recipe_json.clone();
+        self.mapscene.last_status = None;
+        self.mapscene.certificate_sha = None;
+        if let Some(recipe) = &self.mapscene.recipe_json {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(recipe) {
+                self.load_furniture_from_recipe(&parsed);
+            }
+        }
+        log::info!(
+            "restored scene: mode={:?}, recipe={}, furniture_title={:?}",
+            self.scene_mode,
+            self.mapscene.recipe_json.is_some(),
+            self.furniture.title
+        );
+        if self.scene_mode == SceneMode::MapScene {
+            self.frame = None;
+            self.schedule_preview(cx);
+        } else {
+            self.invalidate_viewport(cx);
+        }
     }
 
     /// `mapscene.template`: build the recipe the canonical example builds.
@@ -2666,6 +2812,7 @@ impl Studio {
                 let _ = this.update(cx, |this, cx| {
                     this.mapscene.raster_path = Some(path);
                     this.project_dirty = true;
+                    this.schedule_preview(cx);
                     cx.notify();
                 });
             }
@@ -2675,6 +2822,7 @@ impl Studio {
 
     pub fn clear_raster_overlay(&mut self, cx: &mut Context<Self>) {
         self.mapscene.raster_path = None;
+        self.schedule_preview(cx);
         self.project_dirty = true;
         cx.notify();
     }
@@ -2728,7 +2876,14 @@ impl Studio {
             self.push_error("MapScene", "build a recipe first");
             return;
         };
+        log::info!(
+            "full map render requested (present={present}, size={}×{})",
+            self.project.export.width,
+            self.project.export.height
+        );
         self.busy = true;
+        self.preview_due = None;
+        self.preview_pending = false;
         let job = self.engine.call(
             "mapscene.render",
             serde_json::json!({
@@ -2737,7 +2892,8 @@ impl Studio {
                 "certificate": self.sign_renders,
             }),
         );
-        self.pending_jobs.insert(job, PendingJob::MapSceneRender);
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneRender { preview: false });
         self.mapscene.last_requested_present = present;
         self.set_status(if present {
             "Rendering the recipe through MapScene…".to_owned()
@@ -3064,6 +3220,7 @@ impl Studio {
         }
 
         self.poll_lfs_fetch(cx);
+        self.flush_preview(cx);
         self.flush_params_validate();
         crate::ui::params::sync_inputs(self, window, cx);
 
@@ -3319,7 +3476,7 @@ impl Studio {
                     );
                     self.present_rgba(width, height, rgba);
                     self.viewport_dirty = false;
-                    self.showing_render = true;
+                    self.viewport_image = ViewportImage::Render;
                     self.set_status("Render result — move the view to return to the preview");
                 }
                 if let Some(path) = certificate {
@@ -3574,14 +3731,18 @@ impl Studio {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
                             self.load_furniture_from_recipe(&parsed);
                         }
-                        self.mapscene.recipe_json = Some(text);
+                        self.remember_recipe(text);
                         self.mapscene.last_status =
                             Some("Recipe built from the template".to_owned());
                         self.busy = false;
-                        self.set_status("Recipe built — validate or render it");
+                        self.set_status("Recipe built — preview follows");
                         if render_after && std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_none()
                         {
-                            self.render_mapscene(cx);
+                            self.schedule_preview(cx);
+                        }
+                        if let Ok(path) = std::env::var("FORGE3D_STUDIO_SAVE_SMOKE") {
+                            self.write_project(Path::new(&path), cx);
+                            log::info!("save smoke: wrote {path}");
                         }
                         if std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_some() {
                             // Dev hook: apply a full furniture set and render,
@@ -3641,7 +3802,11 @@ impl Studio {
                     if let Ok(recipe) = serde_json::from_str::<serde_json::Value>(&patched) {
                         self.load_furniture_from_recipe(&recipe);
                     }
-                    self.mapscene.recipe_json = Some(patched);
+                    self.remember_recipe(patched);
+                    if let Ok(path) = std::env::var("FORGE3D_STUDIO_SAVE_SMOKE") {
+                        self.write_project(Path::new(&path), cx);
+                        log::info!("save smoke: wrote {path} (with furniture)");
+                    }
                     self.furniture.status = Some(if applied.is_empty() {
                         "furniture cleared".to_owned()
                     } else {
@@ -3650,12 +3815,14 @@ impl Studio {
                     self.set_status("Map furniture applied");
                     if render_after {
                         self.render_mapscene(cx);
+                    } else {
+                        self.schedule_preview(cx);
                     }
                 } else {
                     self.push_error("Cartography", "the engine returned no patched recipe");
                 }
             }
-            PendingJob::MapSceneRender => {
+            PendingJob::MapSceneRender { preview } => {
                 self.busy = false;
                 let status = result
                     .get("status")
@@ -3666,6 +3833,11 @@ impl Studio {
                     .get("png")
                     .and_then(|value| value.as_str())
                     .map(PathBuf::from);
+                let elapsed = self
+                    .preview_started
+                    .take()
+                    .map(|started| started.elapsed().as_secs_f32() * 1000.0)
+                    .unwrap_or(0.0);
                 if let Some(sha) = result
                     .get("metadata")
                     .and_then(|meta| meta.get("certificate_payload_sha256"))
@@ -3673,16 +3845,48 @@ impl Studio {
                 {
                     self.mapscene.certificate_sha = Some(sha.to_owned());
                 }
-                self.mapscene.last_status = Some(format!("rendered: {status}"));
-                if let Some(path) = png {
-                    log::info!("mapscene frame written: {}", path.display());
-                    if self.mapscene.last_requested_present {
-                        self.present_png(&path);
-                    } else {
-                        self.last_export = Some(path.clone());
+
+                if preview {
+                    self.preview_in_flight = false;
+                    self.preview_ms = elapsed;
+                    self.mapscene.last_status = Some(format!(
+                        "preview {}×{} · {:.0} ms",
+                        self.preview_size.0, self.preview_size.1, elapsed
+                    ));
+                    if let Some(path) = png {
+                        if self.present_png(&path) {
+                            log::info!(
+                                "preview received: {width}×{height} in {elapsed:.0} ms",
+                                width = self.preview_size.0,
+                                height = self.preview_size.1
+                            );
+                            self.viewport_image = ViewportImage::Preview;
+                            self.set_status(format!(
+                                "Preview {}×{} · {:.0} ms",
+                                self.preview_size.0, self.preview_size.1, elapsed
+                            ));
+                        }
                     }
+                    // An edit landed while this was rendering: render once more.
+                    if self.preview_pending {
+                        self.preview_pending = false;
+                        self.preview_due =
+                            Some(std::time::Instant::now() + Duration::from_millis(200));
+                    }
+                } else {
+                    self.mapscene.last_status = Some(format!("rendered: {status}"));
+                    if let Some(path) = png {
+                        log::info!("mapscene frame written: {}", path.display());
+                        if self.mapscene.last_requested_present {
+                            if self.present_png(&path) {
+                                self.viewport_image = ViewportImage::Render;
+                            }
+                        } else {
+                            self.last_export = Some(path.clone());
+                        }
+                    }
+                    self.set_status("MapScene frame rendered");
                 }
-                self.set_status("MapScene frame rendered");
             }
             PendingJob::AtmosphereBake => {
                 self.atmosphere_meta = Some(result.clone());
@@ -3752,18 +3956,19 @@ impl Studio {
     }
 
     /// Present a PNG written by the engine (MapScene render).
-    fn present_png(&mut self, path: &Path) {
+    fn present_png(&mut self, path: &Path) -> bool {
         let Ok(image) = image::open(path) else {
             self.push_log(true, format!("Could not read {}", path.display()));
-            return;
+            return false;
         };
         let rgba = image.to_rgba8();
         self.frame_size = rgba.dimensions();
-        self.showing_render = true;
+        self.viewport_image = ViewportImage::Render;
         self.frame = Some(Arc::new(gpui_kit::RenderImage::new(vec![
             image::Frame::new(rgba),
         ])));
         self.viewport_dirty = false;
+        true
     }
 
     /// Present RGBA pixels as the viewport image (a quality still).
@@ -3781,6 +3986,18 @@ impl Studio {
     fn sync_engine_from_project(&mut self, cx: &mut Context<Self>) {
         self.engine.send(Command::SetCamera(self.project.camera));
         self.engine.send(Command::SetSun(self.project.sun));
+        // A file carries its render settings: without this a path-traced
+        // project reopens rendering raster until the mode is touched.
+        self.engine.send(Command::SetRenderQuality(
+            self.project.render_quality.clone(),
+        ));
+        self.engine.send(Command::SetCertificate(self.sign_renders));
+        self.engine
+            .send(Command::SetAtmosphere(self.project.atmosphere.clone()));
+        self.engine.send(Command::SetSmoke {
+            params: self.project.smoke.clone(),
+            opacity: 1.0,
+        });
         self.engine
             .send(Command::SetColormap(self.project.colormap.clone()));
         if let Some(terrain) = &self.project.terrain {
@@ -3900,6 +4117,18 @@ pub fn terrain_span(height_min: f32, height_max: f32) -> f32 {
 /// Camera distance that frames a terrain of this world span.
 pub fn fit_radius(span: f32) -> f32 {
     (span * 1.65).clamp(60.0, 400_000.0)
+}
+
+/// The low-resolution preview target: 640 px wide at most, aspect preserved,
+/// never larger than the export, at least 2 px so the renderer has a target.
+pub fn preview_size(width: u32, height: u32) -> (u32, u32) {
+    let width = width.max(1);
+    let height = height.max(1);
+    let scale = (640.0 / width as f32).min(1.0);
+    (
+        ((width as f32 * scale).round() as u32).max(2),
+        ((height as f32 * scale).round() as u32).max(2),
+    )
 }
 
 /// The repository checkout the app is running from.
@@ -4152,6 +4381,92 @@ mod tests {
         assert!(looks_like_asset("hdr", "https://example.com/sky.hdr"));
         assert!(!looks_like_asset("label_text", "Mount Fuji"));
         assert!(!looks_like_asset("colormap", "magma"));
+    }
+
+    #[test]
+    fn a_project_round_trip_keeps_its_recipe_and_furniture() {
+        // P0: a MapScene project must reopen with the recipe it was saved with,
+        // furniture included — that is what the scene *is*.
+        let mut project = Project {
+            scene_mode: "mapscene".to_owned(),
+            ..Project::default()
+        };
+        let recipe = serde_json::json!({
+            "terrain": { "path": "assets/tif/Mount_Fuji_30m.tif" },
+            "output": { "width": 960, "height": 600 },
+            "layers": [],
+            "map_furniture": {
+                "title": "Mount Fuji",
+                "legend": { "items": ["Forest", "Alpine", "Snow"] },
+                "scale_bar": { "position": "bottom-left", "units": "km" },
+                "north_arrow": { "position": "top-right" },
+                "graticule": { "interval_deg": 0.05 }
+            }
+        })
+        .to_string();
+        project.scene_recipe_json = Some(recipe.clone());
+
+        let path = std::env::temp_dir().join(format!(
+            "studio-roundtrip-{}-{}.forge3d",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        project.save(&path).expect("save project");
+        let loaded = Project::load(&path).expect("load project");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(loaded.scene_mode, "mapscene");
+        assert_eq!(
+            loaded.scene_recipe_json.as_deref(),
+            Some(recipe.as_str()),
+            "the recipe must survive save/load byte-for-byte"
+        );
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(loaded.scene_recipe_json.as_deref().unwrap()).unwrap();
+        let furniture = Furniture::from_recipe(&parsed).expect("furniture parsed back");
+        assert_eq!(furniture.title, "Mount Fuji");
+        assert!(furniture.legend_enabled);
+        assert_eq!(furniture.legend_items, "Forest, Alpine, Snow");
+        assert_eq!(furniture.scale_bar_position, "bottom-left");
+        assert_eq!(furniture.north_arrow_position, "top-right");
+        assert!(furniture.graticule_enabled);
+        assert!((furniture.graticule_interval_deg - 0.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn furniture_json_is_the_map_furniture_layer_shape() {
+        let furniture = Furniture {
+            title: "Studio".to_owned(),
+            legend_enabled: true,
+            legend_items: "Forest, Alpine".to_owned(),
+            ..Furniture::default()
+        };
+        let json = furniture.to_json();
+        assert_eq!(json["title"], serde_json::json!("Studio"));
+        assert_eq!(
+            json["legend"]["items"],
+            serde_json::json!(["Forest", "Alpine"])
+        );
+        assert_eq!(
+            json["scale_bar"]["position"],
+            serde_json::json!("bottom-left")
+        );
+        assert!(
+            json.get("graticule").is_none(),
+            "off means absent, not empty"
+        );
+    }
+
+    #[test]
+    fn the_preview_is_at_most_640_wide_and_keeps_aspect() {
+        assert_eq!(preview_size(1920, 1200), (640, 400));
+        assert_eq!(preview_size(960, 600), (640, 400));
+        assert_eq!(preview_size(480, 300), (480, 300), "never upscales");
+        assert_eq!(preview_size(0, 0), (2, 2));
     }
 
     #[test]

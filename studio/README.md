@@ -185,6 +185,17 @@ UI runtime (GUI.md Part X):
       with its size and status, fetches git-LFS pointers through
       `git lfs pull`, and refuses to open when a declared engine op is missing
       (`ops.list`).
+- [x] **P0 · data integrity** — the MapScene recipe (with its furniture) is
+      written into the project on build/apply, restored on open (mode + recipe +
+      furniture), and saved by every save; render quality, atmosphere, smoke
+      and certificate mode are pushed to the engine on open. Locked by a
+      save → reopen test that asserts the recipe is byte-identical and the
+      furniture parses back into the panel.
+- [x] **P1 · three labelled tiers** — live terrain preview (instant),
+      **debounced low-res MapScene preview** (≤640 px wide, 600 ms after an
+      edit, coalesced while one renders) and the full render (F12). The
+      viewport header names the tier with its size and render time, and a
+      moving camera returns to the live preview.
 - [x] **Render still (Ctrl+R / F12)** — always one bridge render at the
       viewport's size (one raster pass when quality is off, accumulation/denoise
       when on), presented as "Render result" with progress and certificate;

@@ -38,7 +38,10 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let live_viewport = state.live_viewport;
     let show_gizmo = state.show_gizmo;
     let show_hud = state.show_hud;
-    let showing_render = state.showing_render;
+    let image_tier = state.viewport_image;
+    let preview_ms = state.preview_ms;
+    let preview_size = state.preview_size;
+    let showing_render = image_tier != crate::state::ViewportImage::Live;
     let frame_size = state.frame_size;
     let tools = h_flex()
         .w_full()
@@ -192,6 +195,14 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .gap_2()
                 .text_xs()
                 .text_color(cx.theme().colors.muted_foreground)
+                .child(div().w(px(150.)).text_right().child(match image_tier {
+                    crate::state::ViewportImage::Live => "live preview".to_owned(),
+                    crate::state::ViewportImage::Preview => format!(
+                        "preview {}×{} · {:.0} ms",
+                        preview_size.0, preview_size.1, preview_ms
+                    ),
+                    crate::state::ViewportImage::Render => "render result".to_owned(),
+                }))
                 .child(
                     div()
                         .w(px(76.))
