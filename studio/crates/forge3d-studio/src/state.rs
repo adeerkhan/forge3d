@@ -9,6 +9,7 @@
 //! the ones the engine-facing milestones proved; only the UI runtime changed.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::mpsc::Receiver;
@@ -55,6 +56,140 @@ pub struct ExampleEntry {
     pub example: String,
     pub unlock: String,
     pub scene: Option<serde_json::Value>,
+    pub thumbnail: Option<String>,
+}
+
+/// Blender-style workspaces: one row of tabs, each a working arrangement
+/// (which properties page is open, which left editor is showing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Workspace {
+    Layout,
+    Terrain,
+    Cartography,
+    Render,
+    Look,
+    Data,
+}
+
+impl Workspace {
+    pub const ALL: &'static [Workspace] = &[
+        Workspace::Layout,
+        Workspace::Terrain,
+        Workspace::Cartography,
+        Workspace::Render,
+        Workspace::Look,
+        Workspace::Data,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Workspace::Layout => "Layout",
+            Workspace::Terrain => "Terrain",
+            Workspace::Cartography => "Cartography",
+            Workspace::Render => "Render",
+            Workspace::Look => "Look",
+            Workspace::Data => "Data",
+        }
+    }
+}
+
+/// The properties editor's pages (the right-hand icon strip).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertiesTab {
+    Layer,
+    Terrain,
+    Render,
+    World,
+    Scene,
+    Stats,
+}
+
+impl PropertiesTab {
+    pub const ALL: &'static [PropertiesTab] = &[
+        PropertiesTab::Layer,
+        PropertiesTab::Terrain,
+        PropertiesTab::Render,
+        PropertiesTab::World,
+        PropertiesTab::Scene,
+        PropertiesTab::Stats,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PropertiesTab::Layer => "layer",
+            PropertiesTab::Terrain => "terrain",
+            PropertiesTab::Render => "render",
+            PropertiesTab::World => "world",
+            PropertiesTab::Scene => "scene",
+            PropertiesTab::Stats => "stats",
+        }
+    }
+}
+
+/// The bottom strip's editors (Blender's timeline slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BottomTab {
+    Timeline,
+    Console,
+    Certificates,
+}
+
+impl BottomTab {
+    pub const ALL: &'static [BottomTab] = &[
+        BottomTab::Timeline,
+        BottomTab::Console,
+        BottomTab::Certificates,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BottomTab::Timeline => "timeline",
+            BottomTab::Console => "console",
+            BottomTab::Certificates => "certificates",
+        }
+    }
+}
+
+/// What the left-hand editor shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeftTab {
+    Layers,
+    Examples,
+}
+
+/// Where a gallery card is in its open flow.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardState {
+    Idle,
+    Loading,
+    Loaded,
+    Failed(String),
+}
+
+/// How one asset a scene needs is found on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssetKind {
+    Present(u64),
+    /// A git-LFS pointer: the file is tracked but not materialized.
+    LfsPointer,
+    Missing,
+    Remote(String),
+}
+
+/// One downloadable asset of a gallery scene.
+#[derive(Clone, Debug)]
+pub struct AssetStatus {
+    pub label: String,
+    /// As declared in the index (repo-relative).
+    pub declared: String,
+    /// Absolute path the app would open (absent for remote assets).
+    pub kind: AssetKind,
+}
+
+impl AssetStatus {
+    pub fn ready(&self) -> bool {
+        matches!(self.kind, AssetKind::Present(_))
+    }
 }
 
 /// MapScene mode state: the recipe the last build produced and its report.
@@ -206,13 +341,29 @@ pub struct Studio {
     /// Layers panel UI state (anchor, rename, drop preview, collapsed groups).
     pub layers: LayerPanel,
 
+    pub workspace: Workspace,
+    pub properties_tab: PropertiesTab,
+    pub left_tab: LeftTab,
+    pub bottom_tab: BottomTab,
+    pub show_gizmo: bool,
+    pub show_hud: bool,
+
     pub scene_mode: SceneMode,
     pub mapscene: MapSceneState,
     pub examples: Vec<ExampleEntry>,
     pub gallery_filter: String,
+    pub gallery_runnable_only: bool,
     pub atmosphere_meta: Option<serde_json::Value>,
     pub smoke_report: Option<serde_json::Value>,
     pending_example: Option<ExampleEntry>,
+    /// Per-card open state, keyed by example id.
+    pub gallery_cards: std::collections::HashMap<String, CardState>,
+    /// The example shown in the download carousel.
+    pub gallery_selected: Option<String>,
+    /// Decoded thumbnails, loaded from disk once.
+    pub thumbnails: std::collections::HashMap<String, Option<Arc<gpui_kit::RenderImage>>>,
+    /// A running `git lfs pull`, so the UI can say it is working.
+    pub lfs_fetch: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
 
     pub focus_handle: FocusHandle,
     pub drag: Option<ViewDrag>,
@@ -273,6 +424,12 @@ impl Studio {
             params_error: None,
             params_form: ParamForm::default(),
             layers: LayerPanel::default(),
+            workspace: Workspace::Layout,
+            properties_tab: PropertiesTab::Layer,
+            left_tab: LeftTab::Layers,
+            bottom_tab: BottomTab::Timeline,
+            show_gizmo: true,
+            show_hud: true,
             scene_mode: SceneMode::Terrain,
             mapscene: MapSceneState {
                 template: "terrain_raster".to_owned(),
@@ -280,9 +437,14 @@ impl Studio {
             },
             examples: load_examples(),
             gallery_filter: "All".to_owned(),
+            gallery_runnable_only: false,
             atmosphere_meta: None,
             smoke_report: None,
             pending_example: None,
+            gallery_cards: std::collections::HashMap::new(),
+            gallery_selected: None,
+            thumbnails: std::collections::HashMap::new(),
+            lfs_fetch: None,
             focus_handle,
             drag: None,
             last_export: None,
@@ -305,6 +467,14 @@ impl Studio {
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
         studio.refresh_capabilities(cx);
+        if let Ok(id) = std::env::var("FORGE3D_STUDIO_OPEN_EXAMPLE") {
+            if let Some(entry) = studio.examples.iter().find(|entry| entry.id == id).cloned() {
+                log::info!("opening example from environment: {}", entry.id);
+                studio.open_example(entry, cx);
+            } else {
+                log::warn!("FORGE3D_STUDIO_OPEN_EXAMPLE names no known example: {id}");
+            }
+        }
         log::info!(
             "gallery: {} entries, {} runnable today",
             studio.examples.len(),
@@ -1558,6 +1728,274 @@ impl Studio {
         cx.notify();
     }
 
+    /// Everything a gallery scene needs from disk, with its status.
+    ///
+    /// The index names assets as repo-relative paths inside `scene` (dem,
+    /// raster, …) plus a thumbnail; anything path-shaped is reported, so a new
+    /// asset key does not need a UI change to be disclosed.
+    pub fn example_assets(&self, entry: &ExampleEntry) -> Vec<AssetStatus> {
+        let mut seen = HashSet::new();
+        let mut assets = Vec::new();
+        let mut push = |label: &str, declared: &str| {
+            let key = declared.to_owned();
+            if !seen.insert(key) {
+                return;
+            }
+            let is_remote = declared.starts_with("http://") || declared.starts_with("https://");
+            if is_remote {
+                assets.push(AssetStatus {
+                    label: label.to_owned(),
+                    declared: declared.to_owned(),
+                    kind: AssetKind::Remote(declared.to_owned()),
+                });
+                return;
+            }
+            let resolved = resolve_repo_path(Path::new(declared));
+            let kind = match std::fs::metadata(&resolved) {
+                Ok(_) if is_lfs_pointer(&resolved) => AssetKind::LfsPointer,
+                Ok(metadata) => AssetKind::Present(metadata.len()),
+                Err(_) => AssetKind::Missing,
+            };
+            assets.push(AssetStatus {
+                label: label.to_owned(),
+                declared: declared.to_owned(),
+                kind,
+            });
+        };
+
+        if let Some(thumbnail) = entry.thumbnail.as_deref() {
+            push("Thumbnail", thumbnail);
+        }
+        if let Some(scene) = entry.scene.as_ref().and_then(|scene| scene.as_object()) {
+            for (key, value) in scene {
+                let Some(text) = value.as_str() else {
+                    continue;
+                };
+                if looks_like_asset(key, text) {
+                    push(asset_label(key), text);
+                }
+            }
+        }
+        assets
+    }
+
+    /// The decoded thumbnail for an entry, loaded from disk once.
+    pub fn example_thumbnail(
+        &mut self,
+        entry: &ExampleEntry,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<gpui_kit::RenderImage>> {
+        if let Some(cached) = self.thumbnails.get(&entry.id) {
+            return cached.clone();
+        }
+        let loaded = entry
+            .thumbnail
+            .as_deref()
+            .map(|declared| resolve_repo_path(Path::new(declared)))
+            .filter(|path| path.is_file())
+            .and_then(|path| image::open(&path).ok())
+            .map(|image| {
+                Arc::new(gpui_kit::RenderImage::new(vec![image::Frame::new(
+                    image.to_rgba8(),
+                )]))
+            });
+        self.thumbnails.insert(entry.id.clone(), loaded.clone());
+        cx.notify();
+        loaded
+    }
+
+    /// Switch workspace: which properties page and left editor are showing.
+    pub fn set_workspace(&mut self, workspace: Workspace, cx: &mut Context<Self>) {
+        self.workspace = workspace;
+        match workspace {
+            Workspace::Layout => {
+                self.properties_tab = PropertiesTab::Layer;
+                self.left_tab = LeftTab::Layers;
+            }
+            Workspace::Terrain => {
+                self.properties_tab = PropertiesTab::Terrain;
+                self.left_tab = LeftTab::Layers;
+            }
+            Workspace::Cartography => {
+                self.properties_tab = PropertiesTab::Scene;
+                self.left_tab = LeftTab::Layers;
+            }
+            Workspace::Render => {
+                self.properties_tab = PropertiesTab::Render;
+                self.left_tab = LeftTab::Layers;
+            }
+            Workspace::Look => {
+                self.properties_tab = PropertiesTab::World;
+                self.left_tab = LeftTab::Layers;
+            }
+            Workspace::Data => {
+                self.properties_tab = PropertiesTab::Layer;
+                self.left_tab = LeftTab::Examples;
+            }
+        }
+        self.set_status(format!("Workspace: {}", workspace.label()));
+        cx.notify();
+    }
+
+    pub fn set_properties_tab(&mut self, tab: PropertiesTab, cx: &mut Context<Self>) {
+        self.properties_tab = tab;
+        cx.notify();
+    }
+
+    pub fn set_bottom_tab(&mut self, tab: BottomTab, cx: &mut Context<Self>) {
+        self.bottom_tab = tab;
+        cx.notify();
+    }
+
+    pub fn set_left_tab(&mut self, tab: LeftTab, cx: &mut Context<Self>) {
+        self.left_tab = tab;
+        cx.notify();
+    }
+
+    pub fn toggle_gizmo(&mut self, cx: &mut Context<Self>) {
+        self.show_gizmo = !self.show_gizmo;
+        cx.notify();
+    }
+
+    /// Bring the Examples tab forward (Help ▸ Examples gallery).
+    pub fn focus_examples(&mut self, cx: &mut Context<Self>) {
+        self.left_tab = LeftTab::Examples;
+        self.set_status("Examples gallery");
+        cx.notify();
+    }
+
+    /// Select a card for the download carousel (the dialog reads this).
+    pub fn preview_example(&mut self, id: impl Into<String>, cx: &mut Context<Self>) {
+        self.gallery_selected = Some(id.into());
+        cx.notify();
+    }
+
+    /// Move the carousel by `delta` through the currently filtered list.
+    pub fn step_carousel(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .visible_examples()
+            .into_iter()
+            .map(|entry| entry.id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .gallery_selected
+            .as_ref()
+            .and_then(|selected| ids.iter().position(|id| id == selected))
+            .unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(ids.len() as i32) as usize;
+        self.gallery_selected = Some(ids[next].clone());
+        cx.notify();
+    }
+
+    /// Examples passing the current category / runnable filters, in tier order
+    /// (runnable first) so the gallery reads as a list of what works.
+    pub fn visible_examples(&self) -> Vec<ExampleEntry> {
+        let mut entries: Vec<ExampleEntry> = self
+            .examples
+            .iter()
+            .filter(|entry| {
+                (self.gallery_filter == "All" || entry.category == self.gallery_filter)
+                    && (!self.gallery_runnable_only || entry.tier == 'A')
+            })
+            .cloned()
+            .collect();
+        entries.sort_by_key(|entry| (entry.tier, entry.title.clone()));
+        entries
+    }
+
+    /// Materialize a scene's LFS assets, then open it. Runs `git lfs pull`
+    /// for exactly the paths the card disclosed.
+    pub fn download_and_open(&mut self, entry: ExampleEntry, cx: &mut Context<Self>) {
+        let assets = self.example_assets(&entry);
+        let mut wanted: Vec<String> = Vec::new();
+        for asset in &assets {
+            match &asset.kind {
+                AssetKind::Present(_) => {}
+                AssetKind::LfsPointer | AssetKind::Missing => {
+                    wanted.push(asset.declared.clone());
+                }
+                AssetKind::Remote(url) => {
+                    self.push_error(
+                        "Examples gallery",
+                        format!(
+                            "{} is a remote asset ({url}); Studio does not fetch it",
+                            asset.label
+                        ),
+                    );
+                }
+            }
+        }
+        if wanted.is_empty() {
+            self.open_example(entry, cx);
+            return;
+        }
+        self.gallery_cards
+            .insert(entry.id.clone(), CardState::Loading);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.lfs_fetch = Some(rx);
+        let root = repo_root();
+        self.set_status(format!(
+            "Fetching {} asset(s) through git lfs…",
+            wanted.len()
+        ));
+        std::thread::spawn(move || {
+            let include = wanted.join(",");
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(["lfs", "pull", "--include"])
+                .arg(&include)
+                .output();
+            let outcome = match result {
+                Ok(output) if output.status.success() => Ok(()),
+                Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_owned()),
+                Err(error) => Err(format!("git lfs: {error}")),
+            };
+            let _ = tx.send(outcome);
+        });
+        // The card keeps the entry so the open can resume when the fetch ends.
+        self.pending_example = Some(entry);
+        cx.notify();
+    }
+
+    /// Poll the background `git lfs pull` and resume the open when it lands.
+    fn poll_lfs_fetch(&mut self, cx: &mut Context<Self>) {
+        let Some(rx) = self.lfs_fetch.take() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.set_status("Assets fetched");
+                if let Some(entry) = self.pending_example.clone() {
+                    self.open_example(entry, cx);
+                }
+            }
+            Ok(Err(message)) => {
+                let id = self
+                    .pending_example
+                    .take()
+                    .map(|entry| entry.id)
+                    .unwrap_or_default();
+                if !id.is_empty() {
+                    self.gallery_cards
+                        .insert(id, CardState::Failed(message.clone()));
+                }
+                self.push_error(
+                    "Examples gallery",
+                    format!("git lfs pull failed: {message}"),
+                );
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.lfs_fetch = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+        }
+        cx.notify();
+    }
+
     /// Open a gallery entry: load its DEM if needed, then apply its scene.
     pub fn open_example(&mut self, entry: ExampleEntry, cx: &mut Context<Self>) {
         let Some(scene) = entry.scene.clone() else {
@@ -1587,6 +2025,8 @@ impl Studio {
             (None, _) => false,
         };
         self.set_status(format!("Opening example '{}'…", entry.title));
+        self.gallery_cards
+            .insert(entry.id.clone(), CardState::Loading);
         if needs_load {
             if let Some(path) = dem {
                 self.pending_example = Some(entry);
@@ -1610,41 +2050,18 @@ impl Studio {
             .get("kind")
             .and_then(|value| value.as_str())
             .unwrap_or("terrain");
+        let span = self
+            .project
+            .terrain
+            .as_ref()
+            .map(|terrain| terrain_span(terrain.height_min, terrain.height_max))
+            .unwrap_or(1000.0);
         if let Some(camera) = scene.get("camera") {
-            let radius_rel = camera
-                .get("radius_rel")
-                .and_then(|value| value.as_f64())
-                .unwrap_or(0.4) as f32;
-            let span = self
-                .project
-                .terrain
-                .as_ref()
-                .map(|terrain| terrain_span(terrain.height_min, terrain.height_max))
-                .unwrap_or(1000.0);
-            let mut next = self.project.camera;
-            if let Some(value) = camera.get("phi_deg").and_then(|value| value.as_f64()) {
-                next.phi_deg = value as f32;
-            }
-            if let Some(value) = camera.get("theta_deg").and_then(|value| value.as_f64()) {
-                next.theta_deg = value as f32;
-            }
-            if let Some(value) = camera.get("fov_deg").and_then(|value| value.as_f64()) {
-                next.fov_deg = value as f32;
-            }
-            next.radius = radius_rel * span;
+            let next = scene_camera(camera, span, self.project.camera);
             self.set_camera(next, cx);
         }
         if let Some(sun) = scene.get("sun") {
-            let mut next = self.project.sun;
-            if let Some(value) = sun.get("azimuth_deg").and_then(|value| value.as_f64()) {
-                next.azimuth_deg = value as f32;
-            }
-            if let Some(value) = sun.get("elevation_deg").and_then(|value| value.as_f64()) {
-                next.elevation_deg = value as f32;
-            }
-            if let Some(value) = sun.get("intensity").and_then(|value| value.as_f64()) {
-                next.intensity = value as f32;
-            }
+            let next = scene_sun(sun, self.project.sun);
             self.set_sun(next, cx);
         }
         if let Some(params) = scene.get("params") {
@@ -1670,6 +2087,19 @@ impl Studio {
             _ => self.set_scene_mode(SceneMode::Terrain, cx),
         }
         self.project.name = entry.title.clone();
+        log::info!(
+            "example applied: {} (kind {}, phi {:.0}, theta {:.0}, radius {:.0}, sun {:.0}/{:.0})",
+            entry.title,
+            kind,
+            self.project.camera.phi_deg,
+            self.project.camera.theta_deg,
+            self.project.camera.radius,
+            self.project.sun.azimuth_deg,
+            self.project.sun.elevation_deg
+        );
+        self.gallery_cards
+            .insert(entry.id.clone(), CardState::Loaded);
+        self.gallery_selected = Some(entry.id.clone());
         self.set_status(format!("Opened '{}'", entry.title));
         cx.notify();
     }
@@ -2051,6 +2481,7 @@ impl Studio {
             changed = true;
         }
 
+        self.poll_lfs_fetch(cx);
         self.flush_params_validate();
         crate::ui::params::sync_inputs(self, window, cx);
 
@@ -2240,6 +2671,12 @@ impl Studio {
                 ));
                 self.viewport_dirty = true;
                 let _ = window;
+                // A gallery card that needed this DEM resumes here — without
+                // this the DEM loads and the example's camera/sun/params/
+                // MapScene never apply.
+                if self.pending_example.is_some() {
+                    self.apply_pending_example(cx);
+                }
             }
             Event::TerrainCleared => {
                 self.busy = false;
@@ -2300,6 +2737,12 @@ impl Studio {
             Event::JobDone { job, op, result } => self.handle_job_done(job, &op, result, cx),
             Event::JobFailed { op, message, .. } => {
                 self.busy = false;
+                if op == "terrain.load" {
+                    if let Some(entry) = self.pending_example.take() {
+                        self.gallery_cards
+                            .insert(entry.id, CardState::Failed(message.clone()));
+                    }
+                }
                 self.push_log(true, format!("{op}: {message}"));
                 if op.starts_with("terrain.params") {
                     self.params_error = Some(message.clone());
@@ -2308,6 +2751,12 @@ impl Studio {
             }
             Event::Error { context, message } => {
                 self.busy = false;
+                if context.starts_with("terrain load") || context == "LoadTerrain" {
+                    if let Some(entry) = self.pending_example.take() {
+                        self.gallery_cards
+                            .insert(entry.id, CardState::Failed(message.clone()));
+                    }
+                }
                 self.push_log(true, format!("{context}: {message}"));
                 self.push_error(context, message);
             }
@@ -2706,6 +3155,44 @@ pub fn render_size(width: f32, height: f32) -> (u32, u32) {
     (quantize(width), quantize(height))
 }
 
+/// A gallery scene's camera in renderer units.
+///
+/// Scenes pin `radius_rel` (a fraction of the terrain span) so a scene frames
+/// the same way on any DEM; everything else is the example's own value.
+pub fn scene_camera(camera: &serde_json::Value, span: f32, current: CameraParams) -> CameraParams {
+    let mut next = current;
+    let radius_rel = camera
+        .get("radius_rel")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.4) as f32;
+    if let Some(value) = camera.get("phi_deg").and_then(|value| value.as_f64()) {
+        next.phi_deg = value as f32;
+    }
+    if let Some(value) = camera.get("theta_deg").and_then(|value| value.as_f64()) {
+        next.theta_deg = value as f32;
+    }
+    if let Some(value) = camera.get("fov_deg").and_then(|value| value.as_f64()) {
+        next.fov_deg = value as f32;
+    }
+    next.radius = (radius_rel * span).clamp(10.0, 400_000.0);
+    next
+}
+
+/// A gallery scene's sun.
+pub fn scene_sun(sun: &serde_json::Value, current: SunParams) -> SunParams {
+    let mut next = current;
+    if let Some(value) = sun.get("azimuth_deg").and_then(|value| value.as_f64()) {
+        next.azimuth_deg = value as f32;
+    }
+    if let Some(value) = sun.get("elevation_deg").and_then(|value| value.as_f64()) {
+        next.elevation_deg = value as f32;
+    }
+    if let Some(value) = sun.get("intensity").and_then(|value| value.as_f64()) {
+        next.intensity = value as f32;
+    }
+    next
+}
+
 /// World span the engine gives a terrain: six times its elevation range.
 ///
 /// This is the engine's own convention (`_op_terrain_render` in the bridge
@@ -2739,6 +3226,54 @@ pub fn repo_root() -> PathBuf {
         }
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// A git-LFS pointer file (the tracked path, not the content).
+fn is_lfs_pointer(path: &Path) -> bool {
+    use std::io::Read as _;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 64];
+    let Ok(read) = file.read(&mut head) else {
+        return false;
+    };
+    head[..read].starts_with(b"version https://git-lfs")
+}
+
+/// Extension whitelist for values that are asset paths, not scene settings.
+fn looks_like_asset(key: &str, value: &str) -> bool {
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return true;
+    }
+    const EXTENSIONS: &[&str] = &[
+        ".tif", ".tiff", ".npy", ".npz", ".laz", ".copc", ".ept", ".geojson", ".json", ".glb",
+        ".gltf", ".obj", ".hdr", ".exr", ".f3dz", ".f3z", ".png", ".jpg", ".jpeg", ".gpkg",
+        ".parquet",
+    ];
+    let lower = value.to_ascii_lowercase();
+    EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+        && !matches!(
+            key,
+            "colormap" | "label_text" | "template" | "kind" | "name"
+        )
+}
+
+/// Human label for an asset key (`dem` → "DEM", `raster` → "Raster").
+fn asset_label(key: &str) -> &str {
+    match key {
+        "dem" => "DEM",
+        "raster" => "Raster",
+        "hdr" => "Environment HDR",
+        "vector" | "vectors" => "Vector data",
+        "buildings" => "Buildings",
+        "points" | "pointcloud" => "Point cloud",
+        "mesh" => "Mesh",
+        "tiles" | "tileset" => "3D Tiles",
+        "smoke" => "Smoke volume",
+        "thumbnail" => "Thumbnail",
+        other => other,
+    }
 }
 
 /// Resolve a repo-relative path against the checkout.
@@ -2802,6 +3337,10 @@ fn load_examples() -> Vec<ExampleEntry> {
                             .unwrap_or("needs a later milestone")
                             .to_owned(),
                         scene: entry.get("scene").cloned(),
+                        thumbnail: entry
+                            .get("thumbnail")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned),
                     })
                 })
                 .collect()
@@ -2866,6 +3405,48 @@ mod tests {
         assert_eq!(slug("Mount Fuji"), "mount_fuji");
         assert_eq!(slug("  "), "scene");
         assert_eq!(slug("a/b"), "a_b");
+    }
+
+    #[test]
+    fn a_scene_camera_is_span_relative() {
+        let scene = serde_json::json!({
+            "phi_deg": 120.0,
+            "theta_deg": 14.0,
+            "radius_rel": 0.16,
+            "fov_deg": 52.0
+        });
+        let span = terrain_span(469.0, 4391.0);
+        let camera = scene_camera(&scene, span, CameraParams::default());
+        assert_eq!(camera.phi_deg, 120.0);
+        assert_eq!(camera.theta_deg, 14.0);
+        assert_eq!(camera.fov_deg, 52.0);
+        assert!(
+            (camera.radius - span * 0.16).abs() < 1.0,
+            "radius must scale with the DEM span, got {} for span {span}",
+            camera.radius
+        );
+    }
+
+    #[test]
+    fn a_scene_sun_keeps_what_the_scene_does_not_set() {
+        let before = SunParams {
+            azimuth_deg: 10.0,
+            elevation_deg: 20.0,
+            intensity: 1.0,
+        };
+        let sun = scene_sun(&serde_json::json!({ "elevation_deg": 16.0 }), before);
+        assert_eq!(sun.azimuth_deg, 10.0, "unset fields keep the document");
+        assert_eq!(sun.elevation_deg, 16.0);
+        assert_eq!(sun.intensity, 1.0);
+    }
+
+    #[test]
+    fn asset_labels_read_like_the_scene() {
+        assert_eq!(asset_label("dem"), "DEM");
+        assert!(looks_like_asset("dem", "assets/tif/Mount_Fuji_30m.tif"));
+        assert!(looks_like_asset("hdr", "https://example.com/sky.hdr"));
+        assert!(!looks_like_asset("label_text", "Mount Fuji"));
+        assert!(!looks_like_asset("colormap", "magma"));
     }
 
     #[test]

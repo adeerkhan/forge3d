@@ -27,6 +27,13 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let has_terrain = state.project.terrain.is_some();
 
     // Toolbar: the six actions a viewport needs, plus the readout.
+    let studio_terrain_mode = studio.clone();
+    let studio_mapscene_mode = studio.clone();
+    let studio_gizmo = studio.clone();
+    let studio_hud = studio.clone();
+    let studio_live = studio.clone();
+
+    let mode = state.scene_mode;
     let tools = h_flex()
         .w_full()
         .justify_between()
@@ -34,6 +41,86 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .py_1()
         .border_b_1()
         .border_color(cx.theme().colors.border)
+        .child(
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("viewport-mode-terrain")
+                        .icon(IconName::Mountain)
+                        .label("Terrain")
+                        .xsmall()
+                        .when(mode == crate::state::SceneMode::Terrain, |button| {
+                            button.primary()
+                        })
+                        .when(mode != crate::state::SceneMode::Terrain, |button| {
+                            button.ghost()
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = studio_terrain_mode.update(cx, |studio, cx| {
+                                studio.set_scene_mode(crate::state::SceneMode::Terrain, cx)
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("viewport-mode-mapscene")
+                        .icon(IconName::Layers)
+                        .label("MapScene")
+                        .xsmall()
+                        .when(mode == crate::state::SceneMode::MapScene, |button| {
+                            button.primary()
+                        })
+                        .when(mode != crate::state::SceneMode::MapScene, |button| {
+                            button.ghost()
+                        })
+                        .on_click(move |_, _, cx| {
+                            let _ = studio_mapscene_mode.update(cx, |studio, cx| {
+                                studio.set_scene_mode(crate::state::SceneMode::MapScene, cx)
+                            });
+                        }),
+                )
+                .child(div().w(px(8.)))
+                .child(
+                    Button::new("viewport-gizmo-toggle")
+                        .icon(IconName::Compass)
+                        .xsmall()
+                        .when(state.show_gizmo, |button| button.outline())
+                        .when(!state.show_gizmo, |button| button.ghost())
+                        .tooltip("Navigation gizmo")
+                        .on_click(move |_, _, cx| {
+                            let _ = studio_gizmo.update(cx, |studio, cx| studio.toggle_gizmo(cx));
+                        }),
+                )
+                .child(
+                    Button::new("viewport-hud-toggle")
+                        .icon(IconName::Info)
+                        .xsmall()
+                        .when(state.show_hud, |button| button.outline())
+                        .when(!state.show_hud, |button| button.ghost())
+                        .tooltip("HUD")
+                        .on_click(move |_, _, cx| {
+                            let _ = studio_hud.update(cx, |studio, cx| {
+                                studio.show_hud = !studio.show_hud;
+                                cx.notify();
+                            });
+                        }),
+                )
+                .child(
+                    Button::new("viewport-live-toggle")
+                        .icon(if state.live_viewport {
+                            IconName::Pause
+                        } else {
+                            IconName::Play
+                        })
+                        .xsmall()
+                        .when(state.live_viewport, |button| button.outline())
+                        .when(!state.live_viewport, |button| button.ghost())
+                        .tooltip("Live viewport (Ctrl+L)")
+                        .on_click(move |_, _, cx| {
+                            let _ = studio_live
+                                .update(cx, |studio, cx| studio.toggle_live_viewport(cx));
+                        }),
+                ),
+        )
         .child(
             h_flex()
                 .gap_1()
@@ -203,16 +290,21 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
             let _ = studio_scroll.update(cx, |studio, cx| studio.zoom_by(delta, cx));
         })
         .child(body_content)
-        .child(
-            h_flex()
-                .absolute()
-                .left_2()
-                .bottom_1()
-                .gap_2()
-                .text_xs()
-                .text_color(cx.theme().colors.muted_foreground)
-                .child(hud_left),
-        );
+        .when(state.show_hud, |body| {
+            body.child(
+                h_flex()
+                    .absolute()
+                    .left_2()
+                    .bottom_1()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(cx.theme().colors.muted_foreground)
+                    .child(hud_left),
+            )
+        })
+        .when(state.show_gizmo, |body| {
+            body.child(crate::ui::gizmo::gizmo(&studio_entity, cx))
+        });
 
     v_flex()
         .size_full()

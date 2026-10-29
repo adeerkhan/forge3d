@@ -5,7 +5,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::status_bar::StatusBar;
 use gpui_kit::component::{
-    h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _, TitleBar, WindowExt as _,
+    h_flex, v_flex, ActiveTheme as _, Sizable as _, StyledExt as _, TitleBar,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -53,10 +53,35 @@ impl Render for Studio {
             .child(div().flex_1())
             .child(h_flex().gap_1().child(theme_button).child(about_button));
 
+        // Blender-style workspace row: one flat tab per working arrangement.
+        let mut workspaces = h_flex()
+            .w_full()
+            .gap_1()
+            .px_2()
+            .py_0p5()
+            .border_b_1()
+            .border_color(cx.theme().colors.border);
+        for workspace in crate::state::Workspace::ALL {
+            let selected = self.workspace == *workspace;
+            let entity = cx.entity();
+            workspaces = workspaces.child(
+                Button::new(format!("workspace-{}", workspace.label()))
+                    .label(workspace.label())
+                    .xsmall()
+                    .when(selected, |button| button.primary())
+                    .when(!selected, |button| button.ghost())
+                    .on_click(move |_, _, cx| {
+                        let workspace = *workspace;
+                        entity.update(cx, |studio, cx| studio.set_workspace(workspace, cx));
+                    }),
+            );
+        }
+
         v_flex()
             .size_full()
             .bg(cx.theme().colors.background)
             .child(title_bar)
+            .child(workspaces)
             .child(
                 div()
                     .flex_1()
@@ -112,12 +137,7 @@ impl Studio {
             ) -> gpui_kit::component::dialog::Dialog
             + 'static,
     ) {
-        let Some(handle) = cx.active_window() else {
-            return;
-        };
-        let _ = handle.update(&mut *cx, move |_, window: &mut Window, cx: &mut App| {
-            window.open_dialog(cx, build);
-        });
+        crate::ui::open_dialog(&mut *cx, build);
     }
 
     /// `Help ▸ Keyboard shortcuts`: generated from the action registry.

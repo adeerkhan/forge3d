@@ -97,17 +97,6 @@ fn stepper(
         .into_any_element()
 }
 
-// ------------------------------------------------------------------- layers
-
-/// The layer tree lives in its own module; this keeps the dock's panel list in
-/// one place.
-pub fn layers(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
-    match studio.upgrade() {
-        Some(entity) => crate::ui::layers::layers(&entity, window, cx),
-        None => div().into_any_element(),
-    }
-}
-
 // ---------------------------------------------------------------- inspector
 
 pub fn inspector(studio: StudioRef<'_>, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -498,4 +487,16 @@ pub fn statistics(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> 
                 )),
         )
         .into_any_element()
+}
+
+/// `console` for callers that hold the entity (the bottom strip).
+pub fn console_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let weak = studio.downgrade();
+    console(&weak, window, cx)
+}
+
+/// `statistics` for callers that hold the entity (the properties strip).
+pub fn statistics_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let weak = studio.downgrade();
+    statistics(&weak, window, cx)
 }

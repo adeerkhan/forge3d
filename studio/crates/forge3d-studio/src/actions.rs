@@ -51,6 +51,7 @@ gpui_kit::actions!(
         DeterminismCheck,
         RefreshCapabilities,
         BakeRig,
+        OpenExamples,
         ToggleRigPlayback,
         Shortcuts,
         About,
@@ -136,6 +137,7 @@ macro_rules! studio_action_table {
             DeterminismCheck, "Determinism check…", Tools, false, None;
             RefreshCapabilities, "Refresh engine capabilities", Tools, false, None;
             BakeRig, "Bake camera rig", Tools, false, None;
+            OpenExamples, "Examples gallery…", Help, false, None;
             ToggleRigPlayback, "Play / pause rig", Tools, false, None;
             Shortcuts, "Keyboard shortcuts", Help, false, Some("shift-?");
             About, "About Forge3D Studio", Help, true, None;
@@ -423,6 +425,14 @@ impl StudioAction for DeterminismCheck {
 impl StudioAction for RefreshCapabilities {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.refresh_capabilities(cx);
+    }
+}
+
+impl StudioAction for OpenExamples {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.focus_examples(cx);
+        let entity = cx.entity();
+        crate::ui::gallery::open_carousel(&entity, cx);
     }
 }
 
