@@ -14,7 +14,10 @@ studio-project.workspace = true
 # engine's negotiated wgpu context, then hands the UI pixels (see
 # native_viewport.rs for why the boundary is a readback).
 forge3d.workspace = true
-wgpu = "0.19"
+wgpu = { version = "0.19", features = ["wgsl"] }
+# 3D grid matrices; must match the engine's viewer maths exactly.
+glam = "0.24"
+bytemuck = { version = "1", features = ["derive"] }
 image.workspace = true
 log.workspace = true
 env_logger.workspace = true

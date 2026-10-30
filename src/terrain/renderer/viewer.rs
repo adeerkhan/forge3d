@@ -875,6 +875,30 @@ impl TerrainScene {
     /// Returns `false` when there is no viewer terrain or a resource could not
     /// be created; the caller reports that rather than presenting a stale or
     /// blank frame as a success.
+    /// STUDIO-FORK: keep the viewer's depth attachment for a later pass.
+    ///
+    /// The viewer discards depth by default; a caller that wants a
+    /// depth-tested overlay sets this once and reads [`Self::viewer_depth`].
+    pub fn set_viewer_depth_store(&mut self, store: bool) {
+        self.viewer_store_depth = store;
+    }
+
+    /// STUDIO-FORK: the depth view the viewer pass just wrote.
+    ///
+    /// Studio draws its ground grid as a second pass in the same encoder, and a
+    /// grid that ignores the terrain's depth is worse than no grid: lines would
+    /// float over hills. Exposing the view (and its format) lets the caller
+    /// depth-test against the frame instead of guessing. Additive: nothing in
+    /// the viewer reads it.
+    pub fn viewer_depth(&self) -> Option<(&wgpu::TextureView, wgpu::TextureFormat)> {
+        self.viewer_resources.as_ref().map(|resources| {
+            (
+                &resources.depth_view,
+                super::core::TERRAIN_DEPTH_FORMAT,
+            )
+        })
+    }
+
     pub fn render_viewer_terrain(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -975,7 +999,13 @@ impl TerrainScene {
                 view: &resources.depth_view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Discard,
+                    // Studio keeps the depth so its grid can test against it;
+                    // a frame nobody overlays still discards it.
+                    store: if self.viewer_store_depth {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
+                    },
                 }),
                 stencil_ops: None,
             }),

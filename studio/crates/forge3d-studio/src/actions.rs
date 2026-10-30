@@ -43,6 +43,8 @@ gpui_kit::actions!(
         CameraBack,
         CameraLeft,
         ToggleOrtho,
+        ToggleGrid,
+        ToggleRigHandles,
         CameraIsometric,
         ResetCamera,
         RenderFrame,
@@ -131,6 +133,8 @@ macro_rules! studio_action_table {
             CameraBack, "Back", View, false, Some("ctrl-1");
             CameraLeft, "Left", View, false, Some("ctrl-3");
             ToggleOrtho, "Orthographic (approximate)", View, false, Some("5");
+            ToggleGrid, "Grid", View, false, Some("shift-g");
+            ToggleRigHandles, "Rig handles", View, false, Some("shift-r");
             CameraIsometric, "Isometric", View, false, Some("0");
             ResetCamera, "Reset camera", View, true, None;
             ToggleTheme, "Dark / light theme", View, true, None;
@@ -331,6 +335,18 @@ impl StudioAction for CameraBack {
 impl StudioAction for CameraLeft {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.preset_view(180.0, 1.0, cx);
+    }
+}
+
+impl StudioAction for ToggleRigHandles {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.toggle_rig_handles(cx);
+    }
+}
+
+impl StudioAction for ToggleGrid {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.toggle_grid(cx);
     }
 }
 

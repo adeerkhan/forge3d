@@ -44,6 +44,11 @@ pub struct TerrainScene {
     /// STUDIO-FORK (M10): viewer frame resources, reused across frames until
     /// the terrain, the colormap or the target size changes.
     pub(super) viewer_resources: Option<super::viewer::ViewerResources>,
+    /// STUDIO-FORK: keep the viewer's depth attachment after the pass so a
+    /// caller can draw a depth-tested overlay (Studio's ground grid) in the
+    /// same encoder. Off by default — the pass discards depth, which is what
+    /// upstream does and what a transient tile attachment wants.
+    pub(super) viewer_store_depth: bool,
     pub(super) _atmosphere_scattering_fallback_texture: TrackedTexture,
     pub(super) atmosphere_scattering_fallback_view: wgpu::TextureView,
     pub(super) _height_curve_identity_texture: TrackedTexture,

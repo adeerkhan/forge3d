@@ -72,6 +72,13 @@ pub struct NativeViewport {
     srgb_lut: [u8; 256],
     layer_visible: bool,
     layer_opacity: f32,
+    /// The 3D environment grid: off by default, depth-tested when on.
+    grid_enabled: bool,
+    grid: Option<crate::grid::GroundGrid>,
+    /// Terrain extent in world units, from the loaded DEM.
+    terrain_span: f32,
+    /// Last camera pushed in, so the grid pass can share its matrices.
+    camera: CameraParams,
     /// Last sun intensity pushed into the scene: the viewer clears to
     /// `(i*0.5, i*0.7, i*0.9)`, which is the backdrop a faded layer shows.
     sun_intensity: f32,
@@ -103,6 +110,10 @@ impl NativeViewport {
             srgb_lut: srgb_encode_table(),
             layer_visible: true,
             layer_opacity: 1.0,
+            grid_enabled: false,
+            grid: None,
+            terrain_span: 1000.0,
+            camera: CameraParams::default(),
             sun_intensity: 1.0,
         })
     }
@@ -110,6 +121,7 @@ impl NativeViewport {
     /// Load a DEM into the shared scene and frame it with the engine's own
     /// world-span convention. Returns the DEM metadata for the UI.
     pub fn load_dem(&mut self, path: &Path) -> Result<(u32, u32, f32, f32), String> {
+        // The grid is rebuilt against the new extent on the next frame.
         self.scene
             .load_terrain_for_viewer(&path.to_string_lossy())
             .map_err(|error| format!("native terrain load: {error}"))?;
@@ -122,6 +134,11 @@ impl NativeViewport {
         let span = (height_max - height_min).abs().max(1.0) * 6.0;
         self.scene
             .set_viewer_world_scale(span.max(1e-3), STUDIO_Z_SCALE);
+        // Keep the depth attachment: the grid pass depth-tests against it.
+        self.scene.set_viewer_depth_store(true);
+        self.terrain_span = span.max(1e-3);
+        // A new extent needs a new mesh.
+        self.grid = None;
         self.has_terrain = true;
         Ok((width, height, height_min, height_max))
     }
@@ -165,6 +182,7 @@ impl NativeViewport {
     /// Push the document's camera and sun into the scene. Cheap; call every
     /// frame before [`render_rgba`](Self::render_rgba).
     pub fn set_view(&mut self, camera: &CameraParams, sun: &SunParams) {
+        self.camera = *camera;
         self.sun_intensity = sun.intensity;
         self.scene.set_viewer_camera(
             camera.phi_deg,
@@ -176,6 +194,15 @@ impl NativeViewport {
             .set_viewer_target(camera.target_x, camera.target_z);
         self.scene
             .set_viewer_sun(sun.azimuth_deg, sun.elevation_deg, sun.intensity);
+    }
+
+    /// Switch the 3D environment grid on or off.
+    ///
+    /// The grid is Studio's own pass over the engine frame (see
+    /// `crate::grid`): the engine's viewer has none, and the pinned terrain
+    /// shader hash must not change for a UI feature.
+    pub fn set_grid(&mut self, enabled: bool) {
+        self.grid_enabled = enabled;
     }
 
     /// Render one frame into the offscreen texture and read it back.
@@ -207,6 +234,55 @@ impl NativeViewport {
         );
         if !drawn {
             return Err("native terrain render declined the frame".to_owned());
+        }
+
+        // The grid is a second pass in the same encoder: it depth-tests against
+        // the terrain the viewer just wrote, so lines behind a hill disappear.
+        if self.grid_enabled {
+            let spacing = (self.terrain_span.max(1.0) / 8.0).max(0.5);
+            let half_extent = (self.terrain_span.max(1.0) * 1.5).max(1.0);
+            if self.grid.is_none() {
+                let depth_format = self
+                    .scene
+                    .viewer_depth()
+                    .map(|(_, format)| format)
+                    .ok_or_else(|| {
+                        "the viewer wrote no depth to test the grid against".to_owned()
+                    })?;
+                self.grid = Some(crate::grid::GroundGrid::new(
+                    &self.device,
+                    COLOR_FORMAT,
+                    depth_format,
+                    half_extent,
+                    spacing,
+                ));
+            }
+            if let Some(grid) = self.grid.as_mut() {
+                grid.rebuild(&self.device, half_extent, spacing);
+                log::info!(
+                    "grid draw: span {:.1}, spacing {:.1}, half {:.1}, camera r {:.1} phi {:.1} theta {:.1}",
+                    self.terrain_span,
+                    spacing,
+                    half_extent,
+                    self.camera.radius,
+                    self.camera.phi_deg,
+                    self.camera.theta_deg
+                );
+                let depth = self.scene.viewer_depth().map(|(view, _)| view);
+                log::info!(
+                    "grid pass: {} vertices, depth attachment {}",
+                    grid.vertex_count(),
+                    depth.is_some()
+                );
+                grid.draw(
+                    &self.queue,
+                    &mut encoder,
+                    view,
+                    depth,
+                    &self.camera,
+                    (width, height),
+                );
+            }
         }
 
         // Copy the target into a mappable buffer. `copy_texture_to_buffer`
@@ -361,6 +437,8 @@ pub enum ViewportCommand {
         visible: bool,
         opacity: f32,
     },
+    /// 3D environment grid on/off.
+    SetGrid(bool),
     SetView {
         camera: CameraParams,
         sun: SunParams,
@@ -512,6 +590,9 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
                 viewport.clear_dem();
                 rendered_once = false;
                 let _ = tx.send(ViewportEvent::TerrainCleared);
+            }
+            ViewportCommand::SetGrid(enabled) => {
+                viewport.set_grid(enabled);
             }
             ViewportCommand::SetLayerStyle { visible, opacity } => {
                 viewport.set_layer_style(visible, opacity);

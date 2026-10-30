@@ -20,6 +20,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
+pub mod grid;
 pub mod native_viewport;
 
 pub use native_viewport::{

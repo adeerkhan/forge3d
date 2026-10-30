@@ -5,6 +5,12 @@
 //! against the runtime the app uses (it pins `taffy =0.15.0` and
 //! `unicode-properties =0.1.3` against `gpui-pre`'s `^` ranges).
 //!
+//! No screenshots: `window.render_to_image` needs a `PlatformHeadlessRenderer`
+//! and the test platform only wires one for Metal; on this Linux box the call
+//! fails with "render_to_image not available: no HeadlessRenderer configured".
+//! So a window test can assert behaviour, not appearance — for the look of a
+//! panel, run the app.
+//!
 //! The studio ones need a GPU and the engine's Python worker, so they are
 //! gated on `FORGE3D_STUDIO_UI_TESTS=1`: a machine without an adapter must not
 //! fail the suite, but a machine with one should prove the interaction.

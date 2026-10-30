@@ -187,6 +187,8 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     IconName::Box,
                     |studio, cx| studio.preset_view(45.0, 35.0, cx),
                 ))
+                .child(grid_button(studio, state.grid))
+                .child(rig_button(studio, state.rig_handles))
                 .child(ortho_button(studio, ortho))
                 .child(live_button(studio, live_viewport)),
         )
@@ -321,10 +323,13 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
             let y = f32::from(event.position.y);
             press_for_down.set(Some((x, y)));
             let _ = studio_down.update(cx, |studio, cx| {
-                studio.drag = Some(ViewDrag::Orbit {
-                    last_x: x,
-                    last_y: y,
-                });
+                // A press on a rig handle drags the rig; anywhere else orbits.
+                if !studio.begin_rig_drag(x, y) {
+                    studio.drag = Some(ViewDrag::Orbit {
+                        last_x: x,
+                        last_y: y,
+                    });
+                }
                 cx.notify();
             });
         })
@@ -390,6 +395,10 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
             let cursor = (f32::from(event.position.x), f32::from(event.position.y));
             let _ = studio_scroll.update(cx, |studio, cx| studio.zoom_at(Some(cursor), delta, cx));
         })
+        .when(
+            state.rig_handles && mode == crate::state::SceneMode::Terrain,
+            |body| body.child(rig_overlay(&studio_entity, cx)),
+        )
         .child(body_content)
         .when(show_hud, |body| {
             body.child(
@@ -402,6 +411,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     .text_color(cx.theme().colors.muted_foreground)
                     .child(hud_left)
                     .when(ortho, |row| row.child("· ortho"))
+                    .when(state.grid, |row| row.child("· grid"))
                     .child(match hover {
                         Some((x, y)) => format!("· ground x {x:.0} y {y:.0}"),
                         None => format!("· target x {:.0} y {:.0}", target.0, target.1),
@@ -495,6 +505,91 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .child(rail)
                 .child(body),
         )
+        .into_any_element()
+}
+
+/// The rig's handles, drawn over the frame where their world points land.
+///
+/// They are ordinary elements rather than part of the rendered image: a
+/// manipulator has to sit on top, and the drag maths lives in
+/// `viewport_math` where it is unit-tested.
+fn rig_overlay(studio: &Entity<Studio>, cx: &App) -> AnyElement {
+    let handles = studio.read(cx).rig_handle_positions();
+    let mut layer = div().absolute().size_full();
+    for handle in handles {
+        let (label, size_px, tone) = match handle.kind {
+            crate::ui::viewport_math::RigHandleKind::Pivot => {
+                ("pivot", 16.0, cx.theme().colors.primary)
+            }
+            crate::ui::viewport_math::RigHandleKind::Orbit => {
+                ("orbit", 12.0, cx.theme().colors.chart_3)
+            }
+            crate::ui::viewport_math::RigHandleKind::Elevation => {
+                ("elev", 12.0, cx.theme().colors.chart_2)
+            }
+        };
+        layer = layer.child(
+            div()
+                .absolute()
+                .left(px(handle.x - size_px * 0.5))
+                .top(px(handle.y - size_px * 0.5))
+                .w(px(size_px))
+                .h(px(size_px))
+                .rounded_full()
+                .border_1()
+                .border_color(tone)
+                .bg(tone.opacity(0.35))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(size_px + 2.0))
+                        .top(px(-2.0))
+                        .text_xs()
+                        .text_color(tone)
+                        .child(label),
+                ),
+        );
+    }
+    layer.into_any_element()
+}
+
+/// The camera-rig handle switch.
+fn rig_button(studio: StudioRef<'_>, showing: bool) -> AnyElement {
+    let studio = studio.clone();
+    Button::new("viewport-rig")
+        .icon(IconName::Axis3d)
+        .label("Rig")
+        .xsmall()
+        .when(showing, |button| button.primary())
+        .when(!showing, |button| button.ghost())
+        .tooltip(if showing {
+            "Rig handles on — click to hide (Shift+R)"
+        } else {
+            "Show the camera rig handles (Shift+R)"
+        })
+        .on_click(move |_, _, cx| {
+            let _ = studio.update(cx, |studio, cx| studio.toggle_rig_handles(cx));
+        })
+        .into_any_element()
+}
+
+/// The 3D environment grid switch (ground plane, depth-tested).
+fn grid_button(studio: StudioRef<'_>, grid: bool) -> AnyElement {
+    let studio = studio.clone();
+    Button::new("viewport-grid")
+        .icon(IconName::Grid3x3)
+        .label("Grid")
+        .xsmall()
+        .when(grid, |button| button.primary())
+        .when(!grid, |button| button.ghost())
+        .tooltip(if grid {
+            "Ground grid on — click to hide (Shift+G)"
+        } else {
+            "Show the ground grid (Shift+G)"
+        })
+        .on_click(move |_, _, cx| {
+            let _ = studio.update(cx, |studio, cx| studio.toggle_grid(cx));
+        })
         .into_any_element()
 }
 

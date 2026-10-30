@@ -775,6 +775,7 @@ impl TerrainScene {
             viewer_colormap_texture: None,
             viewer_colormap_name: None,
             viewer_resources: None,
+            viewer_store_depth: false,
             geometry_provider: None,
             two_phase_culler: None,
             terrain_minmax_pyramid: None,

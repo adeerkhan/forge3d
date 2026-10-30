@@ -7324,8 +7324,10 @@ dependencies = [
 name = "studio-engine"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger 0.11.11",
  "forge3d",
+ "glam",
  "image",
  "log",
  "numpy",

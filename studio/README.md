@@ -7,12 +7,14 @@ specification (Part X is the UI-runtime workstream) and [Status](#status) for
 where the implementation stands.
 
 **This is fork-only work**: the GUI lives here and is not intended for
-upstream pull requests. The intentional engine changes are
-`TerrainScene::clear_viewer_terrain` (`src/terrain/renderer/viewer.rs`), a
-small additive method kept documented for upstream symmetry, and the Studio
-bridge's `mapscene.template` (`crates/studio-engine/src/lib.rs`), which now
-registers the vector layer to the DEM grid (`preparation_grid`) so its line is
-projected instead of clamped away.
+upstream pull requests. The intentional engine changes are, all additive:
+`TerrainScene::clear_viewer_terrain`, `viewer_depth()` and
+`set_viewer_depth_store()` (`src/terrain/renderer/viewer.rs`, for the
+depth-tested grid), a `power_preference()` in `src/core/gpu.rs` for the
+discrete adapter, and the Studio bridge's `mapscene.template`
+(`crates/studio-engine/src/lib.rs`), which registers the vector layer to the
+DEM grid (`preparation_grid`) so its line is projected instead of clamped
+away.
 
 ## Running it
 
@@ -210,6 +212,32 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P6 · grid and a rig you can grab** — the two things that were missing
+      from the 3D view itself.
+      - **3D environment grid** (`Shift+G`, or the Grid button). A ground-plane
+        graticule at least 1.5× the terrain extent, minor cells at span/8, world
+        X/Y axes in red/green. It is **depth-tested against the terrain**, so
+        lines disappear behind hills — verified by the frame dump: the grid
+        stops exactly at the terrain silhouette and the axes cross at the orbit
+        target. Studio draws it as its own pass in the engine's encoder; the
+        engine's viewer has no such overlay and its shader hash is pinned.
+      - **Camera rig handles** (`Shift+R`, or the Rig button). A pivot dot at the
+        orbit target, a ring a quarter-radius to the side, and an elevation arm
+        a quarter-radius above it, each projected from world space with the same
+        camera maths the engine uses. Drag the **pivot** to slide the orbit
+        across the map, the **ring** to orbit, the **arm** for elevation; a
+        press that misses every handle still orbits as before. Positions in an
+        829×575 viewport: pivot (415, 287) — dead centre — ring (556, 287), arm
+        (415, 150); a 40 px pivot drag moves the target from (0, 0) to
+        (1947, 1947). All of it is pure maths in `ui/viewport_math.rs` with
+        tests for projection, hit-testing (the pivot wins a tie) and each drag
+        axis moving only what it owns.
+      - **Two fork changes in the engine**, both additive and documented inline:
+        `TerrainScene::viewer_depth()` (the depth view the viewer pass wrote) and
+        `set_viewer_depth_store(true)` (keep that depth instead of discarding
+        it). Without the second, the grid test read a discarded attachment and
+        drew nothing — the failure was invisible until the `Less`/`Always` A/B
+        separated "wrong matrix" from "no depth to test against".
 - [x] **P5 · pick, thumbnails, and window tests** — three holes closed and
       three bugs found by closing them.
       - **Pick in the map.** A click on a MapScene still asks the engine

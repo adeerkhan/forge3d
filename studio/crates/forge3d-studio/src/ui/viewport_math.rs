@@ -147,6 +147,175 @@ pub fn contained_uv(
 /// The field of view used to approximate orthographic projection.
 pub const ORTHO_FOV_DEG: f32 = 2.0;
 
+// --------------------------------------------------------------- camera rig
+
+/// Which part of the camera rig a handle moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RigHandleKind {
+    /// The pivot: drag it to slide the whole orbit across the ground.
+    Pivot,
+    /// The ground ring: drag it to orbit around the pivot.
+    Orbit,
+    /// The vertical arm above the pivot: drag it to change elevation.
+    Elevation,
+}
+
+/// A handle's position in viewport pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigHandle {
+    pub kind: RigHandleKind,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Project a world point to viewport pixels, or `None` when it is behind the
+/// camera or outside the clip range.
+///
+/// The engine renders the terrain with `perspective_rh` at `fov_deg` and the
+/// same Z-up orbit as [`eye`]/[`view_basis`], so a handle projected here lands
+/// exactly where the world point is drawn.
+pub fn project(
+    target: Vec2,
+    phi_deg: f32,
+    theta_deg: f32,
+    radius: f32,
+    fov_deg: f32,
+    viewport: (f32, f32),
+    world: Vec3,
+) -> Option<(f32, f32)> {
+    let (width, height) = viewport;
+    if width < 2.0 || height < 2.0 {
+        return None;
+    }
+    let origin = eye(target, phi_deg, theta_deg, radius);
+    let (forward, right, up) = view_basis(phi_deg, theta_deg);
+    let offset = world - origin;
+    let depth = offset.dot(forward);
+    if depth <= 1e-3 {
+        return None;
+    }
+    let aspect = width / height;
+    let tan_half = (fov_deg.to_radians() * 0.5).tan();
+    let ndc_x = offset.dot(right) / (depth * tan_half * aspect);
+    let ndc_y = offset.dot(up) / (depth * tan_half);
+    Some((
+        (ndc_x * 0.5 + 0.5) * width,
+        // NDC y is up, pixels are down.
+        (0.5 - ndc_y * 0.5) * height,
+    ))
+}
+
+/// The three rig handles, positioned in viewport pixels.
+///
+/// The ring sits a quarter of the orbit radius from the pivot along the
+/// camera's own right axis, so it always reads as "around here"; the elevation
+/// arm is a quarter radius above the pivot. Both shrink with the orbit, which
+/// keeps them clickable at any zoom.
+pub fn rig_handles(
+    target: Vec2,
+    phi_deg: f32,
+    theta_deg: f32,
+    radius: f32,
+    fov_deg: f32,
+    viewport: (f32, f32),
+) -> Vec<RigHandle> {
+    let (_, right, _) = view_basis(phi_deg, theta_deg);
+    let offset = radius * 0.25;
+    let pivot_world = Vec3::new(target.x, target.y, 0.0);
+    let ring_world = pivot_world + right * offset;
+    let arm_world = pivot_world + Vec3::Z * offset;
+    [
+        (RigHandleKind::Pivot, pivot_world),
+        (RigHandleKind::Orbit, ring_world),
+        (RigHandleKind::Elevation, arm_world),
+    ]
+    .into_iter()
+    .filter_map(|(kind, world)| {
+        project(target, phi_deg, theta_deg, radius, fov_deg, viewport, world)
+            .map(|(x, y)| RigHandle { kind, x, y })
+    })
+    .collect()
+}
+
+/// The handle under the pointer, within `radius_px`.
+///
+/// The pivot wins ties: it is the one a person grabs most, and it sits under
+/// the other two at some angles.
+pub fn hit_rig_handle(
+    handles: &[RigHandle],
+    point: (f32, f32),
+    radius_px: f32,
+) -> Option<RigHandleKind> {
+    let mut best: Option<(f32, RigHandleKind)> = None;
+    for handle in handles {
+        let distance = ((handle.x - point.0).powi(2) + (handle.y - point.1).powi(2)).sqrt();
+        if distance > radius_px {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((best_distance, best_kind)) => {
+                // Pivot wins unless another handle is much closer.
+                (handle.kind == RigHandleKind::Pivot && best_kind != RigHandleKind::Pivot)
+                    || distance + 4.0 < best_distance
+            }
+        };
+        if better {
+            best = Some((distance, handle.kind));
+        }
+    }
+    best.map(|(_, kind)| kind)
+}
+
+/// The orbit a rig handle manipulates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RigOrbit {
+    pub target: Vec2,
+    pub phi_deg: f32,
+    pub theta_deg: f32,
+    pub radius: f32,
+    pub fov_deg: f32,
+}
+
+/// Apply a drag of a rig handle, returning the new orbit.
+///
+/// `delta` is in pixels. Orbiting and elevation are rate-based (pixels per
+/// degree), the pivot slides in the camera's ground plane so the drag follows
+/// the pointer rather than the axes.
+pub fn rig_drag(
+    kind: RigHandleKind,
+    orbit: RigOrbit,
+    viewport: (f32, f32),
+    delta: (f32, f32),
+) -> RigOrbit {
+    match kind {
+        RigHandleKind::Orbit => RigOrbit {
+            phi_deg: (orbit.phi_deg - delta.0 * 0.4).rem_euclid(360.0),
+            ..orbit
+        },
+        RigHandleKind::Elevation => RigOrbit {
+            theta_deg: (orbit.theta_deg - delta.1 * 0.3).clamp(1.0, 89.0),
+            ..orbit
+        },
+        RigHandleKind::Pivot => {
+            // Pixels per world unit at the pivot's depth. The vertical field of
+            // view sets the scale; aspect does not enter it.
+            let (_, height) = viewport;
+            let tan_half = (orbit.fov_deg.to_radians() * 0.5).tan().max(1e-4);
+            let per_pixel = 2.0 * orbit.radius * tan_half / height.max(1.0);
+            let (_, right, up) = view_basis(orbit.phi_deg, orbit.theta_deg);
+            let slide = right * (-delta.0 * per_pixel) + up * (delta.1 * per_pixel);
+            // Keep the pivot on the ground plane: only its horizontal part
+            // moves the orbit, which is what "drag the rig across the map"
+            // means for a terrain.
+            RigOrbit {
+                target: Vec2::new(orbit.target.x + slide.x, orbit.target.y + slide.y),
+                ..orbit
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +422,132 @@ mod tests {
         close(v, 0.0025, 1e-3);
         // A degenerate frame has nothing to pick.
         assert!(contained_uv((0, 0), viewport, (400.0, 400.0)).is_none());
+    }
+
+    #[test]
+    fn the_pivot_projects_to_the_middle_of_the_view() {
+        let target = Vec2::new(120.0, -80.0);
+        let (x, y) = project(
+            target,
+            30.0,
+            55.0,
+            2000.0,
+            54.0,
+            (800.0, 500.0),
+            Vec3::new(target.x, target.y, 0.0),
+        )
+        .expect("the pivot is in front of the camera");
+        close(x, 400.0, 0.5);
+        close(y, 250.0, 0.5);
+        // A point behind the camera is not projectable.
+        let behind = project(
+            target,
+            30.0,
+            55.0,
+            2000.0,
+            54.0,
+            (800.0, 500.0),
+            Vec3::new(target.x, target.y, 1e6),
+        );
+        assert!(behind.is_none(), "a point behind the eye has no pixel");
+    }
+
+    #[test]
+    fn the_rig_offers_a_pivot_an_orbit_and_an_elevation_handle() {
+        let handles = rig_handles(Vec2::ZERO, 20.0, 50.0, 4000.0, 54.0, (800.0, 500.0));
+        let kinds: Vec<RigHandleKind> = handles.iter().map(|handle| handle.kind).collect();
+        assert!(kinds.contains(&RigHandleKind::Pivot));
+        assert!(kinds.contains(&RigHandleKind::Orbit));
+        assert!(kinds.contains(&RigHandleKind::Elevation));
+        // The elevation arm sits above the pivot on screen.
+        let pivot = handles
+            .iter()
+            .find(|h| h.kind == RigHandleKind::Pivot)
+            .unwrap();
+        let arm = handles
+            .iter()
+            .find(|h| h.kind == RigHandleKind::Elevation)
+            .unwrap();
+        assert!(arm.y < pivot.y, "the arm is above the pivot");
+    }
+
+    #[test]
+    fn a_click_finds_the_nearest_handle_and_the_pivot_wins() {
+        let handles = vec![
+            RigHandle {
+                kind: RigHandleKind::Pivot,
+                x: 400.0,
+                y: 250.0,
+            },
+            RigHandle {
+                kind: RigHandleKind::Orbit,
+                x: 500.0,
+                y: 250.0,
+            },
+            RigHandle {
+                kind: RigHandleKind::Elevation,
+                x: 400.0,
+                y: 150.0,
+            },
+        ];
+        assert_eq!(
+            hit_rig_handle(&handles, (405.0, 252.0), 14.0),
+            Some(RigHandleKind::Pivot)
+        );
+        assert_eq!(
+            hit_rig_handle(&handles, (498.0, 251.0), 14.0),
+            Some(RigHandleKind::Orbit)
+        );
+        // Nothing within reach.
+        assert_eq!(hit_rig_handle(&handles, (700.0, 480.0), 14.0), None);
+        // The pivot wins the tie at the same spot.
+        let stacked = vec![
+            RigHandle {
+                kind: RigHandleKind::Orbit,
+                x: 400.0,
+                y: 250.0,
+            },
+            RigHandle {
+                kind: RigHandleKind::Pivot,
+                x: 401.0,
+                y: 250.0,
+            },
+        ];
+        assert_eq!(
+            hit_rig_handle(&stacked, (400.5, 250.0), 14.0),
+            Some(RigHandleKind::Pivot)
+        );
+    }
+
+    #[test]
+    fn dragging_each_handle_moves_only_what_it_owns() {
+        let target = Vec2::ZERO;
+        let orbit = RigOrbit {
+            target,
+            phi_deg: 40.0,
+            theta_deg: 50.0,
+            radius: 1000.0,
+            fov_deg: 54.0,
+        };
+        let viewport = (800.0, 500.0);
+
+        let orbited = rig_drag(RigHandleKind::Orbit, orbit, viewport, (10.0, 0.0));
+        close(orbited.target.x, 0.0, 1e-4);
+        close(orbited.phi_deg, 36.0, 1e-3);
+        close(orbited.theta_deg, 50.0, 1e-4);
+
+        let raised = rig_drag(RigHandleKind::Elevation, orbit, viewport, (0.0, 10.0));
+        close(raised.phi_deg, 40.0, 1e-4);
+        close(raised.theta_deg, 47.0, 1e-3);
+
+        let slid = rig_drag(RigHandleKind::Pivot, orbit, viewport, (20.0, 0.0));
+        close(slid.phi_deg, 40.0, 1e-4);
+        close(slid.theta_deg, 50.0, 1e-4);
+        close(slid.radius, 1000.0, 1e-4);
+        assert!(
+            slid.target.length() > 1.0,
+            "the pivot slid across the ground"
+        );
     }
 
     #[test]

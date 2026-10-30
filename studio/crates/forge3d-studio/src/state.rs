@@ -499,8 +499,20 @@ pub enum PendingJob {
 /// Interactive viewport drag, held on the state so a drag survives frames.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ViewDrag {
-    Orbit { last_x: f32, last_y: f32 },
-    Pan { last_x: f32, last_y: f32 },
+    Orbit {
+        last_x: f32,
+        last_y: f32,
+    },
+    Pan {
+        last_x: f32,
+        last_y: f32,
+    },
+    /// A camera-rig handle is being dragged: the pivot, the ring or the arm.
+    Rig {
+        handle: crate::ui::viewport_math::RigHandleKind,
+        last_x: f32,
+        last_y: f32,
+    },
 }
 
 pub struct Studio {
@@ -610,6 +622,10 @@ pub struct Studio {
     pub preview_ms: f32,
     pub preview_size: (u32, u32),
     preview_started: Option<std::time::Instant>,
+    /// The 3D environment grid (ground-plane graticule) in the viewport.
+    pub grid: bool,
+    /// The camera rig's on-screen handles (pivot, orbit ring, elevation arm).
+    pub rig_handles: bool,
     /// Approximate orthographic projection: the engine's viewer is perspective
     /// only, so ortho is a 2° field of view with the distance scaled to keep
     /// the framing (`viewport_math::radius_for_fov`). The UI says so.
@@ -735,6 +751,8 @@ impl Studio {
             preview_size: (0, 0),
             preview_started: None,
             awaiting_still: false,
+            grid: false,
+            rig_handles: false,
             ortho: false,
             persp_fov: 54.0,
             pick_smoke_done: false,
@@ -1405,6 +1423,68 @@ impl Studio {
         cx.notify();
     }
 
+    /// Show or hide the camera rig's handles.
+    pub fn toggle_rig_handles(&mut self, cx: &mut Context<Self>) {
+        self.rig_handles = !self.rig_handles;
+        self.set_status(if self.rig_handles {
+            "Rig handles on — drag the pivot to move the orbit, the ring to orbit, the arm for elevation"
+        } else {
+            "Rig handles off"
+        });
+        cx.notify();
+    }
+
+    /// The rig's handles in viewport pixels, for the overlay and for hit tests.
+    pub fn rig_handle_positions(&self) -> Vec<crate::ui::viewport_math::RigHandle> {
+        let (width, height) = self.viewport_size.get();
+        if self.scene_mode != SceneMode::Terrain {
+            return Vec::new();
+        }
+        let camera = self.project.camera;
+        crate::ui::viewport_math::rig_handles(
+            glam::Vec2::new(camera.target_x, camera.target_z),
+            camera.phi_deg,
+            camera.theta_deg,
+            camera.radius,
+            camera.fov_deg,
+            (width, height),
+        )
+    }
+
+    /// Begin dragging a rig handle if the press landed on one.
+    pub fn begin_rig_drag(&mut self, x: f32, y: f32) -> bool {
+        if !self.rig_handles || self.scene_mode != SceneMode::Terrain {
+            return false;
+        }
+        let handles = self.rig_handle_positions();
+        let Some(handle) = crate::ui::viewport_math::hit_rig_handle(&handles, (x, y), 16.0) else {
+            return false;
+        };
+        self.drag = Some(ViewDrag::Rig {
+            handle,
+            last_x: x,
+            last_y: y,
+        });
+        true
+    }
+
+    /// Switch the 3D environment grid on or off.
+    ///
+    /// Studio draws it as its own depth-tested pass over the engine frame, so
+    /// the grid disappears behind terrain instead of floating over it; the
+    /// engine's viewer has no such overlay and its shader hash is pinned.
+    pub fn toggle_grid(&mut self, cx: &mut Context<Self>) {
+        self.grid = !self.grid;
+        self.viewport.send(ViewportCommand::SetGrid(self.grid));
+        self.invalidate_viewport(cx);
+        self.set_status(if self.grid {
+            "Grid on — ground plane, axes in red/green"
+        } else {
+            "Grid off"
+        });
+        cx.notify();
+    }
+
     /// Toggle the approximate orthographic projection.
     pub fn toggle_ortho(&mut self, cx: &mut Context<Self>) {
         let mut camera = self.project.camera;
@@ -1449,6 +1529,36 @@ impl Studio {
                 camera.phi_deg = (camera.phi_deg - (x - last_x) * 0.4).rem_euclid(360.0);
                 camera.theta_deg = (camera.theta_deg + (y - last_y) * 0.3).clamp(1.0, 89.0);
                 self.drag = Some(ViewDrag::Orbit {
+                    last_x: x,
+                    last_y: y,
+                });
+                self.set_camera(camera, cx);
+            }
+            Some(ViewDrag::Rig {
+                handle,
+                last_x,
+                last_y,
+            }) => {
+                let mut camera = self.project.camera;
+                let (width, height) = self.viewport_size.get();
+                let orbit = crate::ui::viewport_math::rig_drag(
+                    handle,
+                    crate::ui::viewport_math::RigOrbit {
+                        target: glam::Vec2::new(camera.target_x, camera.target_z),
+                        phi_deg: camera.phi_deg,
+                        theta_deg: camera.theta_deg,
+                        radius: camera.radius,
+                        fov_deg: camera.fov_deg,
+                    },
+                    (width, height),
+                    (x - last_x, y - last_y),
+                );
+                camera.target_x = orbit.target.x;
+                camera.target_z = orbit.target.y;
+                camera.phi_deg = orbit.phi_deg;
+                camera.theta_deg = orbit.theta_deg;
+                self.drag = Some(ViewDrag::Rig {
+                    handle,
                     last_x: x,
                     last_y: y,
                 });
@@ -3827,6 +3937,38 @@ impl Studio {
                         self.project.camera.target_x,
                         self.project.camera.target_z
                     );
+                }
+                if std::env::var_os("FORGE3D_STUDIO_RIG_SMOKE").is_some() && !self.rig_handles {
+                    self.toggle_rig_handles(cx);
+                    let (width, height) = self.viewport_size.get();
+                    let handles = self.rig_handle_positions();
+                    log::info!(
+                        "rig smoke: {} handle(s) in {width:.0}x{height:.0}: {:?}",
+                        handles.len(),
+                        handles
+                            .iter()
+                            .map(|handle| (handle.kind, handle.x.round(), handle.y.round()))
+                            .collect::<Vec<_>>()
+                    );
+                    // Grab the pivot and slide it: the orbit target must move.
+                    let before = (self.project.camera.target_x, self.project.camera.target_z);
+                    if let Some(pivot) = handles.iter().find(|handle| {
+                        handle.kind == crate::ui::viewport_math::RigHandleKind::Pivot
+                    }) {
+                        if self.begin_rig_drag(pivot.x, pivot.y) {
+                            self.drag_to(pivot.x + 40.0, pivot.y, cx);
+                            self.end_gesture(cx);
+                            let after =
+                                (self.project.camera.target_x, self.project.camera.target_z);
+                            log::info!(
+                                "rig smoke: pivot drag moved target from {before:?} to {after:?}"
+                            );
+                        }
+                    }
+                }
+                if std::env::var_os("FORGE3D_STUDIO_GRID_SMOKE").is_some() && !self.grid {
+                    self.toggle_grid(cx);
+                    log::info!("grid smoke: on");
                 }
                 if std::env::var_os("FORGE3D_STUDIO_ORTHO_SMOKE").is_some() && !self.ortho {
                     self.toggle_ortho(cx);
