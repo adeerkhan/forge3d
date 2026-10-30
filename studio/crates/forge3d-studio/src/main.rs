@@ -4,21 +4,13 @@
 //! exactly as before: a bridge worker (embedded Python) for certified renders,
 //! exports and certificates, and a viewport worker for the interactive frame.
 
-mod actions;
-mod state;
-mod ui;
-
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
-use crate::state::Studio;
-
-/// Startup clock: from process entry to the first painted frame, reported in
-/// the console and the Statistics panel so the budget is visible.
-pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+use forge3d_studio::state::Studio;
 
 fn main() {
-    let _ = STARTED.set(std::time::Instant::now());
+    let _ = forge3d_studio::STARTED.set(std::time::Instant::now());
 
     // `--version` / `--help` print and exit: an executable a person launches
     // should answer those without opening a window.
@@ -54,14 +46,9 @@ fn main() {
         .format_timestamp(None)
         .init();
 
-    // The workbench wants the discrete GPU: the engine's default LOW power
-    // preference otherwise renders the viewport on the integrated adapter while
-    // the UI composites on the discrete one, and every frame crosses PCIe.
-    // Set before any engine context exists (the bridge and the viewport worker
-    // both read it), and never override an explicit user choice.
-    if std::env::var_os("FORGE3D_GPU_POWER").is_none() {
-        std::env::set_var("FORGE3D_GPU_POWER", "high");
-    }
+    // Discrete GPU before any engine context exists (the library does this too
+    // for anything that builds a Studio without going through `main`).
+    forge3d_studio::ensure_gpu_power_preference();
 
     log::info!("Forge3D Studio {} starting", env!("CARGO_PKG_VERSION"));
 
@@ -69,7 +56,7 @@ fn main() {
         .with_assets(gpui_kit::assets::AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            actions::init(cx);
+            forge3d_studio::actions::init(cx);
 
             let bounds = Bounds::centered(None, size(px(1500.0), px(950.0)), cx);
             let options = WindowOptions {

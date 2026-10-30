@@ -66,7 +66,20 @@ pub fn outliner(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> A
         );
 
     let content = match left {
-        LeftTab::Layers => crate::ui::layers::layers(studio, window, cx),
+        LeftTab::Layers => {
+            // The layers list is not virtualised; this measures what a big
+            // document actually costs so the note in the docs is a number.
+            let started = std::time::Instant::now();
+            let element = crate::ui::layers::layers(studio, window, cx);
+            if std::env::var_os("FORGE3D_STUDIO_UI_TIMING").is_some() {
+                let rows = studio.read(cx).visible_rows().len();
+                log::info!(
+                    "layers panel: {rows} row(s) built in {:.2} ms",
+                    started.elapsed().as_secs_f32() * 1000.0
+                );
+            }
+            element
+        }
         LeftTab::Examples => crate::ui::gallery::gallery(studio, window, cx),
     };
 

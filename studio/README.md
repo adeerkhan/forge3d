@@ -210,6 +210,53 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P5 · pick, thumbnails, and window tests** — three holes closed and
+      three bugs found by closing them.
+      - **Pick in the map.** A click on a MapScene still asks the engine
+        (`mapscene.pick`) which recipe layer is under that pixel. The op uses
+        the *same* projection the renderer used — the layer's
+        `preparation_grid` for screen-camera recipes, the terrain projector for
+        camera-projected ones — so a pick cannot disagree with the frame. The
+        click is mapped through the image's own rect (stills are letterboxed),
+        picks the topmost layer in paint order, selects it in the cartography
+        panel, and answers in **17 ms**. Verified against pixels, not assumed:
+        `scripts/check_pick.py` renders a thick orange line, finds the pixels
+        that are actually orange, and picks 12/12 of them as the vector layer
+        while a far corner misses.
+      - **Gallery thumbnails.** The index declared 50 examples but only 2 had a
+        thumbnail, so the carousel showed grey boxes. The five tier A examples
+        (the only ones that can run today) now have real thumbnails rendered
+        through the same bridge ops the app uses
+        (`scripts/make_thumbnails.py`, committed under `assets/thumbs/`); the
+        rest say *why* they have none ("this example needs M10") instead of
+        pretending.
+      - **Window tests exist now.** `gpui-kit/test-support` cannot resolve
+        against the running runtime — it pulls the parallel `gpui-fast` tree,
+        whose pins (`taffy =0.15.0`, `unicode-properties =0.1.3`) contradict
+        `gpui-pre`'s `^` ranges, and vendoring around them would mean two GPUI
+        versions in one process. `gpui`'s *own* test-support rides the same
+        runtime, so the crate is now a library plus a thin binary and
+        `tests/ui_window.rs` opens a real window, builds the real `Studio`,
+        waits for the viewport worker, and dispatches actions through the app's
+        action table (ortho round-trips fov and radius). 3 tests, ~0.9 s.
+      - **Bug found by that harness:** the discrete-GPU pin lived in the
+        binary's `main`, so anything else constructing a `Studio` — the tests,
+        and any future library consumer — silently rendered on the Intel iGPU
+        (`Viewport device: Intel(R) Graphics (RPL-S)`). It moved into the
+        library, and the test now asserts the RTX 5060.
+      - **Bug found by picking:** the pick silently matched nothing at first
+        because layer `kind` is a *dataclass field the engine leaves `None`* —
+        the engine's discriminant is `to_dict()["kind"]`. A "no hit" that looks
+        like a miss is the same class of bug as a dead control.
+      - **Measured instead of assumed: layers rows are not virtualised**, and
+        that is fine at realistic sizes: the panel builds 100 rows in 0.81 ms,
+        400 in 4.62 ms, 1000 in 13.5 ms (`FORGE3D_STUDIO_MANY_LAYERS` +
+        `FORGE3D_STUDIO_UI_TIMING`). No rewrite until a document actually gets
+        that big.
+      Still open: camera-projected picking is implemented but its recipe cannot
+      yet render in `mesh` mode (the engine blocks world overlays there:
+      "world overlay anchor is behind the terrain camera"), so that path is
+      unverified end to end.
 - [x] **P4 · perceived speed and a real executable** — the two things that
       actually felt slow, measured and fixed.
       - **Every edit rendered 1.5 s twice.** A MapScene render built a fresh

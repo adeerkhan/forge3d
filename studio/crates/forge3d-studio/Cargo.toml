@@ -5,12 +5,23 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "forge3d_studio"
+path = "src/lib.rs"
+
 [[bin]]
 name = "forge3d-studio"
 path = "src/main.rs"
 
 [build-dependencies]
 pyo3-build-config = "0.21"
+
+[dev-dependencies]
+# Window-level UI tests. `gpui`'s own test-support (TestAppContext) is a
+# different feature from `gpui-kit`'s, which pulls the parallel `gpui-fast`
+# tree and conflicts with the running `gpui-pre` on pinned crates (taffy,
+# unicode-properties). This one rides the same runtime the app uses.
+gpui-pre = { version = "=0.3.10", features = ["test-support"] }
 
 [dependencies]
 serde.workspace = true

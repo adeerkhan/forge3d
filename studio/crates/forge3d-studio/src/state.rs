@@ -489,6 +489,7 @@ pub enum PendingJob {
     MapSceneRender { preview: bool },
     MapSceneFurniture { render_after: bool },
     MapSceneExportSvg,
+    MapScenePick,
     RasterClasses,
     AtmosphereBake,
     AstroObserve,
@@ -618,9 +619,16 @@ pub struct Studio {
     pick_smoke_done: bool,
     /// Recipe layer selected for styling in the cartography panel.
     pub recipe_selected: Option<usize>,
+    /// Set when a map pick is requested, so the result can report how long the
+    /// engine took to answer.
+    pick_requested: Option<std::time::Instant>,
     /// Milliseconds from process start to the first painted frame, shown in
     /// Statistics so the startup budget is a visible number, not a feeling.
     pub startup_ms: Option<f32>,
+    /// `FORGE3D_STUDIO_MANY_LAYERS=n`: duplicate the layer until the document
+    /// holds `n`, once the first frame proves the document is loaded. Measures
+    /// what a big document costs the (unvirtualised) layers panel.
+    many_layers_pending: usize,
     /// `FORGE3D_STUDIO_PREVIEW_SMOKE=n`: render `n` previews back to back and
     /// log each duration, so preview latency is measured by the real path.
     preview_smoke_left: u32,
@@ -637,6 +645,8 @@ pub struct Studio {
 
 impl Studio {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Before any engine context exists (bridge worker, viewport worker).
+        crate::ensure_gpu_power_preference();
         let (engine, engine_rx) = EngineHandle::spawn();
         let (viewport, viewport_rx) = ViewportWorker::spawn();
         let focus_handle = cx.focus_handle();
@@ -729,7 +739,12 @@ impl Studio {
             persp_fov: 54.0,
             pick_smoke_done: false,
             recipe_selected: None,
+            pick_requested: None,
             startup_ms: None,
+            many_layers_pending: std::env::var("FORGE3D_STUDIO_MANY_LAYERS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
             preview_smoke_left: std::env::var("FORGE3D_STUDIO_PREVIEW_SMOKE")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -757,6 +772,14 @@ impl Studio {
         studio
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
+        if let Ok(tab) = std::env::var("FORGE3D_STUDIO_OUTLINER") {
+            // Dev hook: open the outliner on a named tab, so the examples
+            // gallery (thumbnails, cards) can be exercised without a click.
+            if tab.eq_ignore_ascii_case("examples") {
+                studio.set_left_tab(LeftTab::Examples, cx);
+                log::info!("outliner smoke: examples");
+            }
+        }
         if let Ok(name) = std::env::var("FORGE3D_STUDIO_WORKSPACE") {
             let workspace = crate::state::Workspace::ALL
                 .iter()
@@ -1314,9 +1337,8 @@ impl Studio {
     /// select the layer that owns the terrain, so the 3D view drives the
     /// outliner instead of only being driven by it.
     pub fn click_select(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
-        if self.scene_mode != SceneMode::Terrain {
-            self.set_status("MapScene is a still; switch to Terrain to pick in 3D");
-            cx.notify();
+        if self.scene_mode == SceneMode::MapScene {
+            self.pick_map(x, y, cx);
             return;
         }
         let Some((gx, gy)) = self.ground_at(x, y) else {
@@ -1333,6 +1355,53 @@ impl Studio {
             self.select_layer_row(id, false, false, cx);
         }
         self.set_status(format!("Target {gx:.0}, {gy:.0}"));
+        cx.notify();
+    }
+
+    /// A click on a MapScene still: ask the engine which recipe layer is under
+    /// that pixel and select it.
+    ///
+    /// The engine answers with the projection it rendered with (`mapscene.pick`),
+    /// so the pick cannot disagree with the frame; the click is mapped through
+    /// the image's own rect because a still is letterboxed in the viewport.
+    pub fn pick_map(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        if self.mapscene.recipe_json.is_none() {
+            log::info!("map pick: no recipe");
+            self.set_status("Build a MapScene recipe before picking in the map");
+            cx.notify();
+            return;
+        }
+        let viewport = self.viewport_size.get();
+        let Some((u, v)) =
+            crate::ui::viewport_math::contained_uv(self.frame_size, viewport, (x, y))
+        else {
+            log::info!(
+                "map pick: click ({x:.0}, {y:.0}) is outside the {}×{} still in a {}×{} viewport",
+                self.frame_size.0,
+                self.frame_size.1,
+                viewport.0,
+                viewport.1
+            );
+            self.set_status("That click is outside the rendered map");
+            cx.notify();
+            return;
+        };
+        if self.preview_in_flight {
+            self.set_status("Caution: the preview under your click is still the previous frame");
+        }
+        // The engine worker is one thread: a click must not queue behind a
+        // preview this edit already invalidated. The recipe has not changed, so
+        // the cancelled preview would have drawn the same frame.
+        self.preview_due = None;
+        let Some((recipe, _)) = self.render_recipe() else {
+            return;
+        };
+        let job = self.engine.call(
+            "mapscene.pick",
+            serde_json::json!({ "recipe_json": recipe, "u": u, "v": v }),
+        );
+        self.pending_jobs.insert(job, PendingJob::MapScenePick);
+        self.pick_requested = Some(std::time::Instant::now());
         cx.notify();
     }
 
@@ -2346,6 +2415,7 @@ impl Studio {
         if let Some(cached) = self.thumbnails.get(&entry.id) {
             return cached.clone();
         }
+        let declared = entry.thumbnail.clone();
         let loaded = entry
             .thumbnail
             .as_deref()
@@ -2357,6 +2427,13 @@ impl Studio {
                     image.to_rgba8(),
                 )]))
             });
+        match (&declared, loaded.is_some()) {
+            (Some(path), true) => log::info!("thumbnail {} -> {path}", entry.id),
+            (Some(path), false) => {
+                log::warn!("thumbnail {} declared but unreadable: {path}", entry.id)
+            }
+            (None, _) => {}
+        }
         self.thumbnails.insert(entry.id.clone(), loaded.clone());
         cx.notify();
         loaded
@@ -3720,6 +3797,24 @@ impl Studio {
                         log::info!("first frame {ms:.0} ms after process start");
                     }
                 }
+                if self.many_layers_pending > 1 {
+                    let target = std::mem::take(&mut self.many_layers_pending);
+                    let started = std::time::Instant::now();
+                    for _ in 1..target {
+                        let Some(id) = self.primary_layer() else {
+                            break;
+                        };
+                        if let Some(copy) = self.project.document.duplicate(id) {
+                            self.selection = vec![copy];
+                        }
+                    }
+                    log::info!(
+                        "many layers: {} layer(s) in {:.0} ms",
+                        self.project.document.len(),
+                        started.elapsed().as_secs_f32() * 1000.0
+                    );
+                    cx.notify();
+                }
                 if std::env::var_os("FORGE3D_STUDIO_PICK_SMOKE").is_some() && !self.pick_smoke_done
                 {
                     // Dev hook: one click below the middle of the viewport (on
@@ -4371,6 +4466,16 @@ impl Studio {
                                 "Preview {}×{} · {:.0} ms",
                                 self.preview_size.0, self.preview_size.1, elapsed
                             ));
+                            if std::env::var_os("FORGE3D_STUDIO_PICK_MAP_SMOKE").is_some()
+                                && !self.pick_smoke_done
+                            {
+                                // Dev hook: two clicks through the real path —
+                                // the middle of the still and a corner of it.
+                                self.pick_smoke_done = true;
+                                let (width, height) = self.viewport_size.get();
+                                self.pick_map(width * 0.5, height * 0.5, cx);
+                                self.pick_map(3.0, 3.0, cx);
+                            }
                             if self.preview_smoke_left > 0 {
                                 // Measure the *next* preview through the same
                                 // path an edit takes, with no debounce.
@@ -4399,6 +4504,49 @@ impl Studio {
                     }
                     self.set_status("MapScene frame rendered");
                 }
+            }
+            PendingJob::MapScenePick => {
+                let elapsed = self
+                    .pick_requested
+                    .take()
+                    .map(|started| started.elapsed().as_secs_f32() * 1000.0)
+                    .unwrap_or(0.0);
+                let hit = result.get("hit").and_then(|value| value.as_bool()) == Some(true);
+                if hit {
+                    let index = result
+                        .get("index")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0) as usize;
+                    let kind = result
+                        .get("kind")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("layer");
+                    let id = result
+                        .get("layer_id")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let feature = result.get("feature_id").and_then(|value| value.as_str());
+                    self.recipe_selected = Some(index);
+                    let name = if id.is_empty() {
+                        kind.to_owned()
+                    } else {
+                        id.to_owned()
+                    };
+                    let message = match feature {
+                        Some(feature) => format!("Picked {kind} {name} · {feature}"),
+                        None => format!("Picked {kind} {name}"),
+                    };
+                    log::info!("map pick: {message} (layer {index}) in {elapsed:.0} ms");
+                    self.set_status(message);
+                } else {
+                    let reason = result
+                        .get("reason")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("no layer covers that point");
+                    log::info!("map pick: nothing — {reason} in {elapsed:.0} ms");
+                    self.set_status(format!("Nothing under the cursor — {reason}"));
+                }
+                cx.notify();
             }
             PendingJob::MapSceneExportSvg => {
                 self.busy = false;

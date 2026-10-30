@@ -117,6 +117,33 @@ pub fn radius_for_fov(radius: f32, fov_deg: f32, new_fov_deg: f32) -> f32 {
     radius * (old / new)
 }
 
+/// Normalised coordinate inside an image drawn with `ObjectFit::Contain`.
+///
+/// A map still is letterboxed inside the viewport, so a click has to be mapped
+/// through the image's own rectangle, not the viewport's — otherwise every pick
+/// drifts once the two aspect ratios differ. `None` means the click landed in
+/// the letterbox, where there is no image to pick.
+pub fn contained_uv(
+    image: (u32, u32),
+    viewport: (f32, f32),
+    point: (f32, f32),
+) -> Option<(f32, f32)> {
+    let (image_w, image_h) = (image.0 as f32, image.1 as f32);
+    let (view_w, view_h) = viewport;
+    if image_w < 1.0 || image_h < 1.0 || view_w < 1.0 || view_h < 1.0 {
+        return None;
+    }
+    let scale = (view_w / image_w).min(view_h / image_h);
+    let drawn = (image_w * scale, image_h * scale);
+    let origin = ((view_w - drawn.0) * 0.5, (view_h - drawn.1) * 0.5);
+    let u = (point.0 - origin.0) / drawn.0;
+    let v = (point.1 - origin.1) / drawn.1;
+    if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+        return None;
+    }
+    Some((u, v))
+}
+
 /// The field of view used to approximate orthographic projection.
 pub const ORTHO_FOV_DEG: f32 = 2.0;
 
@@ -202,6 +229,30 @@ mod tests {
         close(back.x, target.x, 1e-3);
         close(back.y, target.y, 1e-3);
         close(radius, 400.0, 1e-3);
+    }
+
+    #[test]
+    fn a_letterboxed_image_maps_clicks_through_its_own_rectangle() {
+        // A 2:1 image in a square viewport: bars above and below.
+        let image = (640, 320);
+        let viewport = (800.0, 800.0);
+        // Scale is min(1.25, 2.5) = 1.25, so the image is 800x400 and spans
+        // y 200..600: the letterbox bars are 200 px tall.
+        let (u, v) = contained_uv(image, viewport, (400.0, 400.0)).expect("centre is inside");
+        close(u, 0.5, 1e-4);
+        close(v, 0.5, 1e-4);
+        // The top-left pixel of the image, not of the viewport.
+        let (u, v) = contained_uv(image, viewport, (0.0, 200.0)).expect("corner is inside");
+        close(u, 0.0, 1e-4);
+        close(v, 0.0, 1e-4);
+        // The letterbox is not the image.
+        assert!(contained_uv(image, viewport, (400.0, 100.0)).is_none());
+        assert!(contained_uv(image, viewport, (400.0, 700.0)).is_none());
+        // Just inside the image is still inside.
+        let (_, v) = contained_uv(image, viewport, (400.0, 201.0)).expect("one px inside works");
+        close(v, 0.0025, 1e-3);
+        // A degenerate frame has nothing to pick.
+        assert!(contained_uv((0, 0), viewport, (400.0, 400.0)).is_none());
     }
 
     #[test]

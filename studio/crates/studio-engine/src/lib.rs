@@ -2450,6 +2450,247 @@ def _lines_from_geometry(geometry):
     return []
 
 
+# --- picking -------------------------------------------------------------
+
+_PICK_STATE = {"key": None, "projector": None}
+
+
+def _pick_grid_pixels(point, grid, width, height):
+    """Layer coordinate -> image pixel, matching the renderer's screen path.
+
+    A screen-camera recipe draws vectors by mapping their coordinates through
+    the layer's `preparation_grid` (see `map_scene._vector_point_to_pixel`), so
+    a pick must use the same mapping or it would disagree with the frame.
+    """
+    from forge3d.alignment import _affine_from_metadata
+
+    grid = grid or {}
+    transform = grid.get("geotransform")
+    cols, rows = grid.get("width"), grid.get("height")
+    if not transform or not cols or not rows:
+        return None
+    inverse = ~_affine_from_metadata(transform)
+    column, row = inverse * (float(point[0]), float(point[1]))
+    return (
+        column / float(cols) * (width - 1),
+        row / float(rows) * (height - 1),
+    )
+
+
+def _point_in_ring(x, y, ring):
+    inside = False
+    count = len(ring)
+    for index in range(count):
+        x0, y0 = ring[index]
+        x1, y1 = ring[(index + 1) % count]
+        if (y0 > y) != (y1 > y):
+            crossing = x0 + (y - y0) * (x1 - x0) / (y1 - y0 or 1e-12)
+            if x < crossing:
+                inside = not inside
+    return inside
+
+
+def _distance_to_segments(x, y, paths):
+    best = None
+    for path in paths:
+        for (x0, y0), (x1, y1) in zip(path, path[1:]):
+            dx, dy = x1 - x0, y1 - y0
+            length2 = dx * dx + dy * dy
+            if length2 <= 0.0:
+                t = 0.0
+            else:
+                t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / length2))
+            px, py = x0 + t * dx, y0 + t * dy
+            distance = math.hypot(x - px, y - py)
+            best = distance if best is None else min(best, distance)
+    return best
+
+
+def _pick_projector(recipe, key):
+    """Cached terrain projector for perspective recipes.
+
+    Building one costs ~0.3 s (heightmap + params), so a click would feel dead
+    without the cache; it is dropped when the terrain or output size changes.
+    """
+    if _PICK_STATE.get("key") == key and _PICK_STATE.get("projector") is not None:
+        return _PICK_STATE["projector"]
+    from forge3d._map_scene_projection import TerrainProjector
+
+    projector = TerrainProjector(recipe)
+    _PICK_STATE["key"] = key
+    _PICK_STATE["projector"] = projector
+    return projector
+
+
+def _op_mapscene_pick(p):
+    """Which recipe layer is under a normalised image coordinate.
+
+    The pick uses the *same* projection the renderer used for that recipe, so
+    it cannot disagree with the frame: screen-camera recipes map through each
+    layer's `preparation_grid`, perspective recipes project through the terrain
+    camera. Layers are tested from the top of the paint order down, so the one
+    you see wins.
+    """
+    recipe_data = json.loads(p["recipe_json"])
+    u, v = float(p.get("u", -1.0)), float(p.get("v", -1.0))
+    if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+        raise RuntimeError("mapscene.pick needs u,v inside [0, 1]")
+    tolerance = float(p.get("tolerance_px", 6.0))
+    from forge3d import map_scene as ms
+    from forge3d._map_scene_common import _metadata_dict
+
+    recipe = f3d.MapScene._recipe_from_dict(recipe_data)
+    output = recipe.output
+    width = int(output.width if output is not None else 960)
+    height = int(output.height if output is not None else 600)
+    x, y = u * (width - 1), v * (height - 1)
+    mode = ms._mapscene_effective_camera_mode(recipe)
+    # The engine's own predicate: only `mesh` and `clipmap` project through the
+    # camera (`_is_3d_camera_mode`); everything else is drawn in screen space,
+    # so guessing from "not screen" would pick with the wrong projection.
+    perspective = ms._is_3d_camera_mode(mode)
+    projector = None
+    if perspective:
+        key = (_terrain_key(recipe_data), width, height, mode)
+        try:
+            projector = _pick_projector(recipe, key)
+        except Exception as error:
+            return {
+                "hit": False,
+                "reason": f"the recipe's camera projection is unavailable: {error}",
+                "mode": mode,
+            }
+
+    # Screen-mode geometry registers to the terrain grid when a layer has no
+    # grid of its own (labels are the usual case: the renderer projects them
+    # through the terrain, so their pixel position comes from the same grid).
+    terrain_grid = None
+    if not perspective:
+        alignment = ms._terrain_alignment_grid(recipe.terrain)
+        if alignment is not None:
+            transform = alignment.get("geotransform")
+            if transform is None and alignment.get("transform") is not None:
+                transform = list(alignment["transform"].to_gdal())
+            terrain_grid = {
+                "geotransform": transform,
+                "width": alignment.get("width"),
+                "height": alignment.get("height"),
+            }
+
+    def to_pixel(point, layer_grid):
+        if perspective:
+            projected = projector.project(point)
+            return (float(projected[0]), float(projected[1]))
+        return _pick_grid_pixels(point, layer_grid or terrain_grid, width, height)
+
+    skipped = []
+    for index in range(len(recipe.layers) - 1, -1, -1):
+        layer = recipe.layers[index]
+        # `kind` is a *field* that these dataclasses leave None; the engine's
+        # own discriminant is `to_dict()["kind"]` (e.g. "vector_overlay").
+        kind = None
+        try:
+            kind = str(layer.to_dict().get("kind") or "")
+        except Exception:
+            kind = ""
+        kind = kind or layer.__class__.__name__
+        layer_id = str(getattr(layer, "layer_id", "") or kind)
+        grid = _metadata_dict(getattr(layer, "metadata", {})) or {}
+        grid = grid.get("preparation_grid")
+        if kind == "raster_overlay":
+            # A raster covers the terrain footprint (screen mode resizes it to
+            # the frame), so it is a hit anywhere inside the frame.
+            return {
+                "hit": True,
+                "index": index,
+                "layer_id": layer_id,
+                "kind": kind,
+                "distance_px": 0.0,
+                "mode": mode,
+                "note": "raster covers the map extent",
+            }
+        if kind == "vector_overlay":
+            features = getattr(layer, "features", None) or ()
+            if not features:
+                skipped.append({"layer_id": layer_id, "reason": "no inline features"})
+                continue
+            best = None
+            best_feature = None
+            for feature in features:
+                geometry = feature.get("geometry") if isinstance(feature, dict) else None
+                paths = []
+                for line in _lines_from_geometry(geometry):
+                    paths.append([to_pixel(point, grid) for point in line])
+                rings = [
+                    [to_pixel(point, grid) for point in ring]
+                    for ring in _rings_from_geometry(geometry)
+                ]
+                paths = [path for path in paths if len(path) >= 2 and None not in path]
+                rings = [ring for ring in rings if len(ring) >= 3 and None not in ring]
+                if any(_point_in_ring(x, y, ring) for ring in rings):
+                    return {
+                        "hit": True,
+                        "index": index,
+                        "layer_id": layer_id,
+                        "kind": kind,
+                        "feature_id": feature.get("id"),
+                        "distance_px": 0.0,
+                        "mode": mode,
+                    }
+                distance = _distance_to_segments(x, y, paths)
+                if distance is not None and (best is None or distance < best):
+                    best = distance
+                    best_feature = feature.get("id")
+            paint = _style_paint(layer.to_dict(), "line", "line-width") or 2.0
+            reach = tolerance + float(paint) * 0.5
+            if best is not None and best <= reach:
+                return {
+                    "hit": True,
+                    "index": index,
+                    "layer_id": layer_id,
+                    "kind": kind,
+                    "feature_id": best_feature,
+                    "distance_px": round(best, 2),
+                    "mode": mode,
+                }
+            continue
+        if kind == "label_layer":
+            grid = None
+            best = None
+            best_text = None
+            for label in getattr(layer, "labels", None) or ():
+                geometry = label.get("geometry") if isinstance(label, dict) else None
+                coords = (geometry or {}).get("coordinates") or []
+                if len(coords) < 2:
+                    continue
+                pixel = to_pixel(coords, grid)
+                if pixel is None:
+                    continue
+                distance = math.hypot(pixel[0] - x, pixel[1] - y)
+                if best is None or distance < best:
+                    best = distance
+                    best_text = label.get("text")
+            if best is not None and best <= tolerance + 18.0:
+                return {
+                    "hit": True,
+                    "index": index,
+                    "layer_id": layer_id,
+                    "kind": kind,
+                    "feature_id": best_text,
+                    "distance_px": round(best, 2),
+                    "mode": mode,
+                }
+            continue
+        skipped.append({"layer_id": layer_id, "reason": "this layer kind is not pickable yet"})
+    return {
+        "hit": False,
+        "mode": mode,
+        "reason": "no layer covers that point",
+        "skipped": skipped,
+        "point": [round(x, 1), round(y, 1)],
+    }
+
+
 def _op_mapscene_export_svg(p):
     """Export the recipe's vector and label layers as a print SVG.
 
@@ -3032,6 +3273,7 @@ _OPS = {
     "mapscene.furniture": _op_mapscene_furniture,
     "raster.classes": _op_raster_classes,
     "mapscene.export_svg": _op_mapscene_export_svg,
+    "mapscene.pick": _op_mapscene_pick,
     "colormaps.list": _op_colormaps_list,
     "presets.list": _op_presets_list,
     "presets.get": _op_presets_get,

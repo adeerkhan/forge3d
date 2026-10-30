@@ -300,9 +300,19 @@ pub fn carousel_dialog(studio: Entity<Studio>, window: &mut Window, cx: &mut App
                         .rounded(cx.theme().radius)
                         .bg(cx.theme().colors.muted)
                         .flex()
+                        .flex_col()
+                        .gap_1()
                         .items_center()
                         .justify_center()
-                        .child(muted("no thumbnail yet", cx))
+                        .px_2()
+                        .child(muted(
+                            if entry.tier == 'A' {
+                                "thumbnail not generated yet".to_owned()
+                            } else {
+                                format!("no thumbnail — this example needs {}", entry.unlock)
+                            },
+                            cx,
+                        ))
                         .into_any_element()
                 })
                 .child(
