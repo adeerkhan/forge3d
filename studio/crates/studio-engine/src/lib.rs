@@ -1888,11 +1888,33 @@ def _op_mapscene_template(p):
         ]
         line_color = str(p.get("line_color") or "#ffffff")
         line_width = float(p.get("line_width", 2.0))
+        # Registration grid for the vector layer. A GeoTIFF DEM gives one, and
+        # without it a screen-camera recipe treats geographic coordinates as
+        # already-projected pixels: both endpoints clamp to the same pixel and
+        # the line disappears. `preparation_grid` is the engine's own key for
+        # "these coordinates live on this raster grid" (see
+        # `preparation.PreparationScene.to_scene`).
+        vector_metadata = {"source_id": "studio-vector-overlay"}
+        if crs and dem_path:
+            try:
+                import rasterio
+
+                with rasterio.open(str(dem_path)) as _src:
+                    if _src.crs is not None and _src.transform is not None:
+                        vector_metadata["preparation_grid"] = {
+                            "crs": str(_src.crs),
+                            "geotransform": list(_src.transform.to_gdal()),
+                            "width": int(_src.width),
+                            "height": int(_src.height),
+                        }
+            except Exception:
+                vector_metadata.pop("preparation_grid", None)
         layers = [
             f3d.VectorOverlay(
                 layer_id="lines",
                 crs=crs,
                 features=features,
+                metadata=vector_metadata,
                 style={"version": 8, "layers": [
                     {
                         "id": "lines",
@@ -1903,7 +1925,6 @@ def _op_mapscene_template(p):
                         },
                     }
                 ]},
-                metadata={"source_id": "studio-vector-overlay"},
             ),
             f3d.LabelLayer(layer_id="labels", labels=labels),
         ]
@@ -2274,6 +2295,202 @@ def _op_raster_classes(p):
         "k": int(result["k"]),
         "class_table": result["class_table"],
         "legend_items": items,
+    }
+
+
+def _css_rgba(value, fallback=(1.0, 1.0, 1.0, 1.0)):
+    """Parse a CSS colour string into RGBA in 0..1 for the export scene."""
+    if value is None:
+        return fallback
+    if isinstance(value, (list, tuple)) and len(value) == 4:
+        return tuple(float(v) for v in value)
+    text = str(value).strip().lower()
+    named = {
+        "white": (1.0, 1.0, 1.0, 1.0),
+        "black": (0.0, 0.0, 0.0, 1.0),
+        "red": (1.0, 0.0, 0.0, 1.0),
+        "green": (0.0, 0.5, 0.0, 1.0),
+        "blue": (0.0, 0.0, 1.0, 1.0),
+        "orange": (1.0, 0.65, 0.0, 1.0),
+    }
+    if text in named:
+        return named[text]
+    if text.startswith("#"):
+        body = text[1:]
+        if len(body) == 3:
+            body = "".join(ch * 2 for ch in body)
+        if len(body) == 6:
+            return (
+                int(body[0:2], 16) / 255.0,
+                int(body[2:4], 16) / 255.0,
+                int(body[4:6], 16) / 255.0,
+                1.0,
+            )
+        if len(body) == 8:
+            return (
+                int(body[0:2], 16) / 255.0,
+                int(body[2:4], 16) / 255.0,
+                int(body[4:6], 16) / 255.0,
+                int(body[6:8], 16) / 255.0,
+            )
+    if text.startswith("rgb"):
+        inner = text[text.find("(") + 1 : text.rfind(")")]
+        parts = [part.strip() for part in inner.split(",")]
+        try:
+            numbers = [float(part) for part in parts]
+        except ValueError:
+            return fallback
+        if len(numbers) == 3:
+            numbers.append(1.0)
+        if len(numbers) == 4:
+            return tuple(max(0.0, min(1.0, number / 255.0)) for number in numbers[:3]) + (
+                max(0.0, min(1.0, numbers[3])),
+            )
+    return fallback
+
+
+def _style_paint(layer, entry_type, key):
+    """A paint property from the first style entry of `entry_type`."""
+    style = layer.get("style")
+    if not isinstance(style, dict):
+        return None
+    for entry in style.get("layers") or []:
+        if entry.get("type") != entry_type:
+            continue
+        paint = entry.get("paint")
+        if isinstance(paint, dict):
+            return paint.get(key)
+    return None
+
+
+def _rings_from_geometry(geometry):
+    """Exterior rings of a (Multi)Polygon geometry."""
+    if not isinstance(geometry, dict):
+        return []
+    kind = geometry.get("type")
+    if kind == "Polygon":
+        rings = geometry.get("coordinates") or []
+        return [rings[0]] if rings else []
+    if kind == "MultiPolygon":
+        return [polygon[0] for polygon in geometry.get("coordinates") or [] if polygon]
+    return []
+
+
+def _lines_from_geometry(geometry):
+    """Point lists of a (Multi)LineString geometry."""
+    if not isinstance(geometry, dict):
+        return []
+    kind = geometry.get("type")
+    if kind == "LineString":
+        return [geometry.get("coordinates") or []]
+    if kind == "MultiLineString":
+        return list(geometry.get("coordinates") or [])
+    return []
+
+
+def _op_mapscene_export_svg(p):
+    """Export the recipe's vector and label layers as a print SVG.
+
+    The map raster is not vectorised: this writes the *vector* content of the
+    recipe (polylines, polygons, labels) at the recipe's output size, with the
+    same paint the map used. `export_svg` is Pro-gated in the engine, so a
+    non-Pro install surfaces the engine's own error rather than a silent empty
+    file.
+    """
+    recipe = json.loads(p["recipe_json"])
+    out = str(p.get("out_svg") or "")
+    if not out:
+        raise RuntimeError("mapscene.export_svg requires out_svg")
+    output = recipe.get("output") or {}
+    width = int(p.get("width") or output.get("width") or 1920)
+    height = int(p.get("height") or output.get("height") or 1080)
+
+    from forge3d.export import Bounds, VectorScene, export_svg
+
+    scene = VectorScene()
+    counts = {"polylines": 0, "polygons": 0, "labels": 0}
+    skipped = []
+    points: list = []
+
+    def collect(coords):
+        for coord in coords or []:
+            if isinstance(coord, (list, tuple)) and len(coord) >= 2:
+                try:
+                    x, y = float(coord[0]), float(coord[1])
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(x) and math.isfinite(y):
+                    points.append((x, y))
+
+    for layer in recipe.get("layers") or []:
+        if layer.get("studio_visible") is False:
+            continue
+        kind = layer.get("kind")
+        if kind == "vector_overlay":
+            features = layer.get("features") or []
+            if not features:
+                skipped.append(
+                    {
+                        "layer": str(layer.get("layer_id") or "vector"),
+                        "reason": "vector layer has no inline features (sourced from a file)",
+                    }
+                )
+                continue
+            stroke = _css_rgba(_style_paint(layer, "line", "line-color"), (0.0, 0.0, 0.0, 1.0))
+            width_px = float(_style_paint(layer, "line", "line-width") or 2.0)
+            fill = _css_rgba(_style_paint(layer, "fill", "fill-color"), (0.2, 0.4, 0.8, 1.0))
+            for feature in features:
+                geometry = feature.get("geometry") if isinstance(feature, dict) else None
+                for line in _lines_from_geometry(geometry):
+                    path = [(float(c[0]), float(c[1])) for c in line if len(c) >= 2]
+                    if len(path) >= 2:
+                        scene.add_polyline(path, stroke, width_px)
+                        counts["polylines"] += 1
+                        collect(path)
+                for ring in _rings_from_geometry(geometry):
+                    path = [(float(c[0]), float(c[1])) for c in ring if len(c) >= 2]
+                    if len(path) >= 3:
+                        scene.add_polygon(path, None, fill, stroke, width_px)
+                        counts["polygons"] += 1
+                        collect(path)
+        elif kind == "label_layer":
+            for label in layer.get("labels") or []:
+                if not isinstance(label, dict):
+                    continue
+                text = str(label.get("text") or "")
+                geometry = label.get("geometry") or {}
+                coords = geometry.get("coordinates") or []
+                if not text or len(coords) < 2:
+                    continue
+                x, y = float(coords[0]), float(coords[1])
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    continue
+                scene.add_label(text, (x, y))
+                counts["labels"] += 1
+                points.append((x, y))
+
+    if not points:
+        raise RuntimeError(
+            "nothing to export: the recipe's vector and label layers carry no geometry"
+        )
+
+    bounds = Bounds.from_points(points)
+    padding = max(1.0, max(bounds.width, bounds.height) * 0.02)
+    export_svg(
+        scene,
+        out,
+        width=width,
+        height=height,
+        bounds=bounds.with_padding(padding),
+    )
+    return {
+        "path": out,
+        "bytes": os.path.getsize(out),
+        "width": width,
+        "height": height,
+        "counts": counts,
+        "skipped": skipped,
+        "bounds": [bounds.min_x, bounds.min_y, bounds.max_x, bounds.max_y],
     }
 
 
@@ -2752,6 +2969,7 @@ _OPS = {
     "mapscene.validate": _op_mapscene_validate,
     "mapscene.furniture": _op_mapscene_furniture,
     "raster.classes": _op_raster_classes,
+    "mapscene.export_svg": _op_mapscene_export_svg,
     "colormaps.list": _op_colormaps_list,
     "presets.list": _op_presets_list,
     "presets.get": _op_presets_get,

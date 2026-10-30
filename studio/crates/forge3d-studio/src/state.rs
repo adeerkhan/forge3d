@@ -488,6 +488,7 @@ pub enum PendingJob {
     MapSceneValidate,
     MapSceneRender { preview: bool },
     MapSceneFurniture { render_after: bool },
+    MapSceneExportSvg,
     RasterClasses,
     AtmosphereBake,
     AstroObserve,
@@ -615,6 +616,8 @@ pub struct Studio {
     persp_fov: f32,
     /// Dev hook bookkeeping so a smoke shot fires once, not per frame.
     pick_smoke_done: bool,
+    /// Recipe layer selected for styling in the cartography panel.
+    pub recipe_selected: Option<usize>,
     /// Ground point under the pointer, for the HUD readout.
     pub hover_ground: Option<(f32, f32)>,
     /// A still was requested, so the next bridge frame is presented even when
@@ -719,6 +722,7 @@ impl Studio {
             ortho: false,
             persp_fov: 54.0,
             pick_smoke_done: false,
+            recipe_selected: None,
             hover_ground: None,
             ui_timing: UiTiming::default(),
             focus_handle,
@@ -2837,9 +2841,12 @@ impl Studio {
             return;
         }
         self.preview_due = None;
-        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+        let Some((recipe, hidden)) = self.render_recipe() else {
             return;
         };
+        if hidden > 0 {
+            log::info!("preview: {hidden} hidden layer(s) stripped from the render");
+        }
         let (width, height) = self.mapscene_preview_size();
         let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&recipe) else {
             return;
@@ -2875,6 +2882,17 @@ impl Studio {
     }
 
     // ------------------------------------------------------------ recipe layers
+
+    /// The recipe the renderer should receive: hidden layers stripped, plus how
+    /// many were hidden. The stored recipe keeps every layer (the panel still
+    /// lists them), so hiding is a Studio-side fact about the recipe copy, not a
+    /// field the engine never learned about.
+    fn render_recipe(&self) -> Option<(String, usize)> {
+        self.mapscene
+            .recipe_json
+            .as_deref()
+            .map(crate::ui::recipe::visible_recipe)
+    }
 
     /// The recipe's layers, in paint order, for the cartography panel.
     pub fn recipe_layers(&self) -> Vec<crate::ui::recipe::RecipeLayer> {
@@ -2932,6 +2950,57 @@ impl Studio {
             "This layer kind has no opacity in the recipe",
             cx,
         );
+    }
+
+    /// Show or hide one recipe layer. Hidden layers stay in the saved recipe and
+    /// in the layer list; only the copy the renderer receives drops them.
+    pub fn set_recipe_layer_visible(
+        &mut self,
+        index: usize,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_recipe(
+            |recipe| crate::ui::recipe::set_layer_visible(recipe, index, visible),
+            "That layer is no longer in the recipe",
+            cx,
+        );
+        let label = self
+            .recipe_layers()
+            .iter()
+            .filter(|layer| !layer.visible)
+            .count();
+        self.set_status(if label == 0 {
+            "All recipe layers visible".to_owned()
+        } else {
+            format!("{label} layer(s) hidden")
+        });
+    }
+
+    /// Restyle a vector layer's line. Refused (with a reason) on layers whose
+    /// style has no line entry — a raster or a label layer.
+    pub fn set_recipe_vector_style(
+        &mut self,
+        index: usize,
+        color: Option<String>,
+        width: Option<f32>,
+        cx: &mut Context<Self>,
+    ) {
+        self.patch_recipe(
+            |recipe| crate::ui::recipe::set_vector_style(recipe, index, color.as_deref(), width),
+            "This layer has no line style in the recipe",
+            cx,
+        );
+    }
+
+    /// The recipe layer being styled in the cartography panel.
+    pub fn select_recipe_layer(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.recipe_selected = if self.recipe_selected == Some(index) {
+            None
+        } else {
+            Some(index)
+        };
+        cx.notify();
     }
 
     /// Output size for the render, applied to the recipe and the project.
@@ -3114,6 +3183,47 @@ impl Studio {
         self.render_mapscene_to(out, true, cx);
     }
 
+    /// Cartography ▸ Export SVG…: write the recipe's vector and label layers as
+    /// print SVG. `export_svg` is Pro-gated in the engine, so a non-Pro install
+    /// shows the engine's own licence error rather than an empty file.
+    pub fn export_svg(&mut self, cx: &mut Context<Self>) {
+        if self.mapscene.recipe_json.is_none() {
+            self.push_error("Cartography", "build a MapScene recipe first");
+            return;
+        }
+        let directory = std::env::current_dir().unwrap_or_default();
+        let name = format!("{}.svg", slug(&self.project.name));
+        let rx = cx.prompt_for_new_path(&directory, Some(&name));
+        cx.spawn(async move |this, cx| {
+            let picked = one_path(rx.await.ok().and_then(|result| result.ok()));
+            if let Some(path) = picked {
+                let _ = this.update(cx, |this, cx| this.export_svg_to(path, cx));
+            }
+        })
+        .detach();
+    }
+
+    fn export_svg_to(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some((recipe, hidden)) = self.render_recipe() else {
+            self.push_error("Cartography", "build a MapScene recipe first");
+            return;
+        };
+        if hidden > 0 {
+            log::info!("svg export: {hidden} hidden layer(s) skipped");
+        }
+        let job = self.engine.call(
+            "mapscene.export_svg",
+            serde_json::json!({
+                "recipe_json": recipe,
+                "out_svg": path.to_string_lossy(),
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::MapSceneExportSvg);
+        self.busy = true;
+        self.set_status(format!("Writing SVG to {}…", path.display()));
+        cx.notify();
+    }
+
     /// Cartography ▸ Export map…: render the recipe straight to a file.
     pub fn export_map(&mut self, cx: &mut Context<Self>) {
         if self.mapscene.recipe_json.is_none() {
@@ -3133,7 +3243,7 @@ impl Studio {
     }
 
     fn render_mapscene_to(&mut self, path: PathBuf, present: bool, cx: &mut Context<Self>) {
-        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+        let Some((recipe, hidden)) = self.render_recipe() else {
             self.push_error("MapScene", "build a recipe first");
             return;
         };
@@ -3142,6 +3252,9 @@ impl Studio {
             self.project.export.width,
             self.project.export.height
         );
+        if hidden > 0 {
+            log::info!("render: {hidden} hidden layer(s) stripped from the render");
+        }
         self.busy = true;
         self.preview_due = None;
         self.preview_pending = false;
@@ -4031,7 +4144,7 @@ impl Studio {
                             log::info!(
                                 "recipe smoke: {} layer(s) — {:?}",
                                 layers.len(),
-                                layers.iter().map(|layer| layout_label(layer)).collect::<Vec<_>>()
+                                layers.iter().map(layout_label).collect::<Vec<_>>()
                             );
                             self.set_output_size(1280, 720, cx);
                             log::info!(
@@ -4041,14 +4154,65 @@ impl Studio {
                                     .as_deref()
                                     .and_then(crate::ui::recipe::output_size)
                             );
+                            // (legend: only meaningful with a raster overlay)
                             self.legend_from_raster(cx);
+                            // Visibility: hide the first layer, confirm the
+                            // renderer's copy drops it while the recipe keeps it.
                             if !layers.is_empty() {
-                                self.remove_recipe_layer(0, cx);
+                                self.set_recipe_layer_visible(0, false, cx);
+                                let stored = self.recipe_layers().len();
+                                let (rendered, hidden) = self
+                                    .render_recipe()
+                                    .map(|(recipe, hidden)| {
+                                        (crate::ui::recipe::layer_list(&recipe).len(), hidden)
+                                    })
+                                    .unwrap_or((0, 0));
+                                log::info!(
+                                    "recipe smoke: hidden -> stored {stored} layer(s), rendered {rendered} (stripped {hidden})"
+                                );
+                                self.set_recipe_layer_visible(0, true, cx);
+                            }
+                            // Removal is destructive, so it runs on the *top*
+                            // layer first: the vector under test stays put and
+                            // the last preview still shows the styled line.
+                            let removable = self.recipe_layers().len().saturating_sub(1);
+                            if self.recipe_layers().len() > 1 {
+                                self.remove_recipe_layer(removable, cx);
                                 log::info!(
                                     "recipe smoke: after remove, {} layer(s)",
                                     self.recipe_layers().len()
                                 );
                             }
+                            // Post-build vector styling, on the first layer that
+                            // actually carries a line paint.
+                            let styled = self
+                                .recipe_layers()
+                                .iter()
+                                .find(|layer| layer.line_color.is_some())
+                                .map(|layer| layer.index);
+                            match styled {
+                                Some(index) => {
+                                    self.set_recipe_vector_style(
+                                        index,
+                                        Some("#ff8800".to_owned()),
+                                        Some(6.0),
+                                        cx,
+                                    );
+                                    self.select_recipe_layer(index, cx);
+                                    let layer = &self.recipe_layers()[index];
+                                    log::info!(
+                                        "recipe smoke: styled {} -> {:?} / {:?}",
+                                        layer.label(),
+                                        layer.line_color,
+                                        layer.line_width
+                                    );
+                                }
+                                None => log::info!("recipe smoke: no vector layer to style"),
+                            }
+                            // SVG export goes through the bridge (Pro-gated); it
+                            // runs last so the styled recipe is what it writes.
+                            let svg = std::env::temp_dir().join("studio-recipe-smoke.svg");
+                            self.export_svg_to(svg, cx);
                         }
                         if let Ok(path) = std::env::var("FORGE3D_STUDIO_SAVE_SMOKE") {
                             self.write_project(Path::new(&path), cx);
@@ -4164,6 +4328,14 @@ impl Studio {
                         self.preview_size.0, self.preview_size.1, elapsed
                     ));
                     if let Some(path) = png {
+                        if let Ok(copy) = std::env::var("FORGE3D_STUDIO_PREVIEW_COPY") {
+                            // Dev hook: keep a copy, so a styling change can be
+                            // compared with the frame it produced.
+                            match std::fs::copy(&path, &copy) {
+                                Ok(_) => log::info!("preview copied to {copy}"),
+                                Err(error) => log::warn!("preview copy failed: {error}"),
+                            }
+                        }
                         if self.present_png(&path) {
                             log::info!(
                                 "preview received: {width}×{height} in {elapsed:.0} ms",
@@ -4197,6 +4369,39 @@ impl Studio {
                     }
                     self.set_status("MapScene frame rendered");
                 }
+            }
+            PendingJob::MapSceneExportSvg => {
+                self.busy = false;
+                let counts = result.get("counts").cloned().unwrap_or_default();
+                let number = |key: &str| {
+                    counts
+                        .get(key)
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0)
+                };
+                let skipped = result
+                    .get("skipped")
+                    .and_then(|value| value.as_array())
+                    .map(|items| items.len())
+                    .unwrap_or(0);
+                let message = format!(
+                    "SVG written: {} polyline(s), {} polygon(s), {} label(s), {} bytes{}",
+                    number("polylines"),
+                    number("polygons"),
+                    number("labels"),
+                    result
+                        .get("bytes")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    if skipped > 0 {
+                        format!(" ({skipped} layer(s) skipped: no inline geometry)")
+                    } else {
+                        String::new()
+                    }
+                );
+                log::info!("{message}");
+                self.set_status(message);
+                cx.notify();
             }
             PendingJob::RasterClasses => {
                 let items: Vec<String> = result

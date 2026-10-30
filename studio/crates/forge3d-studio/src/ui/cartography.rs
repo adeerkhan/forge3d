@@ -19,12 +19,12 @@ use crate::state::Studio;
 
 const POSITIONS: &[&str] = &["top-left", "top-right", "bottom-left", "bottom-right"];
 
-fn section(title: &'static str, cx: &App) -> AnyElement {
+fn section(title: impl Into<SharedString>, cx: &App) -> AnyElement {
     div()
         .text_xs()
         .font_semibold()
         .text_color(cx.theme().colors.muted_foreground)
-        .child(title)
+        .child(title.into())
         .into_any_element()
 }
 
@@ -105,17 +105,19 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
         .and_then(crate::ui::recipe::output_size)
         .unwrap_or((0, 0));
     let has_raster = studio.read(cx).mapscene.raster_path.is_some();
+    let selected = studio
+        .read(cx)
+        .recipe_selected
+        .and_then(|index| layers.iter().find(|layer| layer.index == index).cloned());
 
     let mut body = v_flex().w_full().gap_3();
 
     // ---- recipe layers: the scene's paint order, editable
     body = body.child(section(
         if layer_count == 0 {
-            "Recipe layers"
-        } else if layer_count == 1 {
-            "Recipe layers (1)"
+            "Recipe layers".to_owned()
         } else {
-            "Recipe layers (2+)"
+            format!("Recipe layers ({layer_count})")
         },
         cx,
     ));
@@ -133,17 +135,55 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
         let studio_remove = studio.clone();
         let studio_less = studio.clone();
         let studio_more = studio.clone();
+        let studio_eye = studio.clone();
+        let studio_select = studio.clone();
         let opacity = layer.opacity;
+        let visible = layer.visible;
+        let is_selected = selected.as_ref().map(|row| row.index) == Some(index);
         rows = rows.child(
             h_flex()
                 .justify_between()
                 .gap_2()
                 .py(px(1.))
+                .when(is_selected, |row| row.bg(cx.theme().colors.secondary))
                 .child(
                     h_flex()
                         .gap_1()
                         .items_center()
-                        .child(div().text_xs().child(layer.kind_label()))
+                        .child(
+                            Button::new(format!("layer-eye-{index}"))
+                                .icon(if visible {
+                                    IconName::Eye
+                                } else {
+                                    IconName::EyeOff
+                                })
+                                .xsmall()
+                                .ghost()
+                                .tooltip(if visible {
+                                    "Hide this layer (it stays in the recipe)"
+                                } else {
+                                    "Show this layer"
+                                })
+                                .on_click(move |_, _, cx| {
+                                    studio_eye.update(cx, |studio, cx| {
+                                        studio.set_recipe_layer_visible(index, !visible, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(format!("layer-select-{index}"))
+                                .label(layer.kind_label())
+                                .xsmall()
+                                .when(is_selected, |button| button.primary())
+                                .when(!is_selected, |button| button.ghost())
+                                .tooltip("Select to style this layer")
+                                .on_click(move |_, _, cx| {
+                                    studio_select.update(cx, |studio, cx| {
+                                        studio.select_recipe_layer(index, cx)
+                                    });
+                                }),
+                        )
+                        .when(!visible, |row| row.opacity(0.55))
                         .child(
                             div()
                                 .text_xs()
@@ -240,6 +280,103 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
         );
     }
     body = body.child(rows);
+
+    // ---- per-layer style (post-build), for the selected layer
+    if let Some(layer) = selected.as_ref() {
+        let index = layer.index;
+        body = body.child(section(format!("Style · {}", layer.label()), cx));
+        match (layer.line_color.clone(), layer.line_width) {
+            (Some(color), Some(width)) => {
+                let mut chips = h_flex().flex_wrap().gap_1();
+                for (name, value) in [
+                    ("white", "#ffffff"),
+                    ("ink", "#111827"),
+                    ("orange", "#ff8800"),
+                    ("cyan", "#22d3ee"),
+                    ("rose", "#f43f5e"),
+                ] {
+                    let studio_chip = studio.clone();
+                    let value_owned = value.to_owned();
+                    let active = color.eq_ignore_ascii_case(value);
+                    chips = chips.child(
+                        Button::new(format!("style-{index}-{name}"))
+                            .label(name)
+                            .xsmall()
+                            .when(active, |button| button.primary())
+                            .when(!active, |button| button.outline())
+                            .tooltip(format!("Line colour {value}"))
+                            .on_click(move |_, _, cx| {
+                                let value = value_owned.clone();
+                                studio_chip.update(cx, |studio, cx| {
+                                    studio.set_recipe_vector_style(index, Some(value), None, cx)
+                                });
+                            }),
+                    );
+                }
+                let studio_thin = studio.clone();
+                let studio_thick = studio.clone();
+                body = body
+                    .child(chips)
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(div().text_xs().child("Width"))
+                            .child(
+                                Button::new(format!("style-{index}-thin"))
+                                    .label("−")
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Thinner line")
+                                    .on_click(move |_, _, cx| {
+                                        studio_thin.update(cx, |studio, cx| {
+                                            studio.set_recipe_vector_style(
+                                                index,
+                                                None,
+                                                Some((width - 0.5).max(0.5)),
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .w(px(48.))
+                                    .text_xs()
+                                    .text_center()
+                                    .child(format!("{width:.1} px")),
+                            )
+                            .child(
+                                Button::new(format!("style-{index}-thick"))
+                                    .label("+")
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Thicker line")
+                                    .on_click(move |_, _, cx| {
+                                        studio_thick.update(cx, |studio, cx| {
+                                            studio.set_recipe_vector_style(
+                                                index,
+                                                None,
+                                                Some((width + 0.5).min(24.0)),
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            ),
+                    )
+                    .child(hint(
+                        "Written into the recipe's Mapbox line paint; the next preview redraws with it.",
+                        cx,
+                    ));
+            }
+            _ => {
+                body = body.child(hint(
+                    "This layer kind has no line paint to edit — raster opacity is in the layer row above.",
+                    cx,
+                ));
+            }
+        }
+    }
 
     // ---- output size
     body = body.child(section("Output", cx));
@@ -521,6 +658,22 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
                         studio_export.update(cx, |studio, cx| studio.export_map(cx));
                     }),
             )
+            .child({
+                let studio_svg = studio.clone();
+                Button::new("map-export-svg")
+                    .label("Export SVG…")
+                    .xsmall()
+                    .outline()
+                    .disabled(!has_recipe)
+                    .tooltip(if has_recipe {
+                        "Write the recipe's vector and label layers as print SVG (Pro)"
+                    } else {
+                        "Build the recipe first"
+                    })
+                    .on_click(move |_, _, cx| {
+                        studio_svg.update(cx, |studio, cx| studio.export_svg(cx));
+                    })
+            })
             .when(!has_recipe, |row| {
                 row.child(hint("build a recipe first", cx))
             }),

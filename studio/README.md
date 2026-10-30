@@ -7,9 +7,12 @@ specification (Part X is the UI-runtime workstream) and [Status](#status) for
 where the implementation stands.
 
 **This is fork-only work**: the GUI lives here and is not intended for
-upstream pull requests. The only intentional engine change is
+upstream pull requests. The intentional engine changes are
 `TerrainScene::clear_viewer_terrain` (`src/terrain/renderer/viewer.rs`), a
-small additive method kept documented for upstream symmetry.
+small additive method kept documented for upstream symmetry, and the Studio
+bridge's `mapscene.template` (`crates/studio-engine/src/lib.rs`), which now
+registers the vector layer to the DEM grid (`preparation_grid`) so its line is
+projected instead of clamped away.
 
 ## Architecture
 
@@ -191,17 +194,34 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
-- [x] **P3 · cartography depth (core)** — the cartography tab lists the
-      recipe's layers in paint order with remove, move-earlier/later and an
-      opacity stepper where the layer carries one; output presets
-      (960×600 … 2560×1440) resize the recipe and the project; and **Legend
-      from raster…** classifies the overlay with the engine's own
-      `raster.classes` op (categorical → one entry per class, continuous →
-      quantile ranges) and fills the legend from the data instead of typed
-      swatches. Each change re-previews (P1). Still open: post-build vector/fill
-      styling (line colour/width are template-time today), layer visibility
-      (recipe layers have no `visible` field), and SVG/PDF export (the engine
-      can, but no bridge op exposes it yet).
+- [x] **P3 · cartography depth** — the cartography tab lists the recipe's
+      layers in paint order with an eye toggle, remove, move-earlier/later and
+      an opacity stepper where the layer carries one; selecting a row opens its
+      post-build style (line colour chips, line width ±) which patches the
+      recipe's Mapbox line paint and re-previews; output presets
+      (960×600 … 2560×1440) resize the recipe and the project; **Legend from
+      raster…** classifies the overlay with the engine's own `raster.classes`
+      op (categorical → one entry per class, continuous → quantile ranges); and
+      **Export SVG…** writes the vector and label layers through
+      `mapscene.export_svg` → `forge3d.export.export_svg`. Each change
+      re-previews (P1).
+      - Visibility is a Studio-side flag (`studio_visible: false` on the layer)
+        because the engine's layer schema has no visibility field: the flag
+        survives save/reopen, the panel lists hidden rows, and the copy handed
+        to the renderer has them stripped.
+      - SVG export is **Pro-gated in the engine**; without a licence the panel
+        shows the engine's own `LicenseError`, not an empty file.
+      - Fork change (bridge `mapscene.template`, `terrain_vector_labels`): the
+        vector layer now carries `preparation_grid` (CRS, GDAL transform, grid
+        size) from the DEM. Without it a screen-camera recipe treats geographic
+        coordinates as already-projected pixels, clamps both endpoints to one
+        pixel and the line vanishes — the template drew *no line at all* before
+        this.
+      - Verified by pixels, not by compiling: `studio/scripts/check_style_pixels.py`
+        renders the same recipe twice with only the paint changed and reports
+        `2436 px differ (3.8%), max channel delta 255`; the styled preview
+        (`FORGE3D_STUDIO_PREVIEW_COPY`) shows the orange 6 px line.
+      Still open: fill styling (polygons), and PDF export (needs `cairosvg`).
 - [x] **P2 · selection & viewport parity** — click (not drag) picks the ground
       point under the cursor, moves the orbit target there and selects the
       terrain row, so the 3D view drives the outliner; hovering shows ground
@@ -231,10 +251,9 @@ UI runtime (GUI.md Part X):
       reads a built recipe's furniture back instead of keeping its own copy.
       The furniture is the engine's `MapFurnitureLayer`, so it is drawn over
       the finished frame with label keep-outs, not faked in the viewport.
-      Vector scenes expose line colour/width, and **Export map…** renders the
-      recipe straight to a chosen PNG. Auto-derived legends (classifying the
-      raster instead of typing swatches) are the next step and need a
-      raster-classes op.
+      Vector scenes expose line colour/width at template time, and
+      **Export map…** renders the recipe straight to a chosen PNG. (Post-build
+      styling, visibility and SVG export landed in P3.)
 - [x] **G11 Blender-shaped shell** — workspace tabs, one editor per dock slot,
       a properties icon strip (Layer, Terrain, Render, World, Scene,
       Statistics), outliner icon tabs (Layers/Examples), bottom strip
