@@ -1,3 +1,9 @@
+// STUDIO-FORK: `Atomic::fetch_update` is deprecated on Rust 1.99 in favour of
+// `try_update`, which older toolchains do not have. Suppress the rename here
+// rather than pinning the repository to one compiler; the semantics are
+// identical, so the ledger code is unchanged.
+#![allow(deprecated)]
+
 use super::helpers::calculate_texture_size;
 use super::MEMORY_BUDGET_LIMIT;
 use crate::core::error::RenderError;

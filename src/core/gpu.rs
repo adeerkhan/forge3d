@@ -251,6 +251,25 @@ fn backend_env_description() -> String {
     }
 }
 
+/// Power preference for adapter selection.
+///
+/// Default stays `LowPower` (upstream behaviour: faster resolve, no discrete
+/// probing on macOS). `FORGE3D_GPU_POWER=high` asks the driver for the
+/// high-performance adapter instead, which is what a desktop workbench wants —
+/// a dual-adapter laptop otherwise renders on the integrated GPU while the UI
+/// composites on the discrete one, and every frame crosses PCIe.
+pub fn power_preference() -> wgpu::PowerPreference {
+    match std::env::var("FORGE3D_GPU_POWER")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "high" | "highperformance" | "discrete" => wgpu::PowerPreference::HighPerformance,
+        "low" | "lowpower" | "integrated" => wgpu::PowerPreference::LowPower,
+        _ => wgpu::PowerPreference::LowPower,
+    }
+}
+
 /// Fallible GPU context acquisition.
 ///
 /// Tries a hardware adapter first; when none is available it retries with
@@ -322,8 +341,10 @@ pub fn try_ctx() -> RenderResult<&'static GpuContext> {
             candidates.into_iter().next().map(|(_, adapter)| adapter)
         } else {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                // LowPower tends to resolve faster and avoids eGPU/discrete probing on macOS
-                power_preference: wgpu::PowerPreference::LowPower,
+                // Default LowPower resolves faster and avoids eGPU/discrete
+                // probing on macOS; FORGE3D_GPU_POWER=high opts into the
+                // discrete adapter (see `power_preference`).
+                power_preference: power_preference(),
                 compatible_surface: None,
                 force_fallback_adapter: false,
             }))
@@ -333,7 +354,7 @@ pub fn try_ctx() -> RenderResult<&'static GpuContext> {
             None => {
                 let fallback =
                     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                        power_preference: wgpu::PowerPreference::LowPower,
+                        power_preference: power_preference(),
                         compatible_surface: None,
                         force_fallback_adapter: true,
                     }));

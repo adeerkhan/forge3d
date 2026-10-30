@@ -4,6 +4,13 @@
 //! Terrain material VT writes feedback entries directly from the render shader,
 //! then this buffer stages the data back to the CPU for residency updates.
 
+// STUDIO-FORK: `Atomic::fetch_update` is deprecated on Rust 1.99 in favour of
+// `try_update`, which older toolchains do not have. Suppress the rename here
+// rather than pinning the repository to one compiler; the semantics are
+// identical, so the ledger code is unchanged.
+#![allow(deprecated)]
+
+
 use crate::core::resource_tracker::{tracked_create_buffer, TrackedBuffer};
 use crate::core::tile_cache::TileId;
 use bytemuck::{Pod, Zeroable};
