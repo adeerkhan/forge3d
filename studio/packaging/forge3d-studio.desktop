@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Forge3D Studio
+GenericName=Terrain and map workbench
+Comment=Render, compose and export Forge3D terrain and maps
+Exec=forge3d-studio %f
+Icon=forge3d-studio
+Terminal=false
+Categories=Graphics;Science;Geography;
+MimeType=image/tiff;application/x-forge3d-project;
+StartupNotify=true
+StartupWMClass=forge3d-studio

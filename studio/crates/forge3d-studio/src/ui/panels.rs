@@ -454,6 +454,14 @@ pub fn statistics(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> 
                         "current"
                     },
                     cx,
+                ))
+                .child(field(
+                    "Startup",
+                    match state.startup_ms {
+                        Some(ms) => format!("{ms:.0} ms to first frame"),
+                        None => "building…".to_owned(),
+                    },
+                    cx,
                 )),
         )
         .child(

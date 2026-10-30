@@ -618,6 +618,12 @@ pub struct Studio {
     pick_smoke_done: bool,
     /// Recipe layer selected for styling in the cartography panel.
     pub recipe_selected: Option<usize>,
+    /// Milliseconds from process start to the first painted frame, shown in
+    /// Statistics so the startup budget is a visible number, not a feeling.
+    pub startup_ms: Option<f32>,
+    /// `FORGE3D_STUDIO_PREVIEW_SMOKE=n`: render `n` previews back to back and
+    /// log each duration, so preview latency is measured by the real path.
+    preview_smoke_left: u32,
     /// Ground point under the pointer, for the HUD readout.
     pub hover_ground: Option<(f32, f32)>,
     /// A still was requested, so the next bridge frame is presented even when
@@ -723,6 +729,11 @@ impl Studio {
             persp_fov: 54.0,
             pick_smoke_done: false,
             recipe_selected: None,
+            startup_ms: None,
+            preview_smoke_left: std::env::var("FORGE3D_STUDIO_PREVIEW_SMOKE")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
             hover_ground: None,
             ui_timing: UiTiming::default(),
             focus_handle,
@@ -2869,6 +2880,7 @@ impl Studio {
                 "recipe_json": parsed.to_string(),
                 "out_png": out.to_string_lossy(),
                 "certificate": false,
+                "reuse_terrain": !terrain_reuse_disabled(),
             }),
         );
         self.pending_jobs
@@ -3264,6 +3276,7 @@ impl Studio {
                 "recipe_json": recipe,
                 "out_png": path.to_string_lossy(),
                 "certificate": self.sign_renders,
+                "reuse_terrain": !terrain_reuse_disabled(),
             }),
         );
         self.pending_jobs
@@ -3700,6 +3713,13 @@ impl Studio {
                 self.frame = None;
             }
             ViewportEvent::Frame(frame) => {
+                if self.startup_ms.is_none() {
+                    if let Some(started) = crate::STARTED.get() {
+                        let ms = started.elapsed().as_secs_f32() * 1000.0;
+                        self.startup_ms = Some(ms);
+                        log::info!("first frame {ms:.0} ms after process start");
+                    }
+                }
                 if std::env::var_os("FORGE3D_STUDIO_PICK_SMOKE").is_some() && !self.pick_smoke_done
                 {
                     // Dev hook: one click below the middle of the viewport (on
@@ -4338,15 +4358,25 @@ impl Studio {
                         }
                         if self.present_png(&path) {
                             log::info!(
-                                "preview received: {width}×{height} in {elapsed:.0} ms",
+                                "preview received: {width}×{height} in {elapsed:.0} ms (terrain renderer reused: {reused})",
                                 width = self.preview_size.0,
-                                height = self.preview_size.1
+                                height = self.preview_size.1,
+                                reused = result
+                                    .get("terrain_reused")
+                                    .and_then(|value| value.as_bool())
+                                    .unwrap_or(false)
                             );
                             self.viewport_image = ViewportImage::Preview;
                             self.set_status(format!(
                                 "Preview {}×{} · {:.0} ms",
                                 self.preview_size.0, self.preview_size.1, elapsed
                             ));
+                            if self.preview_smoke_left > 0 {
+                                // Measure the *next* preview through the same
+                                // path an edit takes, with no debounce.
+                                self.preview_smoke_left -= 1;
+                                self.preview_due = Some(std::time::Instant::now());
+                            }
                         }
                     }
                     // An edit landed while this was rendering: render once more.
@@ -4661,6 +4691,12 @@ pub fn terrain_span(height_min: f32, height_max: f32) -> f32 {
 /// Camera distance that frames a terrain of this world span.
 pub fn fit_radius(span: f32) -> f32 {
     (span * 1.65).clamp(60.0, 400_000.0)
+}
+
+/// `FORGE3D_STUDIO_NO_TERRAIN_REUSE=1` renders with a cold terrain renderer,
+/// which is the A/B arm for the reuse measurement.
+fn terrain_reuse_disabled() -> bool {
+    std::env::var_os("FORGE3D_STUDIO_NO_TERRAIN_REUSE").is_some()
 }
 
 /// One-line label for a recipe layer, for the debug hooks.

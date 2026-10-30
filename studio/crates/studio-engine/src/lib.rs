@@ -2161,17 +2161,78 @@ def _op_determinism_check(p):
     sha_b = hashlib.sha256(open(out_b, "rb").read()).hexdigest()
     return {"sha_a": sha_a, "sha_b": sha_b, "match": sha_a == sha_b}
 
+# One terrain renderer per terrain, reused across consecutive renders.
+#
+# The engine builds a `Session` + `TerrainRenderer` + `MaterialSet` per render
+# (~0.7 s for a 2594^2 DEM), which is why a 2 s preview spent a third of the
+# time rebuilding the same pipelines. `_shared_terrain_render_context` is the
+# engine's own mechanism for exactly this (`chronos.render_flythrough` uses it
+# so a multi-frame run pays setup once); renders inside it are byte-identical
+# to cold ones (verified: same PNG sha256), so nothing about determinism or
+# certificates changes. The context is dropped when the terrain changes or a
+# render fails, so a broken render never leaves half-built GPU state behind.
+_TERRAIN_CONTEXT = {"key": None, "handle": None}
+
+
+def _terrain_key(recipe_data):
+    """Identity of the terrain a render needs: path, CRS and source kind."""
+    terrain = recipe_data.get("terrain") or {}
+    path = terrain.get("path")
+    if path:
+        return ("path", str(path), str(terrain.get("crs") or ""))
+    data = terrain.get("data")
+    if data:
+        return ("inline", str(data.get("values"))[:64], str(data.get("dtype")))
+    return ("unknown",)
+
+
+def _close_terrain_context():
+    handle = _TERRAIN_CONTEXT.get("handle")
+    _TERRAIN_CONTEXT["handle"] = None
+    _TERRAIN_CONTEXT["key"] = None
+    if handle is not None:
+        try:
+            handle.__exit__(None, None, None)
+        except Exception:
+            pass
+
+
+def _terrain_context_for(key):
+    """Enter (or reuse) the shared context; returns True when reused."""
+    reused = _TERRAIN_CONTEXT.get("handle") is not None and _TERRAIN_CONTEXT.get("key") == key
+    if reused:
+        return True
+    _close_terrain_context()
+    from forge3d.map_scene import _shared_terrain_render_context
+
+    handle = _shared_terrain_render_context()
+    handle.__enter__()
+    _TERRAIN_CONTEXT["key"] = key
+    _TERRAIN_CONTEXT["handle"] = handle
+    return False
+
+
 def _op_mapscene_render(p):
     """Render a recipe JSON through MapScene.render (the certified path)."""
     recipe_data = json.loads(p["recipe_json"])
     recipe = f3d.MapScene._recipe_from_dict(recipe_data)
     scene = f3d.MapScene(recipe=recipe)
+    key = _terrain_key(recipe_data)
+    if p.get("reuse_terrain", True):
+        reused = _terrain_context_for(key)
+    else:
+        # A/B switch and escape hatch: a cold renderer every time.
+        _close_terrain_context()
+        reused = False
     try:
         report = scene.render(
             path=str(p["out_png"]),
             certificate=bool(p.get("certificate", False)),
         )
     except Exception as exc:
+        # A failed render drops the shared renderer rather than keeping state
+        # that may be part of why it failed.
+        _close_terrain_context()
         # Surface the engine's validation report with the failure: the UI
         # shows these codes next to the recipe.
         dbg = {"error": str(exc)}
@@ -2201,6 +2262,7 @@ def _op_mapscene_render(p):
         "backend": str(scene.last_render_backend),
         "diagnostics": diagnostics,
         "metadata": metadata,
+        "terrain_reused": reused,
     }
 
 

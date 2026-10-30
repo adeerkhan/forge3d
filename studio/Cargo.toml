@@ -11,6 +11,24 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR MIT"
 
+# The shipped binary is stripped: debug symbols are 20+ MiB of the 86 MiB and
+# nothing in the workbench reads them at runtime. `strip` is cheap (no LTO, no
+# codegen-units change), so the release build stays a ~48 s incremental.
+# Backtraces from a released build still carry addresses; use a debug build to
+# symbolise.
+[profile.release]
+strip = "symbols"
+
+# Middle ground for iteration: optimised enough to measure real frame times
+# (~6-10 ms instead of 24 ms), but without the release build's full cost.
+# `cargo build --profile devopt -p forge3d-studio`.
+[profile.devopt]
+inherits = "release"
+opt-level = 1
+lto = "off"
+codegen-units = 16
+strip = "symbols"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

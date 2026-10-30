@@ -14,6 +14,22 @@ bridge's `mapscene.template` (`crates/studio-engine/src/lib.rs`), which now
 registers the vector layer to the DEM grid (`preparation_grid`) so its line is
 projected instead of clamped away.
 
+## Running it
+
+```bash
+cargo build --release -p forge3d-studio     # 48 s incremental, 2 m 17 s cold
+./target/release/forge3d-studio path/to/dem.tif
+
+cargo build --profile devopt -p forge3d-studio   # 3 s incremental, 4.0 ms frames
+./target/devopt/forge3d-studio path/to/dem.tif
+
+studio/packaging/install.sh                     # desktop entry + icon + PATH
+```
+
+`cargo run` builds the **debug** profile: the app runs, but frames take
+~24 ms instead of ~4 ms and MapScene renders are slower too. Use `devopt`
+while editing and `--release` for the executable you keep.
+
 ## Architecture
 
 ```text
@@ -194,6 +210,29 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P4 · perceived speed and a real executable** — the two things that
+      actually felt slow, measured and fixed.
+      - **Every edit rendered 1.5 s twice.** A MapScene render built a fresh
+        `Session` + `TerrainRenderer` + `MaterialSet` (0.7 s incl. reading the
+        2594² DEM again) before drawing anything, and previews pay that on
+        *every* edit. The bridge now holds the engine's own
+        `_shared_terrain_render_context` (the mechanism `chronos.render_flythrough`
+        uses for multi-frame runs) across consecutive renders of the same
+        terrain, dropping it when the terrain changes or a render fails.
+        Same binary, same recipe, A/B: cold **2562 / 1645 / 1557 / 1515** ms vs
+        reused **2563 / 833 / 847 / 878** ms — **1.8× faster per edit**, output
+        byte-identical (same PNG sha256 cold and warm), so certificates and
+        determinism are untouched.
+      - **`cargo run` was the slow part, not Rust.** Debug builds render at
+        median **23.6 ms**/frame; release at **6.2 ms**; the new `devopt`
+        profile at **4.0 ms**. A new `devopt` profile (opt-level 1, no LTO)
+        rebuilds in **3.0 s** — release costs 48 s, debug 2.2 s — so the fast
+        loop no longer means the slow app.
+      - **A real executable**: `target/release/forge3d-studio`, 65 MiB (was
+        86 MiB — release now strips symbols), `--version` / `--help`, startup
+        to first frame **0.76–0.79 s** logged and shown in Statistics, and
+        `studio/packaging/install.sh` installs the binary, a `.desktop` entry
+        and the icon under `~/.local` (`--uninstall` removes them).
 - [x] **P3 · cartography depth** — the cartography tab lists the recipe's
       layers in paint order with an eye toggle, remove, move-earlier/later and
       an opacity stepper where the layer carries one; selecting a row opens its

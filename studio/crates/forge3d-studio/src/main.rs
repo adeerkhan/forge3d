@@ -13,7 +13,43 @@ use gpui_kit::*;
 
 use crate::state::Studio;
 
+/// Startup clock: from process entry to the first painted frame, reported in
+/// the console and the Statistics panel so the budget is visible.
+pub static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn main() {
+    let _ = STARTED.set(std::time::Instant::now());
+
+    // `--version` / `--help` print and exit: an executable a person launches
+    // should answer those without opening a window.
+    let mut initial: Option<std::path::PathBuf> = None;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "-V" | "--version" => {
+                println!("forge3d-studio {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
+            "-h" | "--help" => {
+                println!(
+                    "forge3d-studio {} — Forge3D Studio\n\n\
+                     Usage: forge3d-studio [options] [scene.tif | project.forge3d]\n\n\
+                     Arguments:\n  \
+                     <file>            GeoTIFF DEM, .npy grid, .forge3d project or .f3dz\n\n\
+                     Options:\n  \
+                     -h, --help        Print this help and exit\n  \
+                     -V, --version     Print the version and exit\n\n\
+                     Environment:\n  \
+                     FORGE3D_GPU_POWER=high|low   adapter preference (default: high)\n  \
+                     RUST_LOG=info                enable the console log",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return;
+            }
+            other if initial.is_none() => initial = Some(std::path::PathBuf::from(other)),
+            other => log::warn!("ignoring extra argument {other}"),
+        }
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
         .init();
@@ -44,9 +80,6 @@ fn main() {
                 }),
                 ..TitleBar::window_options()
             };
-
-            // `forge3d-studio [scene.tif | project.forge3d]` opens that file.
-            let initial = std::env::args().nth(1).map(std::path::PathBuf::from);
 
             gpui_kit::open_window(options, cx, |window, cx| {
                 let studio = cx.new(|cx| Studio::new(window, cx));
