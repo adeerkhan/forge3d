@@ -10,6 +10,7 @@ pub mod outliner;
 pub mod panels;
 pub mod params;
 pub mod properties;
+pub mod recipe;
 pub mod scene;
 pub mod shell;
 pub mod timeline;

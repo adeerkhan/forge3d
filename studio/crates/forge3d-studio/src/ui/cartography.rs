@@ -89,7 +89,195 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
     let studio_render = studio.clone();
     let studio_export = studio.clone();
 
+    let layers = studio.read(cx).recipe_layers();
+    let layer_count = studio
+        .read(cx)
+        .mapscene
+        .recipe_json
+        .as_deref()
+        .map(crate::ui::recipe::layer_count)
+        .unwrap_or(0);
+    let output = studio
+        .read(cx)
+        .mapscene
+        .recipe_json
+        .as_deref()
+        .and_then(crate::ui::recipe::output_size)
+        .unwrap_or((0, 0));
+    let has_raster = studio.read(cx).mapscene.raster_path.is_some();
+
     let mut body = v_flex().w_full().gap_3();
+
+    // ---- recipe layers: the scene's paint order, editable
+    body = body.child(section(
+        if layer_count == 0 {
+            "Recipe layers"
+        } else if layer_count == 1 {
+            "Recipe layers (1)"
+        } else {
+            "Recipe layers (2+)"
+        },
+        cx,
+    ));
+    if layers.is_empty() {
+        body = body.child(hint(
+            "No layers yet — build the recipe, then add overlays by choosing a raster.",
+            cx,
+        ));
+    }
+    let mut rows = v_flex().w_full().gap_1();
+    for layer in &layers {
+        let index = layer.index;
+        let studio_up = studio.clone();
+        let studio_down = studio.clone();
+        let studio_remove = studio.clone();
+        let studio_less = studio.clone();
+        let studio_more = studio.clone();
+        let opacity = layer.opacity;
+        rows = rows.child(
+            h_flex()
+                .justify_between()
+                .gap_2()
+                .py(px(1.))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(div().text_xs().child(layer.kind_label()))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().colors.muted_foreground)
+                                .child(layer.label()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .when(layer.opacity < 0.999, |row| {
+                            row.child(
+                                div()
+                                    .w(px(40.))
+                                    .text_xs()
+                                    .text_right()
+                                    .child(format!("{:.0}%", opacity * 100.0)),
+                            )
+                        })
+                        .when(layer.opacity < 0.999, |row| {
+                            let studio_less = studio_less.clone();
+                            let studio_more = studio_more.clone();
+                            row.child(
+                                Button::new(format!("layer-less-{index}"))
+                                    .label("−")
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Less opaque")
+                                    .on_click(move |_, _, cx| {
+                                        studio_less.update(cx, |studio, cx| {
+                                            studio.set_recipe_layer_opacity(
+                                                index,
+                                                (opacity - 0.1).max(0.0),
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                            .child(
+                                Button::new(format!("layer-more-{index}"))
+                                    .label("+")
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("More opaque")
+                                    .on_click(move |_, _, cx| {
+                                        studio_more.update(cx, |studio, cx| {
+                                            studio.set_recipe_layer_opacity(
+                                                index,
+                                                (opacity + 0.1).min(1.0),
+                                                cx,
+                                            )
+                                        });
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new(format!("layer-up-{index}"))
+                                .icon(IconName::ArrowUp)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Move earlier in paint order")
+                                .on_click(move |_, _, cx| {
+                                    studio_up.update(cx, |studio, cx| {
+                                        studio.move_recipe_layer(index, -1, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(format!("layer-down-{index}"))
+                                .icon(IconName::ArrowDown)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Move later in paint order")
+                                .on_click(move |_, _, cx| {
+                                    studio_down.update(cx, |studio, cx| {
+                                        studio.move_recipe_layer(index, 1, cx)
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(format!("layer-remove-{index}"))
+                                .icon(IconName::Trash)
+                                .xsmall()
+                                .ghost()
+                                .tooltip("Remove this layer from the recipe")
+                                .on_click(move |_, _, cx| {
+                                    studio_remove.update(cx, |studio, cx| {
+                                        studio.remove_recipe_layer(index, cx)
+                                    });
+                                }),
+                        ),
+                ),
+        );
+    }
+    body = body.child(rows);
+
+    // ---- output size
+    body = body.child(section("Output", cx));
+    let mut presets = h_flex().flex_wrap().gap_1();
+    for (label, width, height) in [
+        ("960×600", 960u32, 600u32),
+        ("1280×720", 1280, 720),
+        ("1920×1080", 1920, 1080),
+        ("2560×1440", 2560, 1440),
+    ] {
+        let selected = output == (width, height);
+        let studio_size = studio.clone();
+        presets = presets.child(
+            Button::new(format!("output-{label}"))
+                .label(label)
+                .xsmall()
+                .when(selected, |button| button.primary())
+                .when(!selected, |button| button.outline())
+                .disabled(!has_recipe)
+                .tooltip(if has_recipe {
+                    "Render size for this map"
+                } else {
+                    "Build the recipe first"
+                })
+                .on_click(move |_, _, cx| {
+                    studio_size.update(cx, |studio, cx| studio.set_output_size(width, height, cx));
+                }),
+        );
+    }
+    body = body.child(
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(presets)
+            .when(has_recipe, |row| {
+                row.child(hint(format!("now {}×{}", output.0, output.1), cx))
+            }),
+    );
 
     body = body.child(section("Map furniture", cx));
     body = body.child(hint(
@@ -143,7 +331,32 @@ pub fn furniture_panel(studio: &Entity<Studio>, window: &mut Window, cx: &mut Ap
                 .child(div().text_xs().child("Legend")),
         )
         .child(Input::new(&legend_input).small())
-        .child(hint("Comma-separated swatches, up to eight.", cx));
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .child(hint("Comma-separated swatches, up to eight.", cx))
+                .child(div().flex_1())
+                .child(
+                    Button::new("legend-from-raster")
+                        .label("From raster…")
+                        .xsmall()
+                        .outline()
+                        .disabled(!has_raster)
+                        .tooltip(if has_raster {
+                            "Classify the raster overlay and fill the legend"
+                        } else {
+                            "Choose a raster overlay first"
+                        })
+                        .on_click({
+                            let studio_legend = studio.clone();
+                            move |_, _, cx| {
+                                studio_legend
+                                    .update(cx, |studio, cx| studio.legend_from_raster(cx));
+                            }
+                        }),
+                ),
+        );
 
     // Scale bar
     body = body

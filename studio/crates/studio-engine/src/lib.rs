@@ -2208,6 +2208,75 @@ def _op_mapscene_furniture(p):
     }
 
 
+def _op_raster_classes(p):
+    """Classify a raster so the legend can come from the data, not from typing.
+
+    Categorical rasters (few unique values, e.g. land cover) report one entry per
+    class; continuous ones are classified with the engine's own
+    `thematic.classify` and report bin ranges. Values are sampled on a bounded
+    grid so a large COG does not blow the budget.
+    """
+    path = str(p.get("path") or "")
+    if not path:
+        raise RuntimeError("raster.classes requires path")
+    import numpy as np
+    import rasterio
+
+    with rasterio.open(path) as source:
+        scale = max(1, int(max(source.height, source.width) / 512))
+        values = source.read(
+            1,
+            out_shape=(
+                max(1, source.height // scale),
+                max(1, source.width // scale),
+            ),
+        ).astype("float64")
+        nodata = source.nodata
+    valid_mask = np.isfinite(values)
+    if nodata is not None:
+        valid_mask &= values != nodata
+    valid = values[valid_mask]
+    if valid.size == 0:
+        raise RuntimeError("raster has no valid values")
+
+    unique = np.unique(valid)
+    if unique.size <= 12:
+        entries = []
+        for value in unique:
+            count = int(np.count_nonzero(values == value))
+            label = f"Class {int(value)} ({count} px)"
+            entries.append({"label": label, "value": float(value), "count": count})
+        return {
+            "scheme": "categorical",
+            "entries": entries,
+            "legend_items": [entry["label"] for entry in entries],
+        }
+
+    from forge3d import thematic as _thematic
+
+    k = max(2, min(12, int(p.get("k", 5))))
+    result = _thematic.classify(
+        values, scheme=str(p.get("scheme") or "quantile"), k=k, nodata=nodata
+    )
+    items = []
+    for row in result["class_table"]:
+        left, right = row["left"], row["right"]
+        if left is None and right is not None:
+            items.append(f"< {right:.1f} ({row['count']} px)")
+        elif right is None and left is not None:
+            items.append(f"> {left:.1f} ({row['count']} px)")
+        elif left is not None and right is not None:
+            items.append(f"{left:.1f}-{right:.1f} ({row['count']} px)")
+        else:
+            items.append(f"class {row['class_id']} ({row['count']} px)")
+    return {
+        "scheme": result["scheme"],
+        "k": int(result["k"]),
+        "class_table": result["class_table"],
+        "legend_items": items,
+    }
+
+
 def _op_mapscene_validate(p):
     recipe_data = json.loads(p["recipe_json"])
     recipe = f3d.MapScene._recipe_from_dict(recipe_data)
@@ -2682,6 +2751,7 @@ _OPS = {
     "mapscene.render": _op_mapscene_render,
     "mapscene.validate": _op_mapscene_validate,
     "mapscene.furniture": _op_mapscene_furniture,
+    "raster.classes": _op_raster_classes,
     "colormaps.list": _op_colormaps_list,
     "presets.list": _op_presets_list,
     "presets.get": _op_presets_get,

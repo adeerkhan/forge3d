@@ -191,6 +191,17 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P3 · cartography depth (core)** — the cartography tab lists the
+      recipe's layers in paint order with remove, move-earlier/later and an
+      opacity stepper where the layer carries one; output presets
+      (960×600 … 2560×1440) resize the recipe and the project; and **Legend
+      from raster…** classifies the overlay with the engine's own
+      `raster.classes` op (categorical → one entry per class, continuous →
+      quantile ranges) and fills the legend from the data instead of typed
+      swatches. Each change re-previews (P1). Still open: post-build vector/fill
+      styling (line colour/width are template-time today), layer visibility
+      (recipe layers have no `visible` field), and SVG/PDF export (the engine
+      can, but no bridge op exposes it yet).
 - [x] **P2 · selection & viewport parity** — click (not drag) picks the ground
       point under the cursor, moves the orbit target there and selects the
       terrain row, so the 3D view drives the outliner; hovering shows ground

@@ -488,6 +488,7 @@ pub enum PendingJob {
     MapSceneValidate,
     MapSceneRender { preview: bool },
     MapSceneFurniture { render_after: bool },
+    RasterClasses,
     AtmosphereBake,
     AstroObserve,
     SmokeLoad,
@@ -741,6 +742,18 @@ impl Studio {
         studio
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
+        if let Ok(name) = std::env::var("FORGE3D_STUDIO_WORKSPACE") {
+            let workspace = crate::state::Workspace::ALL
+                .iter()
+                .copied()
+                .find(|workspace| workspace.label().eq_ignore_ascii_case(&name));
+            if let Some(workspace) = workspace {
+                studio.set_workspace(workspace, cx);
+                log::info!("workspace smoke: {}", workspace.label());
+            } else {
+                log::warn!("FORGE3D_STUDIO_WORKSPACE names no workspace: {name}");
+            }
+        }
         studio.refresh_capabilities(cx);
         if let Ok(id) = std::env::var("FORGE3D_STUDIO_OPEN_EXAMPLE") {
             if let Some(entry) = studio.examples.iter().find(|entry| entry.id == id).cloned() {
@@ -2861,6 +2874,112 @@ impl Studio {
         cx.notify();
     }
 
+    // ------------------------------------------------------------ recipe layers
+
+    /// The recipe's layers, in paint order, for the cartography panel.
+    pub fn recipe_layers(&self) -> Vec<crate::ui::recipe::RecipeLayer> {
+        self.mapscene
+            .recipe_json
+            .as_deref()
+            .map(crate::ui::recipe::layer_list)
+            .unwrap_or_default()
+    }
+
+    /// Apply a pure recipe patch and re-preview. A patch that returns `None`
+    /// (out of range, unsupported field) leaves the recipe untouched and says
+    /// why instead of silently doing nothing.
+    fn patch_recipe(
+        &mut self,
+        patch: impl Fn(&str) -> Option<String>,
+        refusal: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(recipe) = self.mapscene.recipe_json.clone() else {
+            self.push_error("Cartography", "build a MapScene recipe first");
+            return;
+        };
+        match patch(&recipe) {
+            Some(next) => {
+                self.remember_recipe(next);
+                self.schedule_preview(cx);
+            }
+            None => {
+                self.set_status(refusal);
+                cx.notify();
+            }
+        }
+    }
+
+    pub fn remove_recipe_layer(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.patch_recipe(
+            |recipe| crate::ui::recipe::remove_layer(recipe, index),
+            "That layer is no longer in the recipe",
+            cx,
+        );
+    }
+
+    pub fn move_recipe_layer(&mut self, index: usize, delta: i32, cx: &mut Context<Self>) {
+        self.patch_recipe(
+            |recipe| crate::ui::recipe::move_layer(recipe, index, delta),
+            "Layer is already at that end of the paint order",
+            cx,
+        );
+    }
+
+    pub fn set_recipe_layer_opacity(&mut self, index: usize, opacity: f32, cx: &mut Context<Self>) {
+        self.patch_recipe(
+            |recipe| crate::ui::recipe::set_layer_opacity(recipe, index, opacity),
+            "This layer kind has no opacity in the recipe",
+            cx,
+        );
+    }
+
+    /// Output size for the render, applied to the recipe and the project.
+    pub fn set_output_size(&mut self, width: u32, height: u32, cx: &mut Context<Self>) {
+        self.project.export.width = width;
+        self.project.export.height = height;
+        self.project_dirty = true;
+        if self.mapscene.recipe_json.is_some() {
+            self.patch_recipe(
+                |recipe| crate::ui::recipe::set_output_size(recipe, width, height),
+                "The recipe has no output spec to resize",
+                cx,
+            );
+        }
+        self.set_status(format!("Output {width}×{height}"));
+        cx.notify();
+    }
+
+    /// Rebuild the furniture text boxes so they show the current values (used
+    /// after a legend is derived from data).
+    fn refresh_furniture_inputs(&mut self, cx: &mut Context<Self>) {
+        self.furniture.inputs.clear();
+        cx.notify();
+    }
+
+    /// Derive the legend from the raster overlay instead of typing swatches.
+    ///
+    /// The engine classifies the raster (`raster.classes`): categorical data
+    /// reports one entry per class, continuous data a classified range table.
+    /// The result is written into the furniture and previewed.
+    pub fn legend_from_raster(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.mapscene.raster_path.clone() else {
+            self.push_error("Legend", "choose a raster overlay first");
+            return;
+        };
+        let job = self.engine.call(
+            "raster.classes",
+            serde_json::json!({
+                "path": path.to_string_lossy(),
+                "k": 6,
+                "scheme": "quantile",
+            }),
+        );
+        self.pending_jobs.insert(job, PendingJob::RasterClasses);
+        self.set_status("Classifying the raster for the legend…");
+        cx.notify();
+    }
+
     /// Remember the recipe as *the project's* recipe, so saving keeps it and a
     /// reopen restores it (with the furniture it carries).
     fn remember_recipe(&mut self, recipe: String) {
@@ -3906,6 +4025,31 @@ impl Studio {
                         {
                             self.schedule_preview(cx);
                         }
+                        if std::env::var_os("FORGE3D_STUDIO_RECIPE_SMOKE").is_some() {
+                            // Dev hook: exercise the P3 recipe operations.
+                            let layers = self.recipe_layers();
+                            log::info!(
+                                "recipe smoke: {} layer(s) — {:?}",
+                                layers.len(),
+                                layers.iter().map(|layer| layout_label(layer)).collect::<Vec<_>>()
+                            );
+                            self.set_output_size(1280, 720, cx);
+                            log::info!(
+                                "recipe smoke: output now {:?}",
+                                self.mapscene
+                                    .recipe_json
+                                    .as_deref()
+                                    .and_then(crate::ui::recipe::output_size)
+                            );
+                            self.legend_from_raster(cx);
+                            if !layers.is_empty() {
+                                self.remove_recipe_layer(0, cx);
+                                log::info!(
+                                    "recipe smoke: after remove, {} layer(s)",
+                                    self.recipe_layers().len()
+                                );
+                            }
+                        }
                         if let Ok(path) = std::env::var("FORGE3D_STUDIO_SAVE_SMOKE") {
                             self.write_project(Path::new(&path), cx);
                             log::info!("save smoke: wrote {path}");
@@ -4052,6 +4196,35 @@ impl Studio {
                         }
                     }
                     self.set_status("MapScene frame rendered");
+                }
+            }
+            PendingJob::RasterClasses => {
+                let items: Vec<String> = result
+                    .get("legend_items")
+                    .and_then(|value| value.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let scheme = result
+                    .get("scheme")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                if items.is_empty() {
+                    self.push_error("Legend", "the raster produced no classes");
+                } else {
+                    self.furniture.legend_enabled = true;
+                    self.furniture.legend_items = items.join(", ");
+                    self.set_status(format!(
+                        "Legend from raster: {} entries ({scheme})",
+                        items.len()
+                    ));
+                    log::info!("legend from raster: {scheme}, {} entries", items.len());
+                    self.apply_furniture(false, cx);
+                    self.refresh_furniture_inputs(cx);
                 }
             }
             PendingJob::AtmosphereBake => {
@@ -4283,6 +4456,11 @@ pub fn terrain_span(height_min: f32, height_max: f32) -> f32 {
 /// Camera distance that frames a terrain of this world span.
 pub fn fit_radius(span: f32) -> f32 {
     (span * 1.65).clamp(60.0, 400_000.0)
+}
+
+/// One-line label for a recipe layer, for the debug hooks.
+fn layout_label(layer: &crate::ui::recipe::RecipeLayer) -> String {
+    format!("{}:{}", layer.kind_label(), layer.label())
 }
 
 /// The low-resolution preview target: 640 px wide at most, aspect preserved,

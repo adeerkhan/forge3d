@@ -488,6 +488,7 @@ harnesses, certificates.
 | **G8** | **Tests** | pure contracts: action registry (unique shortcuts, menu coverage), render-size quantization, gallery index contract, dock panel specs, layer icons/drop thirds, params parsing | those run with `cargo test` and no display | **landed (pure)** — window-level harness blocked, see below |
 | **G9** | **Retire the old shell** | delete egui-era docs/modules, update `studio/README.md`, `cargo fmt`/`clippy -D warnings`/tests green, one dependency set | no eframe/egui reference remains in `studio/` | **landed** |
 | **G10** | **Examples that open** | `TerrainLoaded` hands over to the pending example; per-card state; runnable filter; download carousel (asset disclosure + `git lfs pull` + resume); entries declare the bridge ops they need and the bridge answers `ops.list` | opening a card applies its camera/sun/params/rig/recipe; a card cannot claim runnable when an op or asset is missing | **landed** |
+| **P3** | **Cartography depth (core)** | recipe layer list (remove/reorder/opacity), output presets, legend derived from the raster via `raster.classes` | a map composed and edited in the panel re-previews with the engine's own classification | **landed (core)** |
 | **G12** | **Cartography panel** | recipe template + raster overlay picker + vector line colour/width, and the map furniture the engine draws (title, legend, scale bar, north arrow, graticule) through a new `mapscene.furniture` bridge op; Apply, Apply & render, Export map… | a rendered map shows the panel's furniture at the chosen positions, the export writes a real file, and the panel reads a recipe's furniture back when a scene is built | **landed** |
 | **G11** | **Blender-shaped shell** | workspace row, one editor per dock slot, properties icon strip (Layer/Terrain/Render/World/Scene/Statistics), outliner icon tabs (Layers/Examples), bottom icon strip (Timeline/Console/Certificates), viewport mode header + tool rail, navigation gizmo | the window reads as a DCC workbench: icons instead of tab piles, gizmo snaps views | **landed** (gallery thumbnails/carousel click-through still to eyeball) |
 
@@ -517,6 +518,22 @@ the G-table above:
 | 180°/s orbit | queue grew, seconds of lag | ~60 fps, 3 ms half-res / 6.6 ms full-res mean |
 | First full-size frame | 88–195 ms | 16.9 ms (Rainier 2111², 954×630) |
 | Live switch off | not available | no renders while dragging; one frame when the gesture ends |
+
+The viewport camera follows the engine's Z-up orbit exactly: `theta` is polar
+from +Z (`0` = straight down), while the inspector and HUD show *elevation*
+(90 − θ) because that is what people read. View presets (7/1/3, Ctrl+1/Ctrl+3,
+0), `5` for an approximate orthographic projection (2° field of view at a
+distance that keeps the framing — the viewer is perspective-only), click-to-pick
+(the orbit target follows a click and the terrain row selects), hover ground
+coordinates and cursor-anchored wheel zoom all derive from the same maths in
+`ui/viewport_math.rs`, which is unit-tested.
+
+The viewport has three tiers, each labelled in its header — **live** (the
+engine's raster pass, instant), **preview** (a debounced ≤640 px MapScene render,
+~600 ms after an edit and coalesced while one is in flight) and **render**
+(F12 / Render still, full size, certificate). P0 keeps the project honest: the
+recipe and its furniture are saved with the project and restored on open, and
+render quality/atmosphere/smoke are pushed to the engine on open.
 
 The viewport is a **live preview**, like Blender's viewport shading: Terrain
 mode always paints on the engine's device and stays interactive. Offline
