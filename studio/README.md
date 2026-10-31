@@ -212,6 +212,33 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P8 · mesh quality tiers, and the gate measured** — the guide's §6.3, built
+      on numbers rather than on the assumption behind it.
+      - **`ViewQuality::{Interactive, Settled}`** in the engine fork: one
+        `grid_size(viewport, dem)` used by both the uniform and the draw range,
+        `set_viewer_quality` beside `set_viewer_depth_store`. Interactive is
+        `(max(vp)/3).clamp(96, 256).min(dem)` — 256² = 390 k vertices at 1080p
+        against Settled's 768² = 3.53 M. **Settled is the historical
+        `max(w,h).clamp(128, 768)` with nothing added**, so a still cannot move;
+        the test asserts the exact value.
+      - Wired to the gesture: a drag frame asks for Interactive, the release
+        asks for Settled. Measured at 1920×1080:
+
+        | target | before | with tiers |
+        |---|---|---|
+        | RTX 5060 | render 8.3, interval 9.5 ms (105 fps) | render 7.3, interval 9.0 ms (111 fps) |
+        | Intel iGPU | render 51.1, interval 52.5 ms (19 fps) | render 42.4, interval 44.0 ms (23 fps) |
+
+      - **What that says, against the guide:** the mesh was ~17 % of the iGPU's
+        frame at 1080p, not the dominant term. The dGPU already meets the 16.6 ms
+        gate before and after; the iGPU misses it by 3× and the remaining cost is
+        fragment work (PBR + IBL + material layers over 2.07 M pixels), which is
+        exactly what a solid shader removes. So the readback ring (§6.2) is *not*
+        the next lever, and the live cartography pass (§7) is.
+      - New dev hooks: `FORGE3D_STUDIO_WINDOW=1920x1200` sizes the window and
+        `FORGE3D_STUDIO_RENDER_SIZE=1920x1080` renders the live viewport at a
+        fixed size, so frame cost can be measured at a target's resolution
+        without a second display.
 - [x] **P7 · stop lying about the frame time, and cut the wait** — the guide's
       four cheapest true findings, done with measurements.
       - **The HUD showed engine time, not frame time.** `frame_ms` is

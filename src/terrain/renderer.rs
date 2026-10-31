@@ -62,6 +62,9 @@ mod water_reflection;
 
 pub(crate) use self::core::is_north_up_camera_mode;
 pub use self::core::{TerrainRenderer, TerrainScene, ViewerTerrainData};
+// STUDIO-FORK: the live viewer's mesh-quality tier, so a caller can ask for the
+// coarse mesh while the camera moves.
+pub use self::viewer::ViewQuality;
 #[cfg(feature = "enable-globe")]
 pub(crate) use self::orbis_globe_background::ORBIS_EARTH_TEXTURE_MAX_WIDTH;
 

@@ -776,6 +776,8 @@ impl TerrainScene {
             viewer_colormap_name: None,
             viewer_resources: None,
             viewer_store_depth: false,
+            viewer_quality: super::viewer::ViewQuality::Settled,
+            viewer_last_grid_size: 0,
             geometry_provider: None,
             two_phase_culler: None,
             terrain_minmax_pyramid: None,

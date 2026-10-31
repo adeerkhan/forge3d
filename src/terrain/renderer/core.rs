@@ -49,6 +49,10 @@ pub struct TerrainScene {
     /// same encoder. Off by default — the pass discards depth, which is what
     /// upstream does and what a transient tile attachment wants.
     pub(super) viewer_store_depth: bool,
+    /// STUDIO-FORK: live-viewer mesh quality (interactive vs settled).
+    pub(super) viewer_quality: super::viewer::ViewQuality,
+    /// Last mesh size built, so the tier is logged on change only.
+    pub(super) viewer_last_grid_size: u32,
     pub(super) _atmosphere_scattering_fallback_texture: TrackedTexture,
     pub(super) atmosphere_scattering_fallback_view: wgpu::TextureView,
     pub(super) _height_curve_identity_texture: TrackedTexture,

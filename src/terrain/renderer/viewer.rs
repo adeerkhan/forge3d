@@ -48,7 +48,38 @@ fn relief_lut_bytes() -> Vec<u8> {
 /// `render_viewer_terrain` needs `&mut self` to refresh its resource cache, so
 /// it snapshots the viewer state first instead of holding a borrow of
 /// `viewer_heightmap` for the whole frame.
+/// How much mesh the live viewer builds.
+///
+/// The interactive tier exists because a 1080p window was drawing 6*767^2
+/// vertices (~3.5 M, 1.18 M triangles) through the full PBR pipeline on every
+/// frame; on an integrated adapter that alone was 51 ms. `Settled` is the
+/// historical quality, unchanged, so a still cannot move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewQuality {
+    Interactive,
+    Settled,
+}
+
+impl ViewQuality {
+    /// Mesh resolution for a viewport and a DEM.
+    ///
+    /// Never more vertices than the DEM has texels, and the interactive tier
+    /// scales with the viewport instead of jumping straight to the maximum.
+    pub fn grid_size(self, viewport: (u32, u32), dem: (u32, u32)) -> u32 {
+        let by_view = viewport.0.max(viewport.1);
+        let by_dem = dem.0.max(dem.1).max(2);
+        match self {
+            ViewQuality::Interactive => (by_view / 3).clamp(96, 256).min(by_dem),
+            // Historical expression, deliberately unchanged: a settled frame
+            // must be the same pixels it was before this feature existed.
+            ViewQuality::Settled => by_view.clamp(128, 768),
+        }
+    }
+}
+
 struct ViewerSnapshot {
+    quality: ViewQuality,
+    dem_dimensions: (u32, u32),
     world_span: f32,
     z_scale: f32,
     cam_target: [f32; 2],
@@ -138,8 +169,11 @@ impl ViewerSnapshot {
 
         // Mesh grid resolution scales with the target so a large viewport keeps
         // its silhouette. The vertex stage emits 6 vertices per quad and reads
-        // no vertex buffer, so the draw range must match `grid_size`.
-        let grid_size = width.max(height).clamp(128, 768);
+        // no vertex buffer, so the draw range must match `grid_size` — both come
+        // from this one function.
+        let grid_size = self
+            .quality
+            .grid_size((width, height), self.dem_dimensions);
 
         let sun_dir = sun_direction(self.sun_azimuth_deg, self.sun_elevation_deg);
 
@@ -435,6 +469,8 @@ impl TerrainScene {
     fn viewer_snapshot(&self) -> Option<ViewerSnapshot> {
         let terrain = self.viewer_heightmap.as_ref()?;
         Some(ViewerSnapshot {
+            quality: self.viewer_quality,
+            dem_dimensions: terrain.dimensions,
             world_span: terrain.world_span,
             z_scale: terrain.z_scale,
             cam_target: terrain.cam_target,
@@ -875,6 +911,14 @@ impl TerrainScene {
     /// Returns `false` when there is no viewer terrain or a resource could not
     /// be created; the caller reports that rather than presenting a stale or
     /// blank frame as a success.
+    /// STUDIO-FORK: pick the mesh quality for the live viewer.
+    ///
+    /// `Interactive` builds a coarser mesh (a ninth of the vertices) while the
+    /// camera is moving; `Settled` is the historical quality, untouched.
+    pub fn set_viewer_quality(&mut self, quality: ViewQuality) {
+        self.viewer_quality = quality;
+    }
+
     /// STUDIO-FORK: keep the viewer's depth attachment for a later pass.
     ///
     /// The viewer discards depth by default; a caller that wants a
@@ -1022,8 +1066,22 @@ impl TerrainScene {
         pass.set_bind_group(5, &resources.water, &[]);
         pass.set_bind_group(6, &resources.material_layer, &[]);
         // `vs_main` reads no vertex buffer: mesh mode derives each vertex from
-        // its `vertex_index`, so the draw range carries the grid.
-        let grid_size = width.max(height).clamp(128, 768);
+        // its `vertex_index`, so the draw range carries the grid. Same function
+        // as the uniform, so the two cannot disagree.
+        let grid_size = snapshot
+            .quality
+            .grid_size((width, height), snapshot.dem_dimensions);
+        if grid_size != self.viewer_last_grid_size {
+            self.viewer_last_grid_size = grid_size;
+            log::debug!(
+                target: "terrain.viewer",
+                "viewer mesh {}x{} ({:?}), DEM {:?}",
+                grid_size,
+                grid_size,
+                snapshot.quality,
+                snapshot.dem_dimensions
+            );
+        }
         pass.draw(0..6 * (grid_size - 1) * (grid_size - 1), 0..1);
         true
     }

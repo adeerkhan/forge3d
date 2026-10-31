@@ -58,7 +58,20 @@ fn main() {
             gpui_kit::init(cx);
             forge3d_studio::actions::init(cx);
 
-            let bounds = Bounds::centered(None, size(px(1500.0), px(950.0)), cx);
+            // `FORGE3D_STUDIO_WINDOW=1920x1200` sets the initial size, so the
+            // viewport can be measured at the sizes a target actually uses.
+            let (window_width, window_height) = std::env::var("FORGE3D_STUDIO_WINDOW")
+                .ok()
+                .and_then(|value| {
+                    let (w, h) = value.split_once('x')?;
+                    Some((w.trim().parse::<f32>().ok()?, h.trim().parse::<f32>().ok()?))
+                })
+                .unwrap_or((1500.0, 950.0));
+            let bounds = Bounds::centered(
+                None,
+                size(px(window_width.max(1000.0)), px(window_height.max(640.0))),
+                cx,
+            );
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(Size {

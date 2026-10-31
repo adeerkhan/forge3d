@@ -1698,6 +1698,9 @@ impl Studio {
             width,
             height,
             force,
+            // A gesture frame may be coarse: the camera is moving and nobody
+            // is reading the silhouette. The release redraws at full quality.
+            interactive: self.drag.is_some(),
         });
         cx.notify();
     }
@@ -5025,6 +5028,17 @@ impl Focusable for Studio {
 /// numbers again — a feedback loop that keeps rendering while the app is idle.
 pub fn render_size(width: f32, height: f32) -> (u32, u32) {
     let quantize = |value: f32| (((value as u32) / 2) * 2).max(2);
+    // `FORGE3D_STUDIO_RENDER_SIZE=1920x1080` renders the live viewport at a
+    // fixed size regardless of the dock layout, so frame cost can be measured
+    // at the resolution a target actually uses. Presentation still scales the
+    // image, so this changes cost, not appearance.
+    if let Ok(value) = std::env::var("FORGE3D_STUDIO_RENDER_SIZE") {
+        if let Some((w, h)) = value.split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.trim().parse::<f32>(), h.trim().parse::<f32>()) {
+                return (quantize(w), quantize(h));
+            }
+        }
+    }
     (quantize(width), quantize(height))
 }
 

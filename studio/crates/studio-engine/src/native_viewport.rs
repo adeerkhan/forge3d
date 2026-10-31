@@ -72,6 +72,8 @@ pub struct NativeViewport {
     srgb_lut: [u8; 256],
     layer_visible: bool,
     layer_opacity: f32,
+    /// Mesh quality for the next frame: coarse while the camera moves.
+    quality_is_interactive: bool,
     /// The 3D environment grid: off by default, depth-tested when on.
     grid_enabled: bool,
     grid: Option<crate::grid::GroundGrid>,
@@ -110,6 +112,7 @@ impl NativeViewport {
             srgb_lut: srgb_encode_table(),
             layer_visible: true,
             layer_opacity: 1.0,
+            quality_is_interactive: false,
             grid_enabled: false,
             grid: None,
             terrain_span: 1000.0,
@@ -201,6 +204,19 @@ impl NativeViewport {
     /// The grid is Studio's own pass over the engine frame (see
     /// `crate::grid`): the engine's viewer has none, and the pinned terrain
     /// shader hash must not change for a UI feature.
+    /// Choose the live mesh quality: coarse while moving, exact when settled.
+    pub fn set_interactive_quality(&mut self, interactive: bool) {
+        if self.quality_is_interactive == interactive {
+            return;
+        }
+        self.quality_is_interactive = interactive;
+        self.scene.set_viewer_quality(if interactive {
+            forge3d::terrain::renderer::ViewQuality::Interactive
+        } else {
+            forge3d::terrain::renderer::ViewQuality::Settled
+        });
+    }
+
     pub fn set_grid(&mut self, enabled: bool) {
         self.grid_enabled = enabled;
         // Log on the transition, never per frame: this runs inside the render.
@@ -438,10 +454,12 @@ pub enum ViewportCommand {
     },
     /// Render one frame at this size. `force` skips the "nothing changed"
     /// check that keeps a stationary camera from re-rendering on every poll.
+    /// `interactive` asks for the coarse mesh (a camera drag).
     Render {
         width: u32,
         height: u32,
         force: bool,
+        interactive: bool,
     },
     Shutdown,
 }
@@ -607,7 +625,9 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
                 width,
                 height,
                 force,
+                interactive,
             } => {
+                viewport.set_interactive_quality(interactive);
                 if !viewport.has_terrain() {
                     continue;
                 }
@@ -632,5 +652,35 @@ fn viewport_loop(tx: Sender<ViewportEvent>, rx: Receiver<ViewportCommand>) {
             }
             ViewportCommand::Shutdown => break,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use forge3d::terrain::renderer::ViewQuality;
+
+    #[test]
+    fn the_interactive_mesh_is_a_ninth_and_settled_is_unchanged() {
+        // 1080p viewport, 2111^2 DEM: the numbers measured on this machine.
+        let viewport = (1920, 1080);
+        let dem = (2111, 2110);
+        let settled = ViewQuality::Settled.grid_size(viewport, dem);
+        let interactive = ViewQuality::Interactive.grid_size(viewport, dem);
+        // Settled is the historical `max(w, h).clamp(128, 768)`, untouched.
+        assert_eq!(settled, 768);
+        assert_eq!(interactive, 256);
+        let vertices = |n: u32| 6 * (n - 1) * (n - 1);
+        assert_eq!(vertices(settled), 3_529_734);
+        assert_eq!(vertices(interactive), 390_150);
+        assert!(vertices(interactive) * 9 <= vertices(settled) + 1);
+
+        // A small viewport gets a small mesh, and never more than the DEM.
+        assert_eq!(ViewQuality::Interactive.grid_size((300, 300), dem), 100);
+        assert_eq!(
+            ViewQuality::Interactive.grid_size((1920, 1080), (64, 64)),
+            64
+        );
+        // Settled keeps its floor so the settled image cannot change.
+        assert_eq!(ViewQuality::Settled.grid_size((100, 100), dem), 128);
     }
 }
