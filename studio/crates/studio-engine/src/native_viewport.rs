@@ -75,6 +75,11 @@ pub struct NativeViewport {
     queue: Arc<wgpu::Queue>,
     color: Option<wgpu::Texture>,
     render_view: Option<wgpu::TextureView>,
+    /// sRGB-encoded, opacity-mixed copy of `color`, produced on the GPU when the
+    /// display pass runs; the readback copies this instead of the linear frame.
+    display: Option<wgpu::Texture>,
+    display_view: Option<wgpu::TextureView>,
+    blit: crate::display::DisplayBlit,
     size: (u32, u32),
     has_terrain: bool,
     last_render_ms: f32,
@@ -116,6 +121,9 @@ impl NativeViewport {
             queue: context.queue.clone(),
             color: None,
             render_view: None,
+            display: None,
+            display_view: None,
+            blit: crate::display::DisplayBlit::new(&context.device, COLOR_FORMAT),
             size: (0, 0),
             has_terrain: false,
             last_render_ms: 0.0,
@@ -305,6 +313,42 @@ impl NativeViewport {
             }
         }
 
+        // Display encoding on the GPU: linear → sRGB, with the layer opacity
+        // already mixed, into `display`. The readback below then copies bytes
+        // instead of transforming them. `FORGE3D_STUDIO_CPU_COLOR=1` keeps the
+        // CPU path for the A/B test and as an escape hatch.
+        let gpu_display = std::env::var_os("FORGE3D_STUDIO_CPU_COLOR").is_none();
+        let intensity = self.sun_intensity.clamp(0.0, 1.0);
+        // Background in the space the blend happens in: sRGB bytes / 255, from
+        // the same table the CPU path uses.
+        let background_srgb = [
+            self.srgb_lut[(intensity * 0.5 * 255.0) as usize] as f32 / 255.0,
+            self.srgb_lut[(intensity * 0.7 * 255.0) as usize] as f32 / 255.0,
+            self.srgb_lut[(intensity * 0.9 * 255.0) as usize] as f32 / 255.0,
+        ];
+        let opacity = if self.layer_visible {
+            self.layer_opacity
+        } else {
+            0.0
+        };
+        let copy_source = if gpu_display {
+            if let Some(display_view) = self.display_view.as_ref() {
+                self.blit.draw(
+                    &self.queue,
+                    &mut encoder,
+                    display_view,
+                    background_srgb,
+                    opacity,
+                );
+                self.display.as_ref()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let copy_texture = copy_source.or(self.color.as_ref());
+
         // Copy the target into a mappable buffer. `copy_texture_to_buffer`
         // requires rows aligned to 256 bytes.
         let unpadded = width * 4;
@@ -315,13 +359,9 @@ impl NativeViewport {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let color = self
-            .color
-            .as_ref()
-            .ok_or_else(|| "native viewport target missing".to_owned())?;
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: color,
+                texture: copy_texture.ok_or_else(|| "viewport target missing".to_owned())?,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -356,37 +396,36 @@ impl NativeViewport {
         let wait_ms = stage.elapsed().as_secs_f32() * 1000.0;
         stage = Instant::now();
 
-        // Layer opacity fades the frame toward the backdrop the render already
-        // cleared to; a hidden layer shows only that backdrop. Doing it here
-        // keeps it honest: the pixels the UI shows are the pixels the engine
-        // drew, composited by one documented rule.
-        let intensity = self.sun_intensity.clamp(0.0, 1.0);
-        let background = [
-            self.srgb_lut[(intensity * 0.5 * 255.0) as usize] as u32,
-            self.srgb_lut[(intensity * 0.7 * 255.0) as usize] as u32,
-            self.srgb_lut[(intensity * 0.9 * 255.0) as usize] as u32,
-        ];
-        let opacity = if self.layer_visible {
-            self.layer_opacity
-        } else {
-            0.0
-        };
-        let keep = (opacity * 255.0).round() as u32;
-
         let mut rgba = Vec::with_capacity((unpadded * height) as usize);
         {
             let mapped = slice.get_mapped_range();
-            for row in 0..height {
-                let start = (row * padded) as usize;
-                let end = start + unpadded as usize;
-                for pixel in mapped[start..end].as_chunks::<4>().0 {
-                    // Alpha stays opaque; RGB is linear storage → sRGB display.
-                    for channel in 0..3 {
-                        let source = self.srgb_lut[pixel[channel] as usize] as u32;
-                        let mixed = (source * keep + background[channel] * (255 - keep)) / 255;
-                        rgba.push(mixed as u8);
+            if gpu_display {
+                // The pixels are already display-encoded: strip row padding.
+                for row in 0..height {
+                    let start = (row * padded) as usize;
+                    rgba.extend_from_slice(&mapped[start..start + unpadded as usize]);
+                }
+            } else {
+                // CPU fallback: layer opacity fades the frame toward the backdrop
+                // the render cleared to; a hidden layer shows only that backdrop.
+                let background = [
+                    self.srgb_lut[(intensity * 0.5 * 255.0) as usize] as u32,
+                    self.srgb_lut[(intensity * 0.7 * 255.0) as usize] as u32,
+                    self.srgb_lut[(intensity * 0.9 * 255.0) as usize] as u32,
+                ];
+                let keep = (opacity * 255.0).round() as u32;
+                for row in 0..height {
+                    let start = (row * padded) as usize;
+                    let end = start + unpadded as usize;
+                    for pixel in mapped[start..end].as_chunks::<4>().0 {
+                        // Alpha stays opaque; RGB is linear storage → sRGB display.
+                        for channel in 0..3 {
+                            let source = self.srgb_lut[pixel[channel] as usize] as u32;
+                            let mixed = (source * keep + background[channel] * (255 - keep)) / 255;
+                            rgba.push(mixed as u8);
+                        }
+                        rgba.push(255);
                     }
-                    rgba.push(255);
                 }
             }
         }
@@ -430,8 +469,26 @@ impl NativeViewport {
             view_formats: &[],
         });
         let render_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let display = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("studio.native_viewport.display"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let display_view = display.create_view(&wgpu::TextureViewDescriptor::default());
+        self.blit.bind(&self.device, &render_view, (width, height));
         self.color = Some(texture);
         self.render_view = Some(render_view);
+        self.display = Some(display);
+        self.display_view = Some(display_view);
         self.size = (width, height);
     }
 }

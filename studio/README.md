@@ -212,6 +212,32 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P10 · display encoding on the GPU** — the guide's §6.1, gated by a
+      parity test.
+      - New `studio-engine/src/display.rs`: a fullscreen pass that samples the
+        engine's linear frame with `textureLoad` (no filtering, so `u8/255`
+        round-trips), applies the **same** sRGB curve and boundary as
+        `srgb_encode_table`, blends the layer opacity **in sRGB space** exactly
+        as the CPU did, and writes a second target. The readback then copies
+        rows instead of transforming them.
+      - **Parity gate**: `gpu_display_matches_the_cpu_path_within_one_byte`
+        renders the same frame twice — GPU path and CPU path, layer faded to
+        65 % so the blend is exercised — and asserts a per-channel difference of
+        at most 1. Measured: **worst 1/255** over 307 200 bytes.
+        `FORGE3D_STUDIO_CPU_COLOR=1` keeps the CPU path as the escape hatch and
+        the A/B arm.
+      - Measured at 1920×1080, scripted orbit (median per frame):
+
+        | adapter | before | after |
+        |---|---|---|
+        | RTX 5060 | render 6.9 (convert **3.9**) · interval 8.7 ms | render 5.4 (convert **0.8**) · interval **6.6 ms** (115 → 152 fps) |
+        | Intel iGPU | render 42.4 (convert 1.0) · interval 43.8 ms | render 41.2 (convert 0.2) · interval 42.6 ms (unchanged within run-to-run noise) |
+
+      The CPU pass really was the dGPU's biggest term: it drops 3.9 → 0.8 ms and
+      the interval falls 2.1 ms. On the iGPU the same pass was never the cost
+      (shared memory, GPU-bound frame), which the stage split predicted.
+      Deliberately **not** done: the 3-slot readback ring (§6.2) — `wait` is
+      2.6 ms on the dGPU and the blit already removed the larger term.
 - [x] **P9 · both adapters named, and the frame split into its stages** — two
       questions answered with numbers instead of folklore.
       - **"UI and viewport are on different GPUs."** They are not, on this

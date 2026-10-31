@@ -436,3 +436,90 @@ fn native_viewport_body() {
         "clearing the DEM must stop the viewport, not leave the last frame live"
     );
 }
+
+/// The GPU display path must produce the same bytes as the CPU path.
+///
+/// Moving sRGB encoding and the opacity blend onto the GPU is only safe if it
+/// is a pure optimisation. Both paths run over the same frame here, with the
+/// layer faded to 65 % so the blend is actually exercised, and the allowed
+/// difference is one byte per channel — the gap between the CPU's truncating
+/// integer blend and the GPU's rounding.
+#[test]
+fn gpu_display_matches_the_cpu_path_within_one_byte() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(gpu_display_body)
+        .expect("spawn viewport thread")
+        .join()
+        .expect("viewport test body");
+}
+
+fn gpu_display_body() {
+    let _ = env_logger::try_init();
+    let mut viewport = NativeViewport::new().expect("native viewport construction");
+    let dem = fuji_dem();
+    viewport.load_dem(&dem).expect("load DEM");
+    let camera = CameraParams {
+        phi_deg: 135.0,
+        theta_deg: 58.0,
+        radius: 34_316.0,
+        fov_deg: 54.0,
+        target_x: 0.0,
+        target_z: 0.0,
+    };
+    let sun = SunParams {
+        azimuth_deg: 135.0,
+        elevation_deg: 35.0,
+        intensity: 2.5,
+    };
+    viewport.set_view(&camera, &sun);
+    // Fade the layer so the blend is exercised, not just the encoding.
+    viewport.set_layer_style(true, 0.65);
+
+    let (width, height) = (320, 240);
+    std::env::remove_var("FORGE3D_STUDIO_CPU_COLOR");
+    let gpu = viewport
+        .render_rgba(width, height)
+        .expect("gpu display frame");
+    std::env::set_var("FORGE3D_STUDIO_CPU_COLOR", "1");
+    let cpu = viewport
+        .render_rgba(width, height)
+        .expect("cpu display frame");
+    std::env::remove_var("FORGE3D_STUDIO_CPU_COLOR");
+
+    assert_eq!(gpu.rgba.len(), cpu.rgba.len());
+    let mut worst = 0i32;
+    let mut worst_at = 0usize;
+    for (index, (&a, &b)) in gpu.rgba.iter().zip(&cpu.rgba).enumerate() {
+        let delta = (a as i32 - b as i32).abs();
+        if delta > worst {
+            worst = delta;
+            worst_at = index;
+        }
+    }
+    assert!(
+        worst <= 1,
+        "GPU display differs from the CPU path by {worst} at byte {worst_at} \
+         (channel {}), frame {}x{}",
+        worst_at % 4,
+        width,
+        height
+    );
+    // And the frame is not blank-trivial: the two paths really rendered pixels.
+    let non_zero = gpu
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
+        .count();
+    assert!(
+        non_zero > (width * height) as usize / 10,
+        "expected terrain pixels"
+    );
+
+    println!(
+        "display parity: worst per-channel difference {worst}/255 over {} bytes",
+        gpu.rgba.len()
+    );
+}
