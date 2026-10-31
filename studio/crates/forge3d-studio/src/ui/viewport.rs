@@ -499,14 +499,16 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
 /// nobody had chosen.
 fn shading_picker(studio: StudioRef<'_>, shading: crate::state::Shading) -> AnyElement {
     let mut row = h_flex().gap_1();
-    for (mode, label, tooltip) in [
+    for (mode, id, label, tooltip) in [
         (
             crate::state::Shading::Solid,
+            "shading-solid",
             "Solid",
             "Live terrain, rendered as you move (default)",
         ),
         (
             crate::state::Shading::Rendered,
+            "shading-rendered",
             "Rendered",
             "Render one still (F12 does the same); the next edit returns to Solid",
         ),
@@ -514,7 +516,7 @@ fn shading_picker(studio: StudioRef<'_>, shading: crate::state::Shading) -> AnyE
         let studio_pick = studio.clone();
         let selected = shading == mode;
         row = row.child(
-            Button::new(format!("shading-{label}"))
+            Button::new(id)
                 .label(label)
                 .xsmall()
                 .when(selected, |button| button.primary())

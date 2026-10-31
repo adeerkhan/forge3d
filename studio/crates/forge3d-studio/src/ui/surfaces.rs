@@ -22,16 +22,13 @@ pub const PROPERTIES_STRIP: bool = false;
 /// `File ▸ Open example…` still reaches the gallery.
 pub const GALLERY: bool = false;
 
-/// Timeline / Console / Certificates strip.
+/// Certificate verification, determinism checks and sequence export in the
+/// Render page.
 ///
-/// Kept, because the console is where engine errors are shown verbatim and the
-/// timeline is where a camera rig is played. Not a cluttered surface yet.
-pub const BOTTOM_STRIP: bool = true;
-
-/// The AETHER atmosphere, SIDERA sky and smoke-volume sections in World.
-pub const ENVIRONMENT_EXTRAS: bool = false;
-
-/// Certificate verification, determinism checks and sequence export.
+/// The page's own controls (output size, quality, render mode) are core and stay;
+/// what is hidden is the machinery around the artifact — verifying a signature,
+/// re-running determinism, writing 240 PNG frames. None of it is exercised while
+/// the look of the app is still changing.
 pub const CERTIFICATE_TOOLS: bool = false;
 
 /// Automatic low-resolution MapScene previews after an edit.

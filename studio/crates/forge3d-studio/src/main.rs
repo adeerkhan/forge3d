@@ -89,6 +89,22 @@ fn main() {
                 window.activate_window();
                 studio
             })
-            .expect("open Forge3D Studio window");
+            .unwrap_or_else(|error| {
+                // A failed window is almost always the GPU, and a panic trace
+                // does not say so: gpui reports "surface reports no supported
+                // texture formats" when the adapter it picked cannot present
+                // (a hybrid laptop whose discrete driver is mid-update, for
+                // example). Say what to check instead of unwrapping.
+                eprintln!("forge3d-studio: cannot open a window: {error}");
+                eprintln!(
+                    "  - check the GPU driver is loaded and matches its userspace \
+                     libraries (on NVIDIA: `nvidia-smi` should answer)"
+                );
+                eprintln!(
+                    "  - on a hybrid laptop, try FORGE3D_GPU_POWER=low (or `high`) \
+                     to pin the other adapter"
+                );
+                std::process::exit(1);
+            });
         });
 }

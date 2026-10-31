@@ -397,38 +397,40 @@ pub fn render(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> An
                     None => "Still is current".to_owned(),
                 }),
         )
-        .child(
-            v_flex()
-                .gap_1()
-                .child(group_label("Determinism", cx))
-                .child(
-                    Button::new("determinism-check")
-                        .label("Check twice, compare SHA-256")
-                        .xsmall()
-                        .outline()
-                        .on_click(move |_, _, cx| {
-                            studio_determinism
-                                .update(cx, |studio, cx| studio.run_determinism_check(cx));
-                        }),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().colors.muted_foreground)
-                        .child(match determinism {
-                            Some(report) if report.matched => format!(
-                                "identical: {}… (two runs, one process, one backend)",
-                                report.sha_a.chars().take(16).collect::<String>()
-                            ),
-                            Some(report) => format!(
-                                "DIFFERENT: {}… vs {}…",
-                                report.sha_a.chars().take(12).collect::<String>(),
-                                report.sha_b.chars().take(12).collect::<String>()
-                            ),
-                            None => "No check run yet.".to_owned(),
-                        }),
-                ),
-        );
+        .when(crate::ui::surfaces::CERTIFICATE_TOOLS, |body| {
+            body.child(
+                v_flex()
+                    .gap_1()
+                    .child(group_label("Determinism", cx))
+                    .child(
+                        Button::new("determinism-check")
+                            .label("Check twice, compare SHA-256")
+                            .xsmall()
+                            .outline()
+                            .on_click(move |_, _, cx| {
+                                studio_determinism
+                                    .update(cx, |studio, cx| studio.run_determinism_check(cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().colors.muted_foreground)
+                            .child(match determinism {
+                                Some(report) if report.matched => format!(
+                                    "identical: {}… (two runs, one process, one backend)",
+                                    report.sha_a.chars().take(16).collect::<String>()
+                                ),
+                                Some(report) => format!(
+                                    "DIFFERENT: {}… vs {}…",
+                                    report.sha_a.chars().take(12).collect::<String>(),
+                                    report.sha_b.chars().take(12).collect::<String>()
+                                ),
+                                None => "No check run yet.".to_owned(),
+                            }),
+                    ),
+            )
+        });
 
     body.into_any_element()
 }

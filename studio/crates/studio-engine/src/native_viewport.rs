@@ -89,6 +89,9 @@ pub struct NativeViewport {
     layer_opacity: f32,
     /// Mesh quality for the next frame: coarse while the camera moves.
     quality_is_interactive: bool,
+    /// Encode sRGB + opacity on the GPU. Off only for the A/B parity test and
+    /// as an escape hatch; read once, never per frame.
+    cpu_display: bool,
     /// The 3D environment grid: off by default, depth-tested when on.
     grid_enabled: bool,
     grid: Option<crate::grid::GroundGrid>,
@@ -131,6 +134,7 @@ impl NativeViewport {
             layer_visible: true,
             layer_opacity: 1.0,
             quality_is_interactive: false,
+            cpu_display: std::env::var_os("FORGE3D_STUDIO_CPU_COLOR").is_some(),
             grid_enabled: false,
             grid: None,
             terrain_span: 1000.0,
@@ -215,6 +219,11 @@ impl NativeViewport {
             .set_viewer_target(camera.target_x, camera.target_z);
         self.scene
             .set_viewer_sun(sun.azimuth_deg, sun.elevation_deg, sun.intensity);
+    }
+
+    /// Force the CPU display path (the A/B arm for `display.rs`).
+    pub fn set_cpu_display(&mut self, cpu: bool) {
+        self.cpu_display = cpu;
     }
 
     /// Switch the 3D environment grid on or off.
@@ -317,7 +326,7 @@ impl NativeViewport {
         // already mixed, into `display`. The readback below then copies bytes
         // instead of transforming them. `FORGE3D_STUDIO_CPU_COLOR=1` keeps the
         // CPU path for the A/B test and as an escape hatch.
-        let gpu_display = std::env::var_os("FORGE3D_STUDIO_CPU_COLOR").is_none();
+        let gpu_display = !self.cpu_display;
         let intensity = self.sun_intensity.clamp(0.0, 1.0);
         // Background in the space the blend happens in: sRGB bytes / 255, from
         // the same table the CPU path uses.

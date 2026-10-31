@@ -576,7 +576,7 @@ pub fn inspector_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut A
     inspector(&weak, window, cx)
 }
 
-/// `statistics` for callers that hold the entity (the properties strip).
+/// `statistics` for callers that hold the entity (the Statistics page).
 pub fn statistics_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
     let weak = studio.downgrade();
     statistics(&weak, window, cx)

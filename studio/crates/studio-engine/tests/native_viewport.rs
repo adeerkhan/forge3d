@@ -477,26 +477,40 @@ fn gpu_display_body() {
     viewport.set_layer_style(true, 0.65);
 
     let (width, height) = (320, 240);
-    std::env::remove_var("FORGE3D_STUDIO_CPU_COLOR");
+    // Switch the path through the API, not the environment: the env is read
+    // once at construction, and a test that flips it afterwards would compare
+    // the GPU path with itself (which is exactly what happened once).
+    viewport.set_cpu_display(false);
     let gpu = viewport
         .render_rgba(width, height)
         .expect("gpu display frame");
-    std::env::set_var("FORGE3D_STUDIO_CPU_COLOR", "1");
+    viewport.set_cpu_display(true);
     let cpu = viewport
         .render_rgba(width, height)
         .expect("cpu display frame");
-    std::env::remove_var("FORGE3D_STUDIO_CPU_COLOR");
+    viewport.set_cpu_display(false);
 
     assert_eq!(gpu.rgba.len(), cpu.rgba.len());
     let mut worst = 0i32;
     let mut worst_at = 0usize;
+    let mut differing = 0usize;
     for (index, (&a, &b)) in gpu.rgba.iter().zip(&cpu.rgba).enumerate() {
+        if a != b {
+            differing += 1;
+        }
         let delta = (a as i32 - b as i32).abs();
         if delta > worst {
             worst = delta;
             worst_at = index;
         }
     }
+    // Two different paths cannot agree byte for byte — if they do, the test is
+    // comparing one path with itself and proves nothing.
+    println!("display parity: {differing} bytes differ");
+    assert!(
+        differing > 0,
+        "the CPU path and the GPU path produced identical bytes: one path did not run"
+    );
     assert!(
         worst <= 1,
         "GPU display differs from the CPU path by {worst} at byte {worst_at} \

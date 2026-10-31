@@ -212,6 +212,32 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **C1 · audit cleanup: dead switches, the dead preview tier, and a test
+      that stopped testing** — the `caveman-review`/`ponytail-audit` findings
+      that did not need a decision from you.
+      - **The preview tier is gone, not switched off**: `schedule_preview`,
+        `flush_preview`, `preview_due/pending/in_flight/started`, `preview_ms`,
+        the preview size helper and its test, `ViewportImage::Preview` and the
+        debounce constants — **-240 lines in `state.rs`**, plus the
+        `MapSceneRender { preview }` flag that existed only to tell the two apart.
+        `Rendered` and F12 are how a render happens now.
+      - **Three switches that hid nothing are deleted** (`BOTTOM_STRIP`,
+        `ENVIRONMENT_EXTRAS`, `CERTIFICATE_TOOLS` was kept and *wired* to the
+        determinism block in the Render page, which is the one that actually
+        existed).
+      - **`set_shading` no longer early-returns for Rendered**: clicking Rendered
+        while already Rendered asks for a fresh still instead of doing nothing.
+      - **The CPU colour path is state, not an environment read**: `set_cpu_display`
+        instead of `var_os` per frame.
+      - **A test that had silently stopped testing is fixed.** Caching the
+        colour-path flag at construction turned the parity test into "GPU vs
+        GPU": both frames came out byte-identical and it still passed. The test
+        now switches the path through the API and **fails if the two paths agree
+        byte for byte** — it currently reports 87 891 differing bytes, worst
+        1/255. This is the third time this session that a green test was proving
+        nothing; the guard is now in the test itself.
+      - **A failed window says why instead of panicking.** `open_window` ended in
+        `.expect(...)`; it now prints what to check and exits 1.
 - [x] **UI-2 · Solid is the viewport, Rendered is a still you ask for** — the
       Blender split, made explicit, and the automatic tiers are gone.
       - `Shading::{Solid, Rendered}` in the viewport header (and the View menu,

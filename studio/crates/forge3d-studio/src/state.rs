@@ -179,8 +179,6 @@ pub enum LeftTab {
 pub enum ViewportImage {
     /// The native terrain preview, rendered on demand while you work.
     Live,
-    /// A low-resolution MapScene render, refreshed shortly after an edit.
-    Preview,
     /// A full-resolution render (F12 / Render still / MapScene Render).
     Render,
 }
@@ -507,7 +505,7 @@ pub enum PendingJob {
     SequenceFrame,
     MapSceneTemplate { render_after: bool },
     MapSceneValidate,
-    MapSceneRender { preview: bool },
+    MapSceneRender,
     MapSceneFurniture { render_after: bool },
     MapSceneExportSvg,
     MapScenePick,
@@ -654,16 +652,9 @@ pub struct Studio {
     /// low-resolution MapScene preview, or a full render result.
     pub viewport_image: ViewportImage,
     /// Debounce for the low-res MapScene preview.
-    preview_due: Option<std::time::Instant>,
-    preview_in_flight: bool,
-    /// Stamped when the last recipe edit arrived, so the preview log can say how
-    /// long the edit waited before it started rendering (the debounce + queue).
-    preview_edit_at: Option<std::time::Instant>,
+
     /// An edit arrived while a preview was rendering: render again after it.
-    preview_pending: bool,
-    pub preview_ms: f32,
-    pub preview_size: (u32, u32),
-    preview_started: Option<std::time::Instant>,
+
     /// Solid (live, default) or Rendered (an explicit still).
     pub shading: Shading,
     /// The 3D environment grid (ground-plane graticule) in the viewport.
@@ -689,9 +680,6 @@ pub struct Studio {
     /// holds `n`, once the first frame proves the document is loaded. Measures
     /// what a big document costs the (unvirtualised) layers panel.
     many_layers_pending: usize,
-    /// `FORGE3D_STUDIO_PREVIEW_SMOKE=n`: render `n` previews back to back and
-    /// log each duration, so preview latency is measured by the real path.
-    preview_smoke_left: u32,
     /// Ground point under the pointer, for the HUD readout.
     pub hover_ground: Option<(f32, f32)>,
     /// A still was requested, so the next bridge frame is presented even when
@@ -816,13 +804,6 @@ impl Studio {
             lfs_fetch: None,
             available_ops: std::collections::HashSet::new(),
             viewport_image: ViewportImage::Live,
-            preview_due: None,
-            preview_in_flight: false,
-            preview_pending: false,
-            preview_edit_at: None,
-            preview_ms: 0.0,
-            preview_size: (0, 0),
-            preview_started: None,
             awaiting_still: false,
             shading: Shading::Solid,
             grid: false,
@@ -834,10 +815,6 @@ impl Studio {
             pick_requested: None,
             startup_ms: None,
             many_layers_pending: std::env::var("FORGE3D_STUDIO_MANY_LAYERS")
-                .ok()
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(0),
-            preview_smoke_left: std::env::var("FORGE3D_STUDIO_PREVIEW_SMOKE")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0),
@@ -1487,13 +1464,6 @@ impl Studio {
             cx.notify();
             return;
         };
-        if self.preview_in_flight {
-            self.set_status("Caution: the preview under your click is still the previous frame");
-        }
-        // The engine worker is one thread: a click must not queue behind a
-        // preview this edit already invalidated. The recipe has not changed, so
-        // the cancelled preview would have drawn the same frame.
-        self.preview_due = None;
         let Some((recipe, _)) = self.render_recipe() else {
             return;
         };
@@ -1508,15 +1478,14 @@ impl Studio {
 
     /// Switch the viewport between Solid and Rendered.
     pub fn set_shading(&mut self, shading: Shading, cx: &mut Context<Self>) {
-        if self.shading == shading {
+        // Clicking Rendered while already Rendered is a request for a fresh
+        // still, not a no-op; only Solid is idempotent.
+        if self.shading == shading && shading == Shading::Solid {
             return;
         }
         self.shading = shading;
         match shading {
             Shading::Solid => {
-                // Editing again: drop anything queued and show the live frame.
-                self.preview_due = None;
-                self.preview_pending = false;
                 self.viewport_image = ViewportImage::Live;
                 self.live_viewport = true;
                 self.invalidate_viewport(cx);
@@ -1755,11 +1724,6 @@ impl Studio {
         self.drag = None;
         self.commit_view();
         self.viewport_dirty = true;
-        // A release is the moment the edit stops changing: do not make the
-        // person wait out the debounce as well.
-        if self.preview_due.is_some() {
-            self.preview_due = Some(std::time::Instant::now());
-        }
         // A release is worth a frame even with the live viewport off.
         if !self.render_in_flight {
             self.request_frame(cx, false);
@@ -3195,95 +3159,6 @@ impl Studio {
         self.furniture.inputs.clear();
     }
 
-    /// Target size for the low-resolution preview of the recipe.
-    ///
-    /// 640 px wide at most, never larger than the export, so an edit is
-    /// visible in about a second instead of waiting for a full render.
-    pub fn mapscene_preview_size(&self) -> (u32, u32) {
-        preview_size(self.project.export.width, self.project.export.height)
-    }
-
-    /// A recipe-affecting edit happened: refresh the preview shortly.
-    ///
-    /// Debounced so dragging a slider does not queue a render per change, and
-    /// coalescing so an edit during a preview renders once more after it.
-    pub fn schedule_preview(&mut self, cx: &mut Context<Self>) {
-        // Automatic previews are off (`ui::surfaces::AUTO_PREVIEW`). A render
-        // you did not ask for is the thing that made editing feel unlike a
-        // viewport; `Rendered`, F12 and the cartography panel ask for one.
-        if !crate::ui::surfaces::AUTO_PREVIEW {
-            return;
-        }
-        if self.scene_mode != SceneMode::MapScene || self.mapscene.recipe_json.is_none() {
-            return;
-        }
-        // 600 ms was chosen before P4 made a warm preview ~850 ms; the debounce
-        // is only there to coalesce a drag, and `preview_pending` already does
-        // that. 200 ms keeps an edit responsive without queueing renders.
-        self.preview_edit_at = Some(std::time::Instant::now());
-        self.preview_due = Some(std::time::Instant::now() + Duration::from_millis(200));
-        if self.preview_in_flight {
-            self.preview_pending = true;
-        }
-        cx.notify();
-    }
-
-    fn flush_preview(&mut self, cx: &mut Context<Self>) {
-        let Some(due) = self.preview_due else {
-            return;
-        };
-        if std::time::Instant::now() < due || self.preview_in_flight || self.busy {
-            return;
-        }
-        self.preview_due = None;
-        let Some((recipe, hidden)) = self.render_recipe() else {
-            return;
-        };
-        if hidden > 0 {
-            log::info!("preview: {hidden} hidden layer(s) stripped from the render");
-        }
-        let (width, height) = self.mapscene_preview_size();
-        let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&recipe) else {
-            return;
-        };
-        if let Some(output) = parsed
-            .get_mut("output")
-            .and_then(|value| value.as_object_mut())
-        {
-            output.insert("width".to_owned(), serde_json::json!(width));
-            output.insert("height".to_owned(), serde_json::json!(height));
-        }
-        let out = std::env::temp_dir().join(format!(
-            "studio-map-preview-{}-{}.png",
-            std::process::id(),
-            self.preview_size.0 as u64 + self.preview_size.1 as u64 + 7
-        ));
-        let job = self.engine.call(
-            "mapscene.render",
-            serde_json::json!({
-                "recipe_json": parsed.to_string(),
-                "out_png": out.to_string_lossy(),
-                "certificate": false,
-                "reuse_terrain": !terrain_reuse_disabled(),
-            }),
-        );
-        self.pending_jobs
-            .insert(job, PendingJob::MapSceneRender { preview: true });
-        self.preview_in_flight = true;
-        self.preview_started = Some(std::time::Instant::now());
-        self.preview_size = (width, height);
-        let waited = self
-            .preview_edit_at
-            .take()
-            .map(|edited| edited.elapsed().as_secs_f32() * 1000.0)
-            .unwrap_or(0.0);
-        log::info!("preview requested: {width}×{height} ({waited:.0} ms after the edit)");
-        self.set_status(format!("Preview {width}×{height}…"));
-        cx.notify();
-    }
-
-    // ------------------------------------------------------------ recipe layers
-
     /// The recipe the renderer should receive: hidden layers stripped, plus how
     /// many were hidden. The stored recipe keeps every layer (the panel still
     /// lists them), so hiding is a Studio-side fact about the recipe copy, not a
@@ -3320,7 +3195,6 @@ impl Studio {
         match patch(&recipe) {
             Some(next) => {
                 self.remember_recipe(next);
-                self.schedule_preview(cx);
             }
             None => {
                 self.set_status(refusal);
@@ -3480,7 +3354,6 @@ impl Studio {
         );
         if self.scene_mode == SceneMode::MapScene {
             self.frame = None;
-            self.schedule_preview(cx);
         } else {
             self.invalidate_viewport(cx);
         }
@@ -3543,7 +3416,6 @@ impl Studio {
                 let _ = this.update(cx, |this, cx| {
                     this.mapscene.raster_path = Some(path);
                     this.project_dirty = true;
-                    this.schedule_preview(cx);
                     cx.notify();
                 });
             }
@@ -3553,7 +3425,6 @@ impl Studio {
 
     pub fn clear_raster_overlay(&mut self, cx: &mut Context<Self>) {
         self.mapscene.raster_path = None;
-        self.schedule_preview(cx);
         self.project_dirty = true;
         cx.notify();
     }
@@ -3657,8 +3528,6 @@ impl Studio {
             log::info!("render: {hidden} hidden layer(s) stripped from the render");
         }
         self.busy = true;
-        self.preview_due = None;
-        self.preview_pending = false;
         let job = self.engine.call(
             "mapscene.render",
             serde_json::json!({
@@ -3668,8 +3537,7 @@ impl Studio {
                 "reuse_terrain": !terrain_reuse_disabled(),
             }),
         );
-        self.pending_jobs
-            .insert(job, PendingJob::MapSceneRender { preview: false });
+        self.pending_jobs.insert(job, PendingJob::MapSceneRender);
         self.mapscene.last_requested_present = present;
         self.set_status(if present {
             "Rendering the recipe through MapScene…".to_owned()
@@ -4002,7 +3870,6 @@ impl Studio {
         }
 
         self.poll_lfs_fetch(cx);
-        self.flush_preview(cx);
         self.flush_params_validate();
         crate::ui::params::sync_inputs(self, window, cx);
 
@@ -4630,10 +4497,10 @@ impl Studio {
                             self.render_mapscene(cx);
                         }
                         self.busy = false;
-                        self.set_status("Recipe built — preview follows");
+                        self.set_status("Recipe built");
                         if render_after && std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_none()
                         {
-                            self.schedule_preview(cx);
+                            self.render_mapscene(cx);
                         }
                         if std::env::var_os("FORGE3D_STUDIO_RECIPE_SMOKE").is_some() {
                             // Dev hook: exercise the P3 recipe operations.
@@ -4786,29 +4653,18 @@ impl Studio {
                     self.set_status("Map furniture applied");
                     if render_after {
                         self.render_mapscene(cx);
-                    } else {
-                        self.schedule_preview(cx);
                     }
                 } else {
                     self.push_error("Cartography", "the engine returned no patched recipe");
                 }
             }
-            PendingJob::MapSceneRender { preview } => {
+            PendingJob::MapSceneRender => {
                 self.busy = false;
                 let status = result
                     .get("status")
                     .and_then(|value| value.as_str())
                     .unwrap_or("rendered")
                     .to_owned();
-                let png = result
-                    .get("png")
-                    .and_then(|value| value.as_str())
-                    .map(PathBuf::from);
-                let elapsed = self
-                    .preview_started
-                    .take()
-                    .map(|started| started.elapsed().as_secs_f32() * 1000.0)
-                    .unwrap_or(0.0);
                 if let Some(sha) = result
                     .get("metadata")
                     .and_then(|meta| meta.get("certificate_payload_sha256"))
@@ -4816,76 +4672,23 @@ impl Studio {
                 {
                     self.mapscene.certificate_sha = Some(sha.to_owned());
                 }
-
-                if preview {
-                    self.preview_in_flight = false;
-                    self.preview_ms = elapsed;
-                    self.mapscene.last_status = Some(format!(
-                        "preview {}×{} · {:.0} ms",
-                        self.preview_size.0, self.preview_size.1, elapsed
-                    ));
-                    if let Some(path) = png {
-                        if let Ok(copy) = std::env::var("FORGE3D_STUDIO_PREVIEW_COPY") {
-                            // Dev hook: keep a copy, so a styling change can be
-                            // compared with the frame it produced.
-                            match std::fs::copy(&path, &copy) {
-                                Ok(_) => log::info!("preview copied to {copy}"),
-                                Err(error) => log::warn!("preview copy failed: {error}"),
-                            }
-                        }
+                self.mapscene.last_status = Some(format!("rendered: {status}"));
+                if let Some(path) = result
+                    .get("png")
+                    .and_then(|value| value.as_str())
+                    .map(PathBuf::from)
+                {
+                    log::info!("mapscene frame written: {}", path.display());
+                    if self.mapscene.last_requested_present {
                         if self.present_png(&path) {
-                            log::info!(
-                                "preview received: {width}×{height} in {elapsed:.0} ms (terrain renderer reused: {reused})",
-                                width = self.preview_size.0,
-                                height = self.preview_size.1,
-                                reused = result
-                                    .get("terrain_reused")
-                                    .and_then(|value| value.as_bool())
-                                    .unwrap_or(false)
-                            );
-                            self.viewport_image = ViewportImage::Preview;
-                            self.set_status(format!(
-                                "Preview {}×{} · {:.0} ms",
-                                self.preview_size.0, self.preview_size.1, elapsed
-                            ));
-                            if std::env::var_os("FORGE3D_STUDIO_PICK_MAP_SMOKE").is_some()
-                                && !self.pick_smoke_done
-                            {
-                                // Dev hook: two clicks through the real path —
-                                // the middle of the still and a corner of it.
-                                self.pick_smoke_done = true;
-                                let (width, height) = self.viewport_size.get();
-                                self.pick_map(width * 0.5, height * 0.5, cx);
-                                self.pick_map(3.0, 3.0, cx);
-                            }
-                            if self.preview_smoke_left > 0 {
-                                // Measure the *next* preview through the same
-                                // path an edit takes, with no debounce.
-                                self.preview_smoke_left -= 1;
-                                self.preview_due = Some(std::time::Instant::now());
-                            }
+                            self.viewport_image = ViewportImage::Render;
                         }
+                    } else {
+                        self.last_export = Some(path.clone());
                     }
-                    // An edit landed while this was rendering: render once more.
-                    if self.preview_pending {
-                        self.preview_pending = false;
-                        self.preview_due =
-                            Some(std::time::Instant::now() + Duration::from_millis(200));
-                    }
-                } else {
-                    self.mapscene.last_status = Some(format!("rendered: {status}"));
-                    if let Some(path) = png {
-                        log::info!("mapscene frame written: {}", path.display());
-                        if self.mapscene.last_requested_present {
-                            if self.present_png(&path) {
-                                self.viewport_image = ViewportImage::Render;
-                            }
-                        } else {
-                            self.last_export = Some(path.clone());
-                        }
-                    }
-                    self.set_status("MapScene frame rendered");
                 }
+                self.set_status("Rendered");
+                cx.notify();
             }
             PendingJob::MapScenePick => {
                 let elapsed = self
@@ -5243,18 +5046,6 @@ fn terrain_reuse_disabled() -> bool {
 /// One-line label for a recipe layer, for the debug hooks.
 fn layout_label(layer: &crate::ui::recipe::RecipeLayer) -> String {
     format!("{}:{}", layer.kind_label(), layer.label())
-}
-
-/// The low-resolution preview target: 640 px wide at most, aspect preserved,
-/// never larger than the export, at least 2 px so the renderer has a target.
-pub fn preview_size(width: u32, height: u32) -> (u32, u32) {
-    let width = width.max(1);
-    let height = height.max(1);
-    let scale = (640.0 / width as f32).min(1.0);
-    (
-        ((width as f32 * scale).round() as u32).max(2),
-        ((height as f32 * scale).round() as u32).max(2),
-    )
 }
 
 /// Which family an adapter name belongs to.
@@ -5625,14 +5416,6 @@ mod tests {
             json.get("graticule").is_none(),
             "off means absent, not empty"
         );
-    }
-
-    #[test]
-    fn the_preview_is_at_most_640_wide_and_keeps_aspect() {
-        assert_eq!(preview_size(1920, 1200), (640, 400));
-        assert_eq!(preview_size(960, 600), (640, 400));
-        assert_eq!(preview_size(480, 300), (480, 300), "never upscales");
-        assert_eq!(preview_size(0, 0), (2, 2));
     }
 
     #[test]
