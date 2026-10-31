@@ -212,6 +212,22 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **UI-1 · first declutter pass (no new features)** — after the perf work,
+      the complaint that matters is that the window is crowded. This pass only
+      removes things.
+      - **The viewport header repeated the navigation rail.** Fit, Isometric and
+        Live were buttons in both places; the View menu and the shortcut table
+        carry them too. The header now keeps the three presets the rail lacks
+        (Top/Front/Right) and the three overlay switches (Grid/Rig/Ortho); the
+        rail keeps Fit/zoom/isometric/live. Viewport buttons: **14 → 11**, and
+        HUD state (`· ortho`, `· grid`) still says what is on.
+      - **Audit for the next pass** (measured, not felt): the app has two
+        parallel navigations for the right-hand panel — 6 workspace tabs
+        (`Layout, Terrain, Cartography, Render, Look, Data`) and a 6-icon
+        properties strip (`Layer, Terrain parameters, Render, World,
+        Cartography, Statistics`). They are the same navigation with different
+        sets: `Data` opens the same page as `Layout`, and `Statistics` is
+        reachable *only* from the strip. 12 controls where 6–7 would do.
 - [x] **P10 · display encoding on the GPU** — the guide's §6.1, gated by a
       parity test.
       - New `studio-engine/src/display.rs`: a fullscreen pass that samples the

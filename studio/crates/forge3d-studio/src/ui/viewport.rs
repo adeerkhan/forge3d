@@ -153,13 +153,9 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
         .child(
             h_flex()
                 .gap_1()
-                .child(tool_button(
-                    studio,
-                    "fit",
-                    "Fit",
-                    IconName::Maximize,
-                    |studio, cx| studio.fit_camera(cx),
-                ))
+                // Fit, isometric and live are on the navigation rail already;
+                // repeating them here was three buttons of noise. The view
+                // menu and the shortcut table still carry every one of them.
                 .child(tool_button(
                     studio,
                     "top",
@@ -181,17 +177,9 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                     IconName::SquareArrowRight,
                     |studio, cx| studio.preset_view(0.0, 1.0, cx),
                 ))
-                .child(tool_button(
-                    studio,
-                    "iso",
-                    "Isometric",
-                    IconName::Box,
-                    |studio, cx| studio.preset_view(45.0, 35.0, cx),
-                ))
                 .child(grid_button(studio, state.grid))
                 .child(rig_button(studio, state.rig_handles))
-                .child(ortho_button(studio, ortho))
-                .child(live_button(studio, live_viewport)),
+                .child(ortho_button(studio, ortho)),
         )
         .child(
             // Fixed widths: a readout that changes width would resize the
@@ -614,25 +602,6 @@ fn ortho_button(studio: StudioRef<'_>, ortho: bool) -> AnyElement {
         })
         .on_click(move |_, _, cx| {
             let _ = studio.update(cx, |studio, cx| studio.toggle_ortho(cx));
-        })
-        .into_any_element()
-}
-
-/// The live-render switch: the escape hatch for a slow GPU or a heavy DEM.
-fn live_button(studio: StudioRef<'_>, live: bool) -> AnyElement {
-    let studio = studio.clone();
-    Button::new("live-viewport")
-        .icon(if live {
-            IconName::Pause
-        } else {
-            IconName::Play
-        })
-        .label(if live { "Live" } else { "Paused" })
-        .xsmall()
-        .when(live, |button| button.outline())
-        .when(!live, |button| button.ghost())
-        .on_click(move |_, _, cx| {
-            let _ = studio.update(cx, |studio, cx| studio.toggle_live_viewport(cx));
         })
         .into_any_element()
 }
