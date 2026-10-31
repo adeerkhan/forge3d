@@ -14,12 +14,13 @@ use gpui_kit::*;
 use crate::state::Studio;
 
 pub fn timeline(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> AnyElement {
-    let (kind, duration, radius, keyframe_count, frame, playing, sequence) = {
+    let (kind, duration, radius, playback_fps, keyframe_count, frame, playing, sequence) = {
         let state = studio.read(cx);
         (
             state.rig.kind.clone(),
             state.rig.duration,
             state.rig.radius_rel,
+            state.rig.playback_fps,
             state.rig.keyframes.len(),
             state.rig.frame,
             state.rig.playing,
@@ -49,6 +50,8 @@ pub fn timeline(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
     let studio_bake = studio.clone();
     let studio_duration_dec = studio.clone();
     let studio_duration_inc = studio.clone();
+    let studio_fps_dec = studio.clone();
+    let studio_fps_inc = studio.clone();
     let studio_radius_dec = studio.clone();
     let studio_radius_inc = studio.clone();
     let studio_prev = studio.clone();
@@ -98,6 +101,16 @@ pub fn timeline(studio: &Entity<Studio>, _window: &mut Window, cx: &mut App) -> 
                     |studio, cx| studio.step_rig_radius(-0.05, cx),
                     studio_radius_inc,
                     |studio, cx| studio.step_rig_radius(0.05, cx),
+                    cx,
+                ))
+                .child(stepper(
+                    "rig-fps",
+                    "Playback",
+                    format!("{playback_fps} fps"),
+                    studio_fps_dec,
+                    |studio, cx| studio.step_playback_fps(-6, cx),
+                    studio_fps_inc,
+                    |studio, cx| studio.step_playback_fps(6, cx),
                     cx,
                 )),
         )

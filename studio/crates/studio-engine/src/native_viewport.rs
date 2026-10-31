@@ -203,6 +203,13 @@ impl NativeViewport {
     /// shader hash must not change for a UI feature.
     pub fn set_grid(&mut self, enabled: bool) {
         self.grid_enabled = enabled;
+        // Log on the transition, never per frame: this runs inside the render.
+        log::info!(
+            "grid {} (span {:.0}, spacing {:.0})",
+            if enabled { "on" } else { "off" },
+            self.terrain_span,
+            (self.terrain_span.max(1.0) / 8.0).max(0.5)
+        );
     }
 
     /// Render one frame into the offscreen texture and read it back.
@@ -259,21 +266,7 @@ impl NativeViewport {
             }
             if let Some(grid) = self.grid.as_mut() {
                 grid.rebuild(&self.device, half_extent, spacing);
-                log::info!(
-                    "grid draw: span {:.1}, spacing {:.1}, half {:.1}, camera r {:.1} phi {:.1} theta {:.1}",
-                    self.terrain_span,
-                    spacing,
-                    half_extent,
-                    self.camera.radius,
-                    self.camera.phi_deg,
-                    self.camera.theta_deg
-                );
                 let depth = self.scene.viewer_depth().map(|(view, _)| view);
-                log::info!(
-                    "grid pass: {} vertices, depth attachment {}",
-                    grid.vertex_count(),
-                    depth.is_some()
-                );
                 grid.draw(
                     &self.queue,
                     &mut encoder,

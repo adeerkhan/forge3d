@@ -306,10 +306,6 @@ impl GroundGrid {
         DepthMode::from_env()
     }
 
-    pub fn vertex_count(&self) -> u32 {
-        self.vertex_count
-    }
-
     /// The depth mode in use, for the viewport's log line.
     pub fn mode(&self) -> DepthMode {
         self.mode

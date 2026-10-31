@@ -442,8 +442,18 @@ pub fn statistics(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> 
                     cx,
                 ))
                 .child(field(
-                    "Render time",
+                    "Engine render",
                     format!("{:.1} ms", state.frame_ms),
+                    cx,
+                ))
+                .child(field(
+                    "Frame interval",
+                    format!("{:.1} ms", state.frame_interval_ms),
+                    cx,
+                ))
+                .child(field(
+                    "Request → present",
+                    format!("{:.1} ms", state.frame_e2e_ms),
                     cx,
                 ))
                 .child(field(

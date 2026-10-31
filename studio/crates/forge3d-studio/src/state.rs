@@ -440,6 +440,10 @@ pub struct CameraRig {
     pub duration: f32,
     pub radius_rel: f32,
     pub samples_per_second: u32,
+    /// Playback rate for the timeline preview. Separate from the bake rate:
+    /// the bake decides how many keyframes exist, this decides how fast you
+    /// watch them (and can be higher than 12 Hz, which was the old cap).
+    pub playback_fps: u32,
     pub keyframes: Vec<CameraParams>,
     pub frame: usize,
     pub playing: bool,
@@ -452,6 +456,7 @@ impl Default for CameraRig {
             duration: 8.0,
             radius_rel: 0.4,
             samples_per_second: 12,
+            playback_fps: 24,
             keyframes: Vec::new(),
             frame: 0,
             playing: false,
@@ -535,7 +540,16 @@ pub struct Studio {
     /// Latest interactive frame, ready to present.
     pub frame: Option<Arc<gpui_kit::RenderImage>>,
     pub frame_size: (u32, u32),
+    /// Engine time inside `render_rgba` (what the HUD used to call "ms").
     pub frame_ms: f32,
+    /// Time between two presented frames — what you actually feel.
+    pub frame_interval_ms: f32,
+    /// Request sent → frame handed to the UI.
+    pub frame_e2e_ms: f32,
+    /// Stamped when a render request goes out.
+    frame_requested_at: Option<std::time::Instant>,
+    /// Stamped when a frame is presented, for the interval.
+    last_presented_at: Option<std::time::Instant>,
     /// The frame no longer matches the document (camera, sun, colormap, DEM).
     pub viewport_dirty: bool,
     /// Interactive rendering on. When off, the viewport draws only on an
@@ -617,6 +631,9 @@ pub struct Studio {
     /// Debounce for the low-res MapScene preview.
     preview_due: Option<std::time::Instant>,
     preview_in_flight: bool,
+    /// Stamped when the last recipe edit arrived, so the preview log can say how
+    /// long the edit waited before it started rendering (the debounce + queue).
+    preview_edit_at: Option<std::time::Instant>,
     /// An edit arrived while a preview was rendering: render again after it.
     preview_pending: bool,
     pub preview_ms: f32,
@@ -689,6 +706,10 @@ impl Studio {
             frame: None,
             frame_size: (0, 0),
             frame_ms: 0.0,
+            frame_interval_ms: 0.0,
+            frame_e2e_ms: 0.0,
+            frame_requested_at: None,
+            last_presented_at: None,
             viewport_dirty: true,
             live_viewport: true,
             render_in_flight: false,
@@ -747,6 +768,7 @@ impl Studio {
             preview_due: None,
             preview_in_flight: false,
             preview_pending: false,
+            preview_edit_at: None,
             preview_ms: 0.0,
             preview_size: (0, 0),
             preview_started: None,
@@ -1617,6 +1639,11 @@ impl Studio {
         self.drag = None;
         self.commit_view();
         self.viewport_dirty = true;
+        // A release is the moment the edit stops changing: do not make the
+        // person wait out the debounce as well.
+        if self.preview_due.is_some() {
+            self.preview_due = Some(std::time::Instant::now());
+        }
         // A release is worth a frame even with the live viewport off.
         if !self.render_in_flight {
             self.request_frame(cx, false);
@@ -1666,6 +1693,7 @@ impl Studio {
         let width = ((size.0 as f32 * scale) as u32).max(2);
         let height = ((size.1 as f32 * scale) as u32).max(2);
         self.render_in_flight = true;
+        self.frame_requested_at = Some(std::time::Instant::now());
         self.viewport.send(ViewportCommand::Render {
             width,
             height,
@@ -2299,6 +2327,20 @@ impl Studio {
         cx.notify();
     }
 
+    /// How many playback steps are due after `elapsed_ms` at `fps`.
+    ///
+    /// Pure so the "play in real time, skip when behind" rule is testable: a
+    /// slow frame must not stretch the animation, it must drop frames.
+    pub fn playback_steps_due(elapsed_ms: u64, fps: u32) -> u64 {
+        elapsed_ms.saturating_mul(fps.max(1) as u64) / 1000
+    }
+
+    pub fn step_playback_fps(&mut self, delta: i32, cx: &mut Context<Self>) {
+        self.rig.playback_fps = (self.rig.playback_fps as i32 + delta).clamp(6, 60) as u32;
+        self.set_status(format!("Playback {} fps", self.rig.playback_fps));
+        cx.notify();
+    }
+
     pub fn scrub_rig(&mut self, delta: i32, cx: &mut Context<Self>) {
         let count = self.rig.keyframes.len();
         if count == 0 {
@@ -2325,20 +2367,39 @@ impl Studio {
         }
         self.rig.playing = !self.rig.playing;
         if self.rig.playing {
-            cx.spawn(async move |this, cx| loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(83))
-                    .await;
-                let playing = this
-                    .update(cx, |this, cx| {
-                        if this.rig.playing {
-                            this.scrub_rig(1, cx);
-                        }
-                        this.rig.playing
-                    })
-                    .unwrap_or(false);
-                if !playing {
-                    break;
+            let fps = self.rig.playback_fps.max(1) as u64;
+            cx.spawn(async move |this, cx| {
+                let started = std::time::Instant::now();
+                let mut advanced = 0u64;
+                while let Some((_, count)) = this
+                    .read_with(cx, |this, _| (this.rig.playing, this.rig.keyframes.len()))
+                    .ok()
+                    .filter(|(playing, count)| *playing && *count > 0)
+                {
+                    let elapsed = started.elapsed().as_millis() as u64;
+                    let due = Studio::playback_steps_due(elapsed, fps as u32);
+                    if due <= advanced {
+                        // Sleep to the next due step instead of spinning.
+                        let next_at = (advanced + 1) * 1000 / fps;
+                        let wait = next_at.saturating_sub(elapsed).max(1);
+                        cx.background_executor()
+                            .timer(Duration::from_millis(wait))
+                            .await;
+                        continue;
+                    }
+                    // Behind: jump the missed steps rather than play in slow
+                    // motion. `scrub_rig` wraps, so a big jump is safe.
+                    let steps = ((due - advanced).min(count as u64)) as u32;
+                    advanced = due;
+                    let alive = this
+                        .update(cx, |this, cx| {
+                            this.scrub_rig(steps as i32, cx);
+                            this.rig.playing
+                        })
+                        .unwrap_or(false);
+                    if !alive {
+                        break;
+                    }
                 }
             })
             .detach();
@@ -3024,7 +3085,11 @@ impl Studio {
         if self.scene_mode != SceneMode::MapScene || self.mapscene.recipe_json.is_none() {
             return;
         }
-        self.preview_due = Some(std::time::Instant::now() + Duration::from_millis(600));
+        // 600 ms was chosen before P4 made a warm preview ~850 ms; the debounce
+        // is only there to coalesce a drag, and `preview_pending` already does
+        // that. 200 ms keeps an edit responsive without queueing renders.
+        self.preview_edit_at = Some(std::time::Instant::now());
+        self.preview_due = Some(std::time::Instant::now() + Duration::from_millis(200));
         if self.preview_in_flight {
             self.preview_pending = true;
         }
@@ -3075,7 +3140,12 @@ impl Studio {
         self.preview_in_flight = true;
         self.preview_started = Some(std::time::Instant::now());
         self.preview_size = (width, height);
-        log::info!("preview requested: {width}×{height}");
+        let waited = self
+            .preview_edit_at
+            .take()
+            .map(|edited| edited.elapsed().as_secs_f32() * 1000.0)
+            .unwrap_or(0.0);
+        log::info!("preview requested: {width}×{height} ({waited:.0} ms after the edit)");
         self.set_status(format!("Preview {width}×{height}…"));
         cx.notify();
     }
@@ -3768,8 +3838,14 @@ impl Studio {
     /// repaints only when something changed.
     fn start_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| loop {
+            // Two cadences: a frame on the GPU is worth checking for often (the
+            // measured wait dominated a presented frame), while an idle app
+            // should not wake 60 times a second for nothing.
+            let in_flight = this
+                .read_with(cx, |this, _| this.render_in_flight)
+                .unwrap_or(false);
             cx.background_executor()
-                .timer(Duration::from_millis(16))
+                .timer(Duration::from_millis(if in_flight { 2 } else { 16 }))
                 .await;
             let alive = this
                 .update_in(cx, |this, window, cx| this.poll(window, cx))
@@ -3982,13 +4058,32 @@ impl Studio {
                     );
                 }
                 self.render_in_flight = false;
+                // Three numbers, because one of them has been lying: `render_ms`
+                // is engine time only, the interval is what a person feels, and
+                // the two together are what the plan's gate is written against.
+                let now = std::time::Instant::now();
+                self.frame_e2e_ms = self
+                    .frame_requested_at
+                    .take()
+                    .map(|started| now.duration_since(started).as_secs_f32() * 1000.0)
+                    .unwrap_or(0.0);
+                let interval = self
+                    .last_presented_at
+                    .replace(now)
+                    .map(|last| now.duration_since(last).as_secs_f32() * 1000.0)
+                    .unwrap_or(0.0);
+                if interval > 0.0 {
+                    self.frame_interval_ms = interval;
+                }
                 self.frame_ms = frame.render_ms;
                 if std::env::var_os("FORGE3D_STUDIO_FRAME_LOG").is_some() {
                     log::info!(
-                        "frame {}x{} in {:.1} ms (live {}, dragging {})",
+                        "frame {}x{}: render {:.1} ms, interval {:.1} ms, request->present {:.1} ms (live {}, dragging {})",
                         frame.width,
                         frame.height,
                         frame.render_ms,
+                        self.frame_interval_ms,
+                        self.frame_e2e_ms,
                         self.live_viewport,
                         self.drag.is_some()
                     );
@@ -3997,6 +4092,7 @@ impl Studio {
                 if let Ok(path) = std::env::var("FORGE3D_STUDIO_DUMP_FRAME") {
                     // Dev/test hook: write the frame the UI is about to show, so
                     // the viewport can be compared against a certified export.
+                    // The copy exists only on this path — the fast path moves.
                     if let Some(buffer) =
                         image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
                     {
@@ -4004,7 +4100,7 @@ impl Studio {
                         self.push_log(false, format!("Viewport frame written to {path}"));
                     }
                 }
-                self.frame = Some(Arc::new(frame_image(&frame)));
+                self.frame = Some(Arc::new(frame_image(frame)));
             }
         }
         cx.notify();
@@ -5179,8 +5275,12 @@ fn one_path(result: Option<Option<PathBuf>>) -> Option<PathBuf> {
 }
 
 /// Convert one viewport frame into a GPUI image.
-fn frame_image(frame: &studio_engine::ViewportFrame) -> gpui_kit::RenderImage {
-    let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
+/// Wrap a finished frame for presentation.
+///
+/// Takes ownership: the pixel buffer is the largest allocation in the frame
+/// path, so copying it here cost a full-frame memcpy per frame for nothing.
+fn frame_image(frame: studio_engine::ViewportFrame) -> gpui_kit::RenderImage {
+    let buffer = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba)
         .unwrap_or_else(|| image::RgbaImage::new(frame.width.max(1), frame.height.max(1)));
     gpui_kit::RenderImage::new(vec![image::Frame::new(buffer)])
 }
@@ -5397,5 +5497,24 @@ mod tests {
         let span = terrain_span(469.0, 4391.0);
         assert!((span - 23_532.0).abs() < 1.0);
         assert!((fit_radius(span) - span * 1.65).abs() < 1.0);
+    }
+    #[test]
+    fn playback_schedule_runs_in_real_time_and_skips_when_behind() {
+        // At 24 fps a step is due every 41.6 ms.
+        assert_eq!(Studio::playback_steps_due(0, 24), 0);
+        assert_eq!(Studio::playback_steps_due(41, 24), 0);
+        assert_eq!(Studio::playback_steps_due(42, 24), 1);
+        assert_eq!(Studio::playback_steps_due(1000, 24), 24);
+        // A 200 ms stall must skip four steps, not stretch the animation.
+        assert_eq!(Studio::playback_steps_due(200, 24), 4);
+        // A degenerate rate still advances rather than dividing by zero.
+        assert_eq!(Studio::playback_steps_due(1000, 0), 1);
+        // Monotonic in time: never goes backwards.
+        let mut previous = 0;
+        for ms in (0..2000).step_by(7) {
+            let due = Studio::playback_steps_due(ms, 24);
+            assert!(due >= previous, "due must not regress at {ms} ms");
+            previous = due;
+        }
     }
 }

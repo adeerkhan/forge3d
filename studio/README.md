@@ -212,6 +212,38 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P7 · stop lying about the frame time, and cut the wait** — the guide's
+      four cheapest true findings, done with measurements.
+      - **The HUD showed engine time, not frame time.** `frame_ms` is
+        `frame.render_ms` inside `render_rgba`; the panel labelled it "ms".
+        The HUD now reads `render / interval` and Statistics shows three
+        numbers: engine render, presented-frame interval, request → present.
+        `FORGE3D_STUDIO_FRAME_LOG` prints all three per frame.
+      - **Most of the felt latency was our own poll.** The UI drained the
+        viewport on a fixed 16 ms timer, so a 4–5 ms frame was presented up to
+        16 ms late. Same binary, same autorbit run, 828×574:
+        `interval 21.6 → 4.8 ms` (median), `request → present 17.0 → 4.8 ms`,
+        `422 → 2035` frames in 14 s. The poll now runs at 2 ms while a frame is
+        in flight and 16 ms when idle, so an idle app still sleeps.
+        A wake channel was tried first and **reverted**: waking gpui's foreground
+        task from the worker thread trips the test scheduler ("Detected activity
+        on thread studio-viewport"), which is the harness doing its job.
+      - **Debounce 600 → 200 ms**, and releasing the mouse/ending an edit fires
+        the pending preview immediately. Measured: `209 ms after the edit`
+        instead of 600+, so edit → pixels is now ≈ 1.05 s instead of ≈ 1.45 s.
+        Coalescing (`preview_pending`) already prevents pile-ups.
+      - **Playback clock.** The timeline stepped on a fixed 83 ms sleep, capping
+        playback at 12 Hz whatever the GPU did. It now runs a deadline schedule
+        at `rig.playback_fps` (default 24, stepper 6–60 in the timeline),
+        **skipping** steps when behind instead of playing in slow motion; the
+        schedule is a pure function with tests.
+      - **Hot path.** The two per-frame `log::info!` grid lines are gone (one
+        line on the toggle instead), and `frame_image` takes ownership of the
+        pixel buffer instead of copying a full frame per present.
+      - Honest caveat on absolute numbers: warm previews measured 1977–2224 ms
+        today against 833–878 ms in P4. A control render outside Studio shows
+        the engine itself at ~2.2 s warm right now (machine on the `low-power`
+        platform profile), so that is the machine, not the build.
 - [x] **P6 · grid and a rig you can grab** — the two things that were missing
       from the 3D view itself.
       - **3D environment grid** (`Shift+G`, or the Grid button). A ground-plane

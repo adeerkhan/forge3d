@@ -24,6 +24,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let size_cell = state.viewport_size.clone();
     let camera = state.project.camera;
     let frame_ms = state.frame_ms;
+    let frame_interval_ms = state.frame_interval_ms;
     let has_terrain = state.project.terrain.is_some();
 
     // Toolbar: the six actions a viewport needs, plus the readout.
@@ -214,10 +215,13 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                         .child(format!("{} × {}", frame_size.0, frame_size.1)),
                 )
                 .child(
+                    // Engine render time / presented-frame interval. The first
+                    // number alone used to be labelled "ms" and read ~5 ms while
+                    // the felt interval was several times that.
                     div()
-                        .w(px(52.))
+                        .w(px(104.))
                         .text_right()
-                        .child(format!("{frame_ms:.1} ms")),
+                        .child(format!("{frame_ms:.1} / {frame_interval_ms:.1} ms")),
                 ),
         );
 
