@@ -546,6 +546,15 @@ pub struct Studio {
     pub frame_interval_ms: f32,
     /// Request sent → frame handed to the UI.
     pub frame_e2e_ms: f32,
+    /// The engine frame's own split: submit, GPU+map wait, pixel conversion.
+    pub frame_submit_ms: f32,
+    pub frame_wait_ms: f32,
+    pub frame_convert_ms: f32,
+    /// What GPUI renders with, from `Window::gpu_specs`. The engine reports its
+    /// own adapter; when the two differ, the workspace is compositing on one
+    /// GPU while the terrain renders on another.
+    pub ui_device: Option<String>,
+    pub ui_device_class: Option<String>,
     /// Stamped when a render request goes out.
     frame_requested_at: Option<std::time::Instant>,
     /// Stamped when a frame is presented, for the interval.
@@ -684,6 +693,25 @@ impl Studio {
         let (viewport, viewport_rx) = ViewportWorker::spawn();
         let focus_handle = cx.focus_handle();
 
+        // What the UI composites with. The engine reports its own adapter; two
+        // different adapters means every frame crosses PCIe and one of the two
+        // GPUs is idle work.
+        let specs = window.gpu_specs();
+        let ui_device = specs.as_ref().map(|specs| specs.device_name.clone());
+        let ui_device_class = ui_device.as_deref().map(adapter_class);
+        if let Some(specs) = specs.as_ref() {
+            log::info!(
+                "UI device: {} ({}{})",
+                specs.device_name,
+                specs.driver_name,
+                if specs.is_software_emulated {
+                    ", software"
+                } else {
+                    ""
+                }
+            );
+        }
+
         // The dock needs a weak handle on this entity, which exists while the
         // constructor runs, so it is built here rather than after `cx.new`.
         cx.set_global(crate::ui::StudioHandle(cx.entity().downgrade()));
@@ -708,6 +736,11 @@ impl Studio {
             frame_ms: 0.0,
             frame_interval_ms: 0.0,
             frame_e2e_ms: 0.0,
+            frame_submit_ms: 0.0,
+            frame_wait_ms: 0.0,
+            frame_convert_ms: 0.0,
+            ui_device,
+            ui_device_class,
             frame_requested_at: None,
             last_presented_at: None,
             viewport_dirty: true,
@@ -4079,12 +4112,18 @@ impl Studio {
                     self.frame_interval_ms = interval;
                 }
                 self.frame_ms = frame.render_ms;
+                self.frame_submit_ms = frame.submit_ms;
+                self.frame_wait_ms = frame.wait_ms;
+                self.frame_convert_ms = frame.convert_ms;
                 if std::env::var_os("FORGE3D_STUDIO_FRAME_LOG").is_some() {
                     log::info!(
-                        "frame {}x{}: render {:.1} ms, interval {:.1} ms, request->present {:.1} ms (live {}, dragging {})",
+                        "frame {}x{}: render {:.1} ms (submit {:.1}, wait {:.1}, convert {:.1}), interval {:.1} ms, request->present {:.1} ms (live {}, dragging {})",
                         frame.width,
                         frame.height,
                         frame.render_ms,
+                        frame.submit_ms,
+                        frame.wait_ms,
+                        frame.convert_ms,
                         self.frame_interval_ms,
                         self.frame_e2e_ms,
                         self.live_viewport,
@@ -5116,6 +5155,42 @@ pub fn preview_size(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
+/// Which family an adapter name belongs to.
+///
+/// The engine and GPUI report their adapters independently, and the strings are
+/// not identical ("NVIDIA GeForce RTX 5060 Laptop GPU" vs whatever wgpu 30
+/// prints). Comparing families is what makes "are the UI and the viewport on
+/// the same GPU?" answerable without string equality, which would be brittle.
+pub fn adapter_class(name: &str) -> String {
+    let lower = name.to_ascii_lowercase();
+    let family = if lower.contains("nvidia") || lower.contains("geforce") || lower.contains("rtx") {
+        "nvidia"
+    } else if lower.contains("intel") || lower.contains("arc") || lower.contains("iris") {
+        "intel"
+    } else if lower.contains("amd") || lower.contains("radeon") {
+        "amd"
+    } else if lower.contains("apple") {
+        "apple"
+    } else if lower.contains("llvmpipe")
+        || lower.contains("swiftshader")
+        || lower.contains("software")
+    {
+        "software"
+    } else {
+        "unknown"
+    };
+    family.to_owned()
+}
+
+/// Whether the UI and the viewport render on the same adapter family.
+///
+/// `None` when either side has not reported yet, so a caller never turns "not
+/// measured" into a false "mismatch".
+pub fn adapter_parity(ui: Option<&str>, viewport: Option<&str>) -> Option<bool> {
+    let (ui, viewport) = (ui?, viewport?);
+    Some(adapter_class(ui) == adapter_class(viewport))
+}
+
 /// The repository checkout the app is running from.
 ///
 /// Gallery scenes and engine fixtures are repo-relative; resolving them against
@@ -5530,5 +5605,38 @@ mod tests {
             assert!(due >= previous, "due must not regress at {ms} ms");
             previous = due;
         }
+    }
+    #[test]
+    fn adapter_classes_tell_the_two_sides_apart() {
+        assert_eq!(
+            adapter_class("NVIDIA GeForce RTX 5060 Laptop GPU"),
+            "nvidia"
+        );
+        assert_eq!(adapter_class("Intel(R) Graphics (RPL-S)"), "intel");
+        assert_eq!(adapter_class("AMD Radeon 780M"), "amd");
+        assert_eq!(adapter_class("Apple M3 Pro"), "apple");
+        assert_eq!(adapter_class("llvmpipe (LLVM 17)"), "software");
+        assert_eq!(adapter_class("Some New Thing"), "unknown");
+
+        // Same family, different strings: the same GPU for our purposes.
+        assert_eq!(
+            adapter_parity(
+                Some("NVIDIA GeForce RTX 5060 Laptop GPU"),
+                Some("NVIDIA GeForce RTX 5060 Laptop GPU (Vulkan)")
+            ),
+            Some(true)
+        );
+        // A hybrid laptop with the terrain on the iGPU: that is the failure the
+        // Statistics panel now reports.
+        assert_eq!(
+            adapter_parity(
+                Some("NVIDIA GeForce RTX 5060 Laptop GPU"),
+                Some("Intel(R) Graphics (RPL-S)")
+            ),
+            Some(false)
+        );
+        // Not measured is not a mismatch.
+        assert_eq!(adapter_parity(None, Some("Intel(R) Graphics")), None);
+        assert_eq!(adapter_parity(Some("Intel(R) Graphics"), None), None);
     }
 }

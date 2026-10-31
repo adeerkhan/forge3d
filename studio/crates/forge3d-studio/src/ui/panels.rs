@@ -415,7 +415,30 @@ pub fn statistics(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> 
             v_flex()
                 .gap_1()
                 .child(group_label("Device", cx))
-                .child(field("Adapter", state.adapter.clone(), cx))
+                .child(field("Viewport adapter", state.adapter.clone(), cx))
+                .child(field(
+                    "UI adapter",
+                    state
+                        .ui_device
+                        .clone()
+                        .unwrap_or_else(|| "not reported".to_owned()),
+                    cx,
+                ))
+                .child(field(
+                    "Shared GPU",
+                    match crate::state::adapter_parity(
+                        state.ui_device.as_deref(),
+                        Some(state.adapter.as_str()),
+                    ) {
+                        Some(true) => "yes — UI and viewport on one adapter".to_owned(),
+                        Some(false) => {
+                            "NO — every frame crosses adapters; frames are slower than they need to be"
+                                .to_owned()
+                        }
+                        None => "unknown".to_owned(),
+                    },
+                    cx,
+                ))
                 .child(field("Backend", state.backend.clone(), cx))
                 .child(field(
                     "Software fallback",
@@ -454,6 +477,14 @@ pub fn statistics(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App) -> 
                 .child(field(
                     "Request → present",
                     format!("{:.1} ms", state.frame_e2e_ms),
+                    cx,
+                ))
+                .child(field(
+                    "  submit · GPU wait · convert",
+                    format!(
+                        "{:.1} · {:.1} · {:.1} ms",
+                        state.frame_submit_ms, state.frame_wait_ms, state.frame_convert_ms
+                    ),
                     cx,
                 ))
                 .child(field(

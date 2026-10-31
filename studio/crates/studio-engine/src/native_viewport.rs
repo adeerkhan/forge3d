@@ -45,7 +45,14 @@ pub struct ViewportFrame {
     pub height: u32,
     /// Row-major RGBA, sRGB-encoded, `width * height * 4` bytes.
     pub rgba: Vec<u8>,
+    /// Total inside `render_rgba`.
     pub render_ms: f32,
+    /// Encode + submit, i.e. what the GPU is asked to do.
+    pub submit_ms: f32,
+    /// Waiting for the GPU and for the readback buffer to map.
+    pub wait_ms: f32,
+    /// The per-pixel sRGB/opacity pass on this thread.
+    pub convert_ms: f32,
 }
 
 impl std::fmt::Debug for ViewportFrame {
@@ -55,6 +62,9 @@ impl std::fmt::Debug for ViewportFrame {
             .field("height", &self.height)
             .field("bytes", &self.rgba.len())
             .field("render_ms", &self.render_ms)
+            .field("submit_ms", &self.submit_ms)
+            .field("wait_ms", &self.wait_ms)
+            .field("convert_ms", &self.convert_ms)
             .finish()
     }
 }
@@ -238,6 +248,7 @@ impl NativeViewport {
         self.ensure_target(width, height);
 
         let started = Instant::now();
+        let mut stage = Instant::now();
         let view = self
             .render_view
             .as_ref()
@@ -330,6 +341,8 @@ impl NativeViewport {
             },
         );
         self.queue.submit(Some(encoder.finish()));
+        let submit_ms = stage.elapsed().as_secs_f32() * 1000.0;
+        stage = Instant::now();
 
         let slice = buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -340,6 +353,8 @@ impl NativeViewport {
         rx.recv()
             .map_err(|_| "readback channel closed".to_owned())?
             .map_err(|error| format!("readback map: {error}"))?;
+        let wait_ms = stage.elapsed().as_secs_f32() * 1000.0;
+        stage = Instant::now();
 
         // Layer opacity fades the frame toward the backdrop the render already
         // cleared to; a hidden layer shows only that backdrop. Doing it here
@@ -377,12 +392,16 @@ impl NativeViewport {
         }
         buffer.unmap();
 
+        let convert_ms = stage.elapsed().as_secs_f32() * 1000.0;
         self.last_render_ms = started.elapsed().as_secs_f32() * 1000.0;
         Ok(ViewportFrame {
             width,
             height,
             rgba,
             render_ms: self.last_render_ms,
+            submit_ms,
+            wait_ms,
+            convert_ms,
         })
     }
 

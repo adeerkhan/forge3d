@@ -94,6 +94,32 @@ fn the_studio_window_builds_and_paints_a_frame(cx: &mut TestAppContext) {
         Some("high"),
         "constructing a Studio must request the high-performance adapter"
     );
+
+    // The rumour this answers: "UI and viewport are on different GPUs". The two
+    // sides report their adapters independently, so compare families and fail
+    // the suite when a hybrid machine splits them.
+    let (ui, viewport) = cx
+        .update(|cx| {
+            handle
+                .read(cx)
+                .map(|studio| (studio.ui_device.clone(), studio.adapter.clone()))
+                .ok()
+        })
+        .expect("studio state");
+    assert!(!viewport.is_empty(), "the engine must report its adapter");
+    assert_ne!(
+        forge3d_studio::state::adapter_class(&viewport),
+        "software",
+        "the viewport must not be rendering on a software adapter"
+    );
+    // The fake test window reports no adapter, so the parity check only runs
+    // when GPUI actually knows what it composites with (i.e. in the real app).
+    // Recorded rather than skipped silently: a test run prints which case it is.
+    match forge3d_studio::state::adapter_parity(ui.as_deref(), Some(viewport.as_str())) {
+        Some(true) => eprintln!("adapter parity: UI and viewport share {viewport}"),
+        Some(false) => panic!("UI ({ui:?}) and viewport ({viewport}) are on different adapters"),
+        None => eprintln!("adapter parity: not measurable in the test platform"),
+    }
 }
 
 #[gpui::test]

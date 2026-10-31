@@ -212,6 +212,33 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **P9 · both adapters named, and the frame split into its stages** — two
+      questions answered with numbers instead of folklore.
+      - **"UI and viewport are on different GPUs."** They are not, on this
+        machine, and now the app proves it: `Window::gpu_specs()` names the
+        adapter GPUI composites with, the engine names its own, and Statistics
+        shows both plus a `Shared GPU` verdict. A window test fails the suite
+        when the families differ (and says so when the test platform cannot
+        report one). Measured: `UI device: NVIDIA GeForce RTX 5060 Laptop GPU
+        (NVIDIA)`, `Viewport device: NVIDIA GeForce RTX 5060 Laptop GPU
+        (Vulkan)` — one adapter. The cross-adapter cost, when it did happen,
+        was the *configuration* bug fixed in P5 (the power pin lived in `main`),
+        not the readback: the boundary measures **1.6–1.9 ms** at every size and
+        on both adapters.
+      - **The frame is not one cost.** `render_ms` is now `submit + wait +
+        convert`, logged per frame and shown in Statistics. At 1920×1080:
+
+        | adapter | render | submit | GPU+map wait | CPU convert |
+        |---|---|---|---|---|
+        | RTX 5060 | 6.9 ms | 0.1 | 2.6 (38 %) | **3.9 (57 %)** |
+        | Intel iGPU | 42.4 ms | 0.2 | **41.2 (97 %)** | 1.0 (2 %) |
+
+      - **What that decides.** On the dGPU the biggest single cost is the CPU
+        pixel loop, so the guide's §6.1 (a GPU colour/opacity blit) is the
+        highest-value next change *for the machine we develop on* — not the
+        readback ring I had ranked above it. On the iGPU the GPU raster is 97 %,
+        so the solid shader (§7) is the only thing that helps there. Two
+        different fixes, and now each has a number attached.
 - [x] **P8 · mesh quality tiers, and the gate measured** — the guide's §6.3, built
       on numbers rather than on the assumption behind it.
       - **`ViewQuality::{Interactive, Settled}`** in the engine fork: one
