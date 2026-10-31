@@ -91,7 +91,10 @@ impl Workspace {
             Workspace::Cartography => PropertiesTab::Cartography,
             Workspace::Render => PropertiesTab::Render,
             Workspace::Look => PropertiesTab::World,
-            Workspace::Data => PropertiesTab::Layer,
+            // `Data` used to open the same page as `Layout`, so the tabs had two
+            // names for one page and no way to reach Statistics (which only the
+            // icon strip offered). It opens Statistics now.
+            Workspace::Data => PropertiesTab::Stats,
         }
     }
 
@@ -180,6 +183,19 @@ pub enum ViewportImage {
     Preview,
     /// A full-resolution render (F12 / Render still / MapScene Render).
     Render,
+}
+
+/// What the viewport shows while you work.
+///
+/// Blender's split, kept explicit: **Solid** is the live terrain and is always
+/// on; **Rendered** is one still you ask for, and the next edit or camera move
+/// returns you to Solid because the still no longer matches the scene. There is
+/// no third, automatic tier: a render you did not ask for is a render that
+/// makes editing feel slow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shading {
+    Solid,
+    Rendered,
 }
 
 /// Where a gallery card is in its open flow.
@@ -648,6 +664,8 @@ pub struct Studio {
     pub preview_ms: f32,
     pub preview_size: (u32, u32),
     preview_started: Option<std::time::Instant>,
+    /// Solid (live, default) or Rendered (an explicit still).
+    pub shading: Shading,
     /// The 3D environment grid (ground-plane graticule) in the viewport.
     pub grid: bool,
     /// The camera rig's on-screen handles (pivot, orbit ring, elevation arm).
@@ -806,6 +824,7 @@ impl Studio {
             preview_size: (0, 0),
             preview_started: None,
             awaiting_still: false,
+            shading: Shading::Solid,
             grid: false,
             rig_handles: false,
             ortho: false,
@@ -845,6 +864,15 @@ impl Studio {
         studio
             .engine
             .call("terrain.params_schema", serde_json::json!({}));
+        if let Ok(mode) = std::env::var("FORGE3D_STUDIO_SHADING") {
+            let shading = if mode.eq_ignore_ascii_case("rendered") {
+                Shading::Rendered
+            } else {
+                Shading::Solid
+            };
+            studio.set_shading(shading, cx);
+            log::info!("shading smoke: {:?}", shading);
+        }
         if let Ok(tab) = std::env::var("FORGE3D_STUDIO_OUTLINER") {
             // Dev hook: open the outliner on a named tab, so the examples
             // gallery (thumbnails, cards) can be exercised without a click.
@@ -1478,6 +1506,61 @@ impl Studio {
         cx.notify();
     }
 
+    /// Switch the viewport between Solid and Rendered.
+    pub fn set_shading(&mut self, shading: Shading, cx: &mut Context<Self>) {
+        if self.shading == shading {
+            return;
+        }
+        self.shading = shading;
+        match shading {
+            Shading::Solid => {
+                // Editing again: drop anything queued and show the live frame.
+                self.preview_due = None;
+                self.preview_pending = false;
+                self.viewport_image = ViewportImage::Live;
+                self.live_viewport = true;
+                self.invalidate_viewport(cx);
+                self.set_status("Solid — live terrain, no test renders");
+            }
+            Shading::Rendered => {
+                self.set_status("Rendered — one still; the next edit returns to Solid");
+                self.render_rendered_still(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Ask for the one still a `Rendered` viewport shows.
+    ///
+    /// MapScene renders the recipe; a terrain scene renders through the same
+    /// bridge call a saved image uses, so "Rendered" and "save this frame" are
+    /// the same pixels. With nothing loaded it says so and waits: the render is
+    /// issued from `TerrainLoaded` when the dataset arrives.
+    fn render_rendered_still(&mut self, cx: &mut Context<Self>) {
+        if self.scene_mode == SceneMode::MapScene {
+            if self.mapscene.recipe_json.is_some() {
+                self.render_mapscene(cx);
+            } else {
+                self.set_status("Build a MapScene recipe, or switch to Terrain to render");
+            }
+            return;
+        }
+        let (width, height) = render_size(self.viewport_size.get().0, self.viewport_size.get().1);
+        if width < 2 || height < 2 || self.project.terrain.is_none() {
+            self.set_status("Load a DEM before rendering");
+            return;
+        }
+        self.awaiting_still = true;
+        self.busy = true;
+        self.engine.send(Command::RenderFrame {
+            width,
+            height,
+            force: true,
+        });
+        self.viewport_dirty = false;
+        cx.notify();
+    }
+
     /// Show or hide the camera rig's handles.
     pub fn toggle_rig_handles(&mut self, cx: &mut Context<Self>) {
         self.rig_handles = !self.rig_handles;
@@ -1687,6 +1770,13 @@ impl Studio {
 
     pub fn invalidate_viewport(&mut self, cx: &mut Context<Self>) {
         self.viewport_dirty = true;
+        // A rendered still stops being true the moment the scene or the camera
+        // moves. Rather than leave a stale picture on screen, fall back to Solid
+        // so what you see is what the document is.
+        if self.shading == Shading::Rendered {
+            self.shading = Shading::Solid;
+            self.viewport_image = ViewportImage::Live;
+        }
         self.viewport.send(ViewportCommand::SetView {
             camera: self.project.camera,
             sun: self.project.sun,
@@ -3118,6 +3208,12 @@ impl Studio {
     /// Debounced so dragging a slider does not queue a render per change, and
     /// coalescing so an edit during a preview renders once more after it.
     pub fn schedule_preview(&mut self, cx: &mut Context<Self>) {
+        // Automatic previews are off (`ui::surfaces::AUTO_PREVIEW`). A render
+        // you did not ask for is the thing that made editing feel unlike a
+        // viewport; `Rendered`, F12 and the cartography panel ask for one.
+        if !crate::ui::surfaces::AUTO_PREVIEW {
+            return;
+        }
         if self.scene_mode != SceneMode::MapScene || self.mapscene.recipe_json.is_none() {
             return;
         }
@@ -4234,6 +4330,9 @@ impl Studio {
                 if self.pending_example.is_some() {
                     self.apply_pending_example(cx);
                 }
+                if self.shading == Shading::Rendered {
+                    self.render_rendered_still(cx);
+                }
                 if std::env::var_os("FORGE3D_STUDIO_STILL_SMOKE").is_some() {
                     // Dev hook: exercise the render path (offline accumulation)
                     // without clicking Render.
@@ -4270,7 +4369,7 @@ impl Studio {
                     self.present_rgba(width, height, rgba);
                     self.viewport_dirty = false;
                     self.viewport_image = ViewportImage::Render;
-                    self.set_status("Render result — move the view to return to the preview");
+                    self.set_status("Rendered still — move the view to return to Solid");
                 }
                 if let Some(path) = certificate {
                     let source = path
@@ -4527,6 +4626,9 @@ impl Studio {
                         self.remember_recipe(text);
                         self.mapscene.last_status =
                             Some("Recipe built from the template".to_owned());
+                        if self.shading == Shading::Rendered {
+                            self.render_mapscene(cx);
+                        }
                         self.busy = false;
                         self.set_status("Recipe built — preview follows");
                         if render_after && std::env::var_os("FORGE3D_STUDIO_CARTO_SMOKE").is_none()

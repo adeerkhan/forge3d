@@ -570,6 +570,12 @@ pub fn console_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App
     console(&weak, window, cx)
 }
 
+/// `inspector` for callers that hold the entity (the properties page).
+pub fn inspector_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let weak = studio.downgrade();
+    inspector(&weak, window, cx)
+}
+
 /// `statistics` for callers that hold the entity (the properties strip).
 pub fn statistics_entity(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
     let weak = studio.downgrade();

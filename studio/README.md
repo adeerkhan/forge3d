@@ -212,6 +212,32 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **UI-2 · Solid is the viewport, Rendered is a still you ask for** — the
+      Blender split, made explicit, and the automatic tiers are gone.
+      - `Shading::{Solid, Rendered}` in the viewport header (and the View menu,
+        `Z` / `Shift+Z`). **Solid** is the live terrain and the default.
+        **Rendered** asks for exactly one still: a MapScene recipe renders
+        through `mapscene.render`, a terrain scene through the same
+        `Command::RenderFrame` a saved image uses — so "Rendered" and "save this
+        frame" are the same pixels. The next edit or camera move returns to
+        Solid, because a still that no longer matches the document is a lie.
+      - **Automatic previews are off** (`ui::surfaces::AUTO_PREVIEW = false`).
+        Measured in Solid with the recipe smoke firing a dozen edits: **0 preview
+        renders**. In Rendered, one full 960×600 render, no preview either. The
+        debounce/coalescing code stays behind the switch.
+- [x] **UI-3 · one navigation, and the gallery put away** — the duplicated
+      surface, hidden rather than deleted.
+      - The properties **icon strip** is off (`ui::surfaces::PROPERTIES_STRIP`).
+        It was a second navigation for the pages the workspace tabs open, and
+        `Data` opened the same page as `Layout`. `Data` now opens **Statistics**
+        (which only the strip could reach), so the six tabs are six distinct
+        pages and nothing became unreachable. The strip's code stays compiled and
+        is drawn again by flipping the switch.
+      - The **examples gallery** is off (`GALLERY`), so the outliner is one
+        surface — your layers — with no tab row to choose it.
+      - Prefer switches to commented-out code: commented code is never compiled,
+        so it silently rots; a `const` keeps it type-checked and one edit from
+        coming back.
 - [x] **UI-1 · first declutter pass (no new features)** — after the perf work,
       the complaint that matters is that the window is crowded. This pass only
       removes things.

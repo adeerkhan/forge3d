@@ -44,6 +44,8 @@ gpui_kit::actions!(
         CameraLeft,
         ToggleOrtho,
         ToggleGrid,
+        SolidShading,
+        RenderedShading,
         ToggleRigHandles,
         CameraIsometric,
         ResetCamera,
@@ -134,6 +136,8 @@ macro_rules! studio_action_table {
             CameraLeft, "Left", View, false, Some("ctrl-3");
             ToggleOrtho, "Orthographic (approximate)", View, false, Some("5");
             ToggleGrid, "Grid", View, false, Some("shift-g");
+            SolidShading, "Solid (viewport)", View, false, Some("z");
+            RenderedShading, "Rendered (viewport)", View, false, Some("shift-z");
             ToggleRigHandles, "Rig handles", View, false, Some("shift-r");
             CameraIsometric, "Isometric", View, false, Some("0");
             ResetCamera, "Reset camera", View, true, None;
@@ -335,6 +339,18 @@ impl StudioAction for CameraBack {
 impl StudioAction for CameraLeft {
     fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
         studio.preset_view(180.0, 1.0, cx);
+    }
+}
+
+impl StudioAction for SolidShading {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.set_shading(crate::state::Shading::Solid, cx);
+    }
+}
+
+impl StudioAction for RenderedShading {
+    fn run(studio: &mut crate::state::Studio, cx: &mut Context<crate::state::Studio>) {
+        studio.set_shading(crate::state::Shading::Rendered, cx);
     }
 }
 

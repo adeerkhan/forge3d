@@ -25,6 +25,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let camera = state.project.camera;
     let frame_ms = state.frame_ms;
     let frame_interval_ms = state.frame_interval_ms;
+    let shading = state.shading;
     let has_terrain = state.project.terrain.is_some();
 
     // Toolbar: the six actions a viewport needs, plus the readout.
@@ -41,8 +42,6 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let show_hud = state.show_hud;
     let image_tier = state.viewport_image;
     let ortho = state.ortho;
-    let preview_ms = state.preview_ms;
-    let preview_size = state.preview_size;
     let showing_render = image_tier != crate::state::ViewportImage::Live;
     let frame_size = state.frame_size;
     let tools = h_flex()
@@ -188,14 +187,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .gap_2()
                 .text_xs()
                 .text_color(cx.theme().colors.muted_foreground)
-                .child(div().w(px(150.)).text_right().child(match image_tier {
-                    crate::state::ViewportImage::Live => "live preview".to_owned(),
-                    crate::state::ViewportImage::Preview => format!(
-                        "preview {}×{} · {:.0} ms",
-                        preview_size.0, preview_size.1, preview_ms
-                    ),
-                    crate::state::ViewportImage::Render => "render result".to_owned(),
-                }))
+                .child(shading_picker(studio, shading))
                 .child(
                     div()
                         .w(px(76.))
@@ -279,7 +271,7 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
     let hover = state.hover_ground;
     let target = (camera.target_x, camera.target_z);
     let hud_left = if showing_render {
-        "render result — move the view to return to the live preview".to_owned()
+        "rendered still — move the view to return to Solid".to_owned()
     } else if live_viewport {
         format!(
             "Orbit {:.0}° · Elev {:.0}° · Dist {:.0}",
@@ -498,6 +490,42 @@ pub fn viewport_panel(studio: StudioRef<'_>, _window: &mut Window, cx: &mut App)
                 .child(body),
         )
         .into_any_element()
+}
+
+/// Solid / Rendered, the way a DCC header shows it.
+///
+/// Solid is the live terrain and the default; Rendered asks for one still and
+/// says so while it is on. The pair replaces a text label that described a tier
+/// nobody had chosen.
+fn shading_picker(studio: StudioRef<'_>, shading: crate::state::Shading) -> AnyElement {
+    let mut row = h_flex().gap_1();
+    for (mode, label, tooltip) in [
+        (
+            crate::state::Shading::Solid,
+            "Solid",
+            "Live terrain, rendered as you move (default)",
+        ),
+        (
+            crate::state::Shading::Rendered,
+            "Rendered",
+            "Render one still (F12 does the same); the next edit returns to Solid",
+        ),
+    ] {
+        let studio_pick = studio.clone();
+        let selected = shading == mode;
+        row = row.child(
+            Button::new(format!("shading-{label}"))
+                .label(label)
+                .xsmall()
+                .when(selected, |button| button.primary())
+                .when(!selected, |button| button.ghost())
+                .tooltip(tooltip)
+                .on_click(move |_, _, cx| {
+                    let _ = studio_pick.update(cx, |studio, cx| studio.set_shading(mode, cx));
+                }),
+        );
+    }
+    row.into_any_element()
 }
 
 /// The rig's handles, drawn over the frame where their world points land.

@@ -13,6 +13,11 @@ use gpui_kit::*;
 use crate::state::{LeftTab, Studio};
 
 pub fn outliner(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> AnyElement {
+    // One surface only: the gallery is off in this pass (`ui::surfaces`), so a
+    // single tab needs no row to choose it.
+    if !crate::ui::surfaces::GALLERY {
+        return crate::ui::layers::layers(studio, window, cx);
+    }
     let left = studio.read(cx).left_tab;
 
     let studio_layers = studio.clone();

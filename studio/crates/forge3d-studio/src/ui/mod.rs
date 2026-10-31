@@ -13,6 +13,7 @@ pub mod properties;
 pub mod recipe;
 pub mod scene;
 pub mod shell;
+pub mod surfaces;
 pub mod timeline;
 pub mod viewport;
 pub mod viewport_math;
