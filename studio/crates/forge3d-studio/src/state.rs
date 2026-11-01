@@ -3837,21 +3837,28 @@ impl Studio {
     /// A 20 Hz UI pump: drains both workers, coalesces viewport renders and
     /// repaints only when something changed.
     fn start_poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        cx.spawn_in(window, async move |this, cx| loop {
+        cx.spawn_in(window, async move |this, cx| {
             // Two cadences: a frame on the GPU is worth checking for often (the
             // measured wait dominated a presented frame), while an idle app
-            // should not wake 60 times a second for nothing.
-            let in_flight = this
-                .read_with(cx, |this, _| this.render_in_flight)
-                .unwrap_or(false);
-            cx.background_executor()
-                .timer(Duration::from_millis(if in_flight { 2 } else { 16 }))
-                .await;
-            let alive = this
-                .update_in(cx, |this, window, cx| this.poll(window, cx))
-                .is_ok();
-            if !alive {
-                break;
+            // should not wake 60 times a second. The interval is read from the
+            // same closure that polls, so nothing touches the entity before it
+            // exists — a pre-read here deadlocks the test harness.
+            let mut interval = 16u64;
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(interval))
+                    .await;
+                let in_flight = this
+                    .update_in(cx, |this, window, cx| {
+                        this.poll(window, cx);
+                        this.render_in_flight
+                    })
+                    .unwrap_or(false);
+                let alive = this.update(cx, |_, _| ()).is_ok();
+                if !alive {
+                    break;
+                }
+                interval = if in_flight { 2 } else { 16 };
             }
         })
         .detach();

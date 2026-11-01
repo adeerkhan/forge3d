@@ -212,6 +212,29 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **C2 · gallery back on (runnable-only), certificates tab off, and the poll
+      loop fixed for real** — the gallery was not broken; I had switched it off.
+      - **`GALLERY = true`.** It was hidden in UI-3 as clutter; that is why it
+        "does not open". It now shows **runnable-only by default** (the existing
+        filter), so the five Tier-A cards load with their thumbnails and nothing
+        promises a render it cannot make.
+      - **The Certificates tab follows its switch**: a tab whose page is off is
+        an empty page, so it is not drawn.
+      - **The adaptive poll was dead in the window tests.** Reading
+        `render_in_flight` from the weak entity *before* the first await ran
+        against a `Studio` that did not exist yet, so the poll task died quietly
+        and `viewport_ready` never became true — the two window tests failed
+        while the engine logged "Viewport device" normally. The interval is now
+        chosen from the same `update_in` that polls. 3 window tests green in
+        1.9 s; a real orbit measures interval 2.3 ms / request→present 2.3 ms.
+      - Bryce Canyon: `assets/tif/Bryce_Canyon.tif` is already in the repo
+        (116 MB, 4000×3800, EPSG:26912) — nothing to download. Opened it live:
+        4000×3800 loaded, first frame 1184 ms, and the frame dump shows the canyon.
+      - **Two proportion defects found in that frame** (next, not fixed): the
+        viewport spans the terrain by `relief × 6` (2727 units) while the DEM's
+        footprint is 4000, so a narrow-relief, wide DEM is squeezed to ~68 % of
+        its width; and the settled mesh (768²) undersamples a 4000² DEM, which
+        shows as needles along cliffs.
 - [x] **C1 · audit cleanup: dead switches, the dead preview tier, and a test
       that stopped testing** — the `caveman-review`/`ponytail-audit` findings
       that did not need a decision from you.

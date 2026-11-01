@@ -26,7 +26,11 @@ pub fn bottom(studio: &Entity<Studio>, window: &mut Window, cx: &mut App) -> Any
         .py_1()
         .border_b_1()
         .border_color(cx.theme().colors.border);
-    for tab in BottomTab::ALL {
+    // A tab whose content is switched off would be an empty page.
+    let visible_tabs = BottomTab::ALL
+        .iter()
+        .filter(|tab| **tab != BottomTab::Certificates || crate::ui::surfaces::CERTIFICATE_TOOLS);
+    for tab in visible_tabs {
         let selected = active == *tab;
         let studio_pick = studio.clone();
         let label = tab.label();

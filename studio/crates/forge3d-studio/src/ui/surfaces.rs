@@ -17,10 +17,11 @@ pub const PROPERTIES_STRIP: bool = false;
 
 /// The examples gallery in the outliner.
 ///
-/// A download carousel with per-card asset state; useful, but it is the first
-/// thing a newcomer sees next to their layers. The Layers tab stays, and
-/// `File ▸ Open example…` still reaches the gallery.
-pub const GALLERY: bool = false;
+/// On again, but the list defaults to **runnable-only**: an example that cannot
+/// run today is a promise, not a card. The catalogue keeps every entry (the
+/// contract test still requires it); the gallery just stops showing the ones
+/// that need a milestone.
+pub const GALLERY: bool = true;
 
 /// Certificate verification, determinism checks and sequence export in the
 /// Render page.

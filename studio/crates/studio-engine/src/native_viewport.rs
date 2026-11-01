@@ -156,6 +156,11 @@ impl NativeViewport {
             .ok_or_else(|| "native terrain load produced no heightmap".to_owned())?;
         let (width, height) = terrain.dimensions;
         let (height_min, height_max) = terrain.domain;
+        let engine_span = terrain.world_span;
+        log::debug!(
+            "viewport world scale: engine default span {engine_span:.1}, relief {:.1}",
+            (height_max - height_min).abs()
+        );
         let span = (height_max - height_min).abs().max(1.0) * 6.0;
         self.scene
             .set_viewer_world_scale(span.max(1e-3), STUDIO_Z_SCALE);
