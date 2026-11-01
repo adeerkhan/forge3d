@@ -225,7 +225,12 @@ pub struct TerrainScene {
 pub struct ViewerTerrainData {
     pub heightmap: Vec<f32>,
     pub dimensions: (u32, u32),
+    /// True elevation range of the dataset, for the UI to report.
     pub domain: (f32, f32),
+    /// Elevation range relative to the minimum, which is what the height
+    /// texture holds: the shader clamps heights against this, and the viewer
+    /// orbits a ground plane at z = 0 (see `load_terrain_for_viewer`).
+    pub domain_relative: (f32, f32),
     pub heightmap_texture: TrackedTexture,
     pub heightmap_view: wgpu::TextureView,
     /// Horizontal world extent the shader maps `uv` onto. Defaults to the

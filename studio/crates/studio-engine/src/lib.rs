@@ -497,7 +497,7 @@ _EXCLUDED = {
     "cam_theta_deg": "Camera panel",
     "fov_y_deg": "Camera panel",
     "cam_target": "viewport orbits the terrain centre",
-    "camera_mode": "viewport uses the screen projection",
+    "camera_mode": "Z-up mesh orbit, the same camera the live viewport uses",
     "light_azimuth_deg": "Sun panel",
     "light_elevation_deg": "Sun panel",
     "sun_intensity": "Sun panel",
@@ -875,6 +875,12 @@ def _terrain_params(p, *, aa_samples=None, denoise=None, aov=None):
         "cam_theta_deg": float(camera["theta_deg"]),
         "fov_y_deg": float(camera["fov_deg"]),
         "cam_target": tuple(camera.get("cam_target", (0.0, 0.0, 0.0))),
+        # Stills keep the engine's screen projection: it is the path that honours
+        # per-render parameter overrides (exposure, tonemap), which a still must.
+        # It framed differently from the live viewport only because the viewport
+        # was drawing absolute elevations above a ground plane at z = 0; with
+        # heights made relative (see `load_terrain_for_viewer`) the two agree
+        # without changing the still's camera model.
         "camera_mode": "screen",
         "light_azimuth_deg": float(sun["azimuth_deg"]),
         "light_elevation_deg": float(sun["elevation_deg"]),

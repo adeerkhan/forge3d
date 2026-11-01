@@ -212,6 +212,31 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **C3 · the solid view was drawing the terrain in the sky** — the reason
+      "solid never works", found and fixed.
+      - The live viewer orbits a ground plane at **z = 0**, but the height
+        texture held **absolute metres**: Bryce Canyon (2 100 m floor, 450 m
+        relief) sat ~3 000 world units above the pivot, so the camera framed it
+        from underneath and the terrain ran off-screen. Rainer looked "nearly
+        fine" at 469 m only because the offset was small relative to its span —
+        which is why this survived so long.
+      - `load_terrain_for_viewer` now uploads heights **relative to the
+        minimum** and reports `domain_relative` for the shader's clamp; the
+        dataset's true elevation range stays in `domain` for the UI.
+      - Measured after the fix: solid and Rendered are **byte-identical**
+        (mean abs diff 0.00, max 0, identical silhouette box) for Bryce, and
+        Fuji/Rainier frame correctly instead of floating.
+      - A related trap recorded: `camera_mode: "mesh:zup"` for stills looked
+        like it would improve parity, but the screen-projection path is the one
+        that honours per-render parameter overrides (exposure/tonemap) — the
+        integration test caught it ("an exposure override must change the
+        rendered frame") and the change was reverted. Parity came from the
+        geometry convention, not the camera model.
+      - **Still missing, and it is a feature, not a bug: no imagery.** Both
+        tiers show an elevation colour ramp. The engine *can* drape a raster
+        (MapScene `RasterOverlay`), but the live viewport has no drape path and
+        Bryce ships only the DEM — its NAIP imagery is fetched by
+        `examples/bryce_canyon_flyover/fetch_data.py`.
 - [x] **C2 · gallery back on (runnable-only), certificates tab off, and the poll
       loop fixed for real** — the gallery was not broken; I had switched it off.
       - **`GALLERY = true`.** It was hidden in UI-3 as clutter; that is why it

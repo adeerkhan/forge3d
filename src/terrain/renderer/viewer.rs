@@ -256,7 +256,15 @@ impl TerrainScene {
         }
 
         let (heightmap, width, height, domain) = self.load_geotiff_heightmap(dem_path)?;
-        let heightmap_texture = self.upload_heightmap_texture(width, height, &heightmap)?;
+        // STUDIO-FORK: the live viewer orbits a ground plane at z = 0, so the
+        // height texture must be relative to the terrain's minimum. Uploading
+        // absolute metres left a canyon (2,100 m floor, 450 m relief, 2,727-unit
+        // span) floating ~3,000 units above the pivot, and the camera framed it
+        // from underneath. `heightmap` itself stays absolute — the domain the UI
+        // reports is unchanged; only what the shader samples is shifted.
+        let relative_heights: Vec<f32> = heightmap.iter().map(|h| h - domain.0).collect();
+        let heightmap_texture = self.upload_heightmap_texture(width, height, &relative_heights)?;
+        let domain_relative = (0.0, (domain.1 - domain.0).max(0.0));
         let heightmap_view = heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let terrain_span = (width.max(height) as f32) * 1.0;
@@ -266,6 +274,7 @@ impl TerrainScene {
             heightmap,
             dimensions: (width, height),
             domain,
+            domain_relative,
             heightmap_texture,
             heightmap_view,
             world_span: terrain_span,
@@ -481,7 +490,7 @@ impl TerrainScene {
             sun_azimuth_deg: terrain.sun_azimuth_deg,
             sun_elevation_deg: terrain.sun_elevation_deg,
             sun_intensity: terrain.sun_intensity,
-            domain: terrain.domain,
+            domain: terrain.domain_relative,
         })
     }
 
