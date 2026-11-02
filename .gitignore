@@ -466,3 +466,10 @@ landuse/landuse/glad_cropland_2019.tif
 
 # Understand-Anything knowledge graph (generated, ~1.4 MB, not source)
 .ua/
+
+# Fetched NAIP imagery and the downsampled DEM beside it: derived data with a
+# committed recipe. `studio/scripts/fetch_bryce_imagery.py --write` regenerates
+# all three; committing ~25 MB of aerial imagery is not how this repository
+# distributes fixtures (they are LFS objects, not sources).
+assets/tif/Bryce_Canyon_naip.tif
+assets/tif/Bryce_Canyon_1024.tif
