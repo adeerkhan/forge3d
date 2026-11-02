@@ -92,6 +92,15 @@ pub struct NativeViewport {
     /// Encode sRGB + opacity on the GPU. Off only for the A/B parity test and
     /// as an escape hatch; read once, never per frame.
     cpu_display: bool,
+    /// Draped imagery (a raster beside the DEM), drawn over the terrain with
+    /// the depth buffer the viewer just wrote.
+    drape: crate::drape::DrapePass,
+    /// Imagery strength 0..1; 1 means "the raster replaces the colour ramp".
+    drape_strength: f32,
+    drape_size: (u32, u32),
+    /// Sun angles for the drape's shading, kept from the last `set_view`.
+    sun_azimuth: f32,
+    sun_elevation: f32,
     /// The 3D environment grid: off by default, depth-tested when on.
     grid_enabled: bool,
     grid: Option<crate::grid::GroundGrid>,
@@ -135,6 +144,11 @@ impl NativeViewport {
             layer_opacity: 1.0,
             quality_is_interactive: false,
             cpu_display: std::env::var_os("FORGE3D_STUDIO_CPU_COLOR").is_some(),
+            drape: crate::drape::DrapePass::new(&context.device, COLOR_FORMAT),
+            drape_strength: 1.0,
+            drape_size: (0, 0),
+            sun_azimuth: 135.0,
+            sun_elevation: 35.0,
             grid_enabled: false,
             grid: None,
             terrain_span: 1000.0,
@@ -167,6 +181,7 @@ impl NativeViewport {
         // Keep the depth attachment: the grid pass depth-tests against it.
         self.scene.set_viewer_depth_store(true);
         self.terrain_span = span.max(1e-3);
+        self.load_sidecar_imagery(path);
         // A new extent needs a new mesh.
         self.grid = None;
         self.has_terrain = true;
@@ -214,6 +229,8 @@ impl NativeViewport {
     pub fn set_view(&mut self, camera: &CameraParams, sun: &SunParams) {
         self.camera = *camera;
         self.sun_intensity = sun.intensity;
+        self.sun_azimuth = sun.azimuth_deg;
+        self.sun_elevation = sun.elevation_deg;
         self.scene.set_viewer_camera(
             camera.phi_deg,
             camera.theta_deg,
@@ -247,6 +264,35 @@ impl NativeViewport {
         } else {
             forge3d::terrain::renderer::ViewQuality::Settled
         });
+    }
+
+    /// Load `<stem>_naip.png` next to the DEM, when it exists.
+    ///
+    /// The raster is registered to the DEM's footprint by the fetch script, so
+    /// the drape can use it as a straight UV lookup. A missing sidecar is not an
+    /// error: the viewport simply keeps the colour ramp.
+    fn load_sidecar_imagery(&mut self, dem: &Path) {
+        let Some(stem) = dem
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let Some(directory) = dem.parent() else {
+            return;
+        };
+        let path = directory.join(format!("{stem}_naip.png"));
+        if !path.is_file() {
+            return;
+        }
+        match crate::drape::decode_imagery(&path) {
+            Ok((width, height, rgba)) => {
+                self.drape
+                    .set_imagery(&self.device, &self.queue, width, height, &rgba);
+                log::info!("draped imagery: {} ({width}x{height})", path.display());
+            }
+            Err(error) => log::warn!("imagery beside the DEM could not be read: {error}"),
+        }
     }
 
     pub fn set_grid(&mut self, enabled: bool) {
@@ -323,6 +369,30 @@ impl NativeViewport {
                     depth,
                     &self.camera,
                     (width, height),
+                );
+            }
+        }
+
+        // Draped imagery: a deferred pass over the frame the viewer just drew.
+        // It reconstructs world position from the depth buffer, so the raster
+        // follows the terrain instead of floating over the screen.
+        if self.drape.has_imagery() && self.drape_strength > 0.0 {
+            if let Some((depth_view, _)) = self.scene.viewer_depth() {
+                if self.drape_size != (width, height) {
+                    self.drape.bind(&self.device, depth_view);
+                    self.drape_size = (width, height);
+                }
+                self.drape.draw(
+                    &self.queue,
+                    &mut encoder,
+                    view,
+                    &self.camera,
+                    (width, height),
+                    self.terrain_span,
+                    STUDIO_Z_SCALE,
+                    self.sun_azimuth,
+                    self.sun_elevation,
+                    self.drape_strength,
                 );
             }
         }

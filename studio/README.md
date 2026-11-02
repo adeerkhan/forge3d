@@ -212,6 +212,31 @@ UI runtime (GUI.md Part X):
       and certificate mode are pushed to the engine on open. Locked by a
       save → reopen test that asserts the recipe is byte-identical and the
       furniture parses back into the panel.
+- [x] **C4 · imagery: fetched, draped in the still, draped live** — the three
+      things that were missing, in one pass.
+      - **Fetched.** `studio/scripts/fetch_bryce_imagery.py` asks the same USGS
+        NAIP ImageServer the repository's own example uses, registers the pixels
+        to the DEM's bounds and CRS (`EPSG:26912`, 2048², 0 gaps) and writes
+        `Bryce_Canyon_naip.tif` (MapScene) plus `.png` (the live viewport, which
+        has no GeoTIFF reader) and a `Bryce_Canyon_1024.tif` DEM sidecar.
+      - **Rendered drapes it.** In Terrain mode `Rendered` now builds a
+        `terrain_raster` recipe from the DEM and the imagery beside it and
+        renders through MapScene — measured 3.3 s for 800×500, and the picture is
+        the canyon's aerial imagery, not a colour ramp. Large DEMs render from
+        the 1024² sidecar because the engine reserves the drape's temporaries
+        against a 512 MiB host budget and a 4000² grid reserves **2.6 GB**
+        (measured, refused).
+      - **Solid drapes it live.** New `studio-engine/src/drape.rs`: a deferred
+        pass that reads the viewer's depth buffer, reconstructs world position
+        with the camera's inverse view-projection, converts to terrain UV and
+        samples the imagery with a Lambert term from the reconstructed normal.
+        Because it reads the depth the terrain wrote, the raster follows the
+        surface and cannot drift; nothing is re-drawn. One additive engine change
+        makes it possible: the viewer's depth texture now also has
+        `TEXTURE_BINDING` usage.
+      - Result: the live viewport shows Bryce Canyon *with its aerial imagery*
+        (frame measured, 210 KB), and the same dataset renders textured in
+        `Rendered`.
 - [x] **C3 · the solid view was drawing the terrain in the sky** — the reason
       "solid never works", found and fixed.
       - The live viewer orbits a ground plane at **z = 0**, but the height

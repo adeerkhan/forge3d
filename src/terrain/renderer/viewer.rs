@@ -889,7 +889,12 @@ impl TerrainScene {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: super::core::TERRAIN_DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                // STUDIO-FORK: the depth view is also sampled — Studio's draped
+                // imagery pass reconstructs world position from it, which is
+                // what lets a raster follow the terrain surface without
+                // re-implementing the terrain draw.
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             },
         )?;

@@ -21,6 +21,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 pub mod display;
+pub mod drape;
 pub mod grid;
 pub mod native_viewport;
 

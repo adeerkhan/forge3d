@@ -1499,6 +1499,68 @@ impl Studio {
         cx.notify();
     }
 
+    /// Find the imagery for the loaded DEM: `<stem>_naip.tif` beside it.
+    ///
+    /// Large DEMs get a `<stem>_1024.tif` sidecar and the drape uses that: the
+    /// engine reserves the drape's temporaries against a 512 MiB host budget,
+    /// and a 4000² grid reserves 2.6 GB (measured), which it refuses. The
+    /// 1024² sidecar renders the same picture at still quality.
+    fn textured_sources(&self) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let terrain = self.project.terrain.as_ref()?;
+        let dem = terrain.path.clone();
+        let stem = dem.file_stem()?.to_string_lossy().into_owned();
+        let directory = dem.parent()?.to_path_buf();
+        let naip = directory.join(format!("{stem}_naip.tif"));
+        if !naip.is_file() {
+            return None;
+        }
+        let sidecar = directory.join(format!("{stem}_1024.tif"));
+        let dem_for_render = if terrain.width.max(terrain.height) > 1500 && sidecar.is_file() {
+            sidecar
+        } else {
+            dem
+        };
+        Some((dem_for_render, naip))
+    }
+
+    /// Render one still through MapScene with the DEM's imagery draped.
+    ///
+    /// Returns false when the dataset has no imagery, so the caller falls back
+    /// to the plain terrain still.
+    fn start_textured_still(&mut self, width: u32, height: u32, cx: &mut Context<Self>) -> bool {
+        let Some((dem, raster)) = self.textured_sources() else {
+            return false;
+        };
+        let camera = self.project.camera;
+        let span = self
+            .project
+            .terrain
+            .as_ref()
+            .map(|terrain| terrain_span(terrain.height_min, terrain.height_max))
+            .unwrap_or(1.0)
+            .max(1.0);
+        let params = serde_json::json!({
+            "template": "terrain_raster",
+            "dem_path": dem.to_string_lossy(),
+            "raster_path": raster.to_string_lossy(),
+            "width": width,
+            "height": height,
+            // The template's orbit is relative to the terrain span, so the live
+            // camera converts into it: same azimuth, elevation above the
+            // horizon, same distance and field of view.
+            "distance": (camera.radius / span).clamp(0.3, 6.0),
+            "azimuth_deg": camera.phi_deg,
+            "elevation_deg": (90.0 - camera.theta_deg).clamp(2.0, 88.0),
+            "fov_deg": camera.fov_deg,
+        });
+        let job = self.engine.call("mapscene.template", params);
+        self.pending_jobs
+            .insert(job, PendingJob::MapSceneTemplate { render_after: true });
+        self.set_status("Rendered still — drawing the imagery…");
+        cx.notify();
+        true
+    }
+
     /// Ask for the one still a `Rendered` viewport shows.
     ///
     /// MapScene renders the recipe; a terrain scene renders through the same
@@ -1517,6 +1579,12 @@ impl Studio {
         let (width, height) = render_size(self.viewport_size.get().0, self.viewport_size.get().1);
         if width < 2 || height < 2 || self.project.terrain.is_none() {
             self.set_status("Load a DEM before rendering");
+            return;
+        }
+        // A terrain with imagery next to it renders through MapScene, which is
+        // the engine's raster-drape path; without imagery a still is the same
+        // colour ramp the solid view shows.
+        if self.start_textured_still(width, height, cx) {
             return;
         }
         self.awaiting_still = true;
@@ -4496,6 +4564,31 @@ impl Studio {
                             .unwrap_or_else(|| recipe.to_string());
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
                             self.load_furniture_from_recipe(&parsed);
+                        }
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) {
+                            let kinds: Vec<String> = parsed
+                                .get("layers")
+                                .and_then(|layers| layers.as_array())
+                                .map(|layers| {
+                                    layers
+                                        .iter()
+                                        .map(|layer| {
+                                            format!(
+                                                "{}:{}",
+                                                layer
+                                                    .get("kind")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("?"),
+                                                layer
+                                                    .get("path")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or("-")
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            log::info!("recipe layers: {kinds:?}");
                         }
                         self.remember_recipe(text);
                         self.mapscene.last_status =
