@@ -123,6 +123,7 @@ export interface Material {
   baseColor: [number, number, number];
   roughness: number;
   metallic: number;
+  texture: string | null;
 }
 
 export interface Project {
@@ -359,6 +360,7 @@ export type Command =
   | { type: "setPrimitive"; id: string; primitive: Primitive }
   | { type: "setMeshMaterial"; id: string; material: Material }
   | { type: "setRenderSettings"; render: RenderSettings }
+  | { type: "setAssetPath"; id: string; path: string; byteSize: number }
   | { type: "setTerrainZScale"; id: string; zScale: number }
   | {
       type: "setTerrainDem";

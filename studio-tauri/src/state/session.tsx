@@ -308,6 +308,77 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [pumpRender],
   );
 
+  const selectedMesh = useCallback(() => {
+    const project = state?.project;
+    const object = project?.scene.objects.find((entry) =>
+      project.selection.includes(entry.id),
+    );
+    return object && object.kind.type === "mesh" ? object : null;
+  }, [state]);
+
+  const importMaterialTexture = useCallback(async () => {
+    const mesh = selectedMesh();
+    if (!mesh || mesh.kind.type !== "mesh") return;
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+      const metadata = { byteSize: 0 };
+      const asset = {
+        id: crypto.randomUUID(),
+        name: path.split(/[\\/]/).pop() ?? "texture.png",
+        path,
+        kind: "orthophoto" as const,
+        byteSize: metadata.byteSize,
+      };
+      // The shell fills the real size on the next save; registration is enough
+      // for the viewport to load the file.
+      const applied = await applyCommand({
+        type: "batch",
+        commands: [
+          { type: "addAsset", asset },
+          {
+            type: "setMeshMaterial",
+            id: mesh.id,
+            material: { ...mesh.kind.material, texture: asset.id },
+          },
+        ],
+      });
+      if (applied) flash("Texture attached");
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [applyCommand, fail, flash, selectedMesh]);
+
+  const clearMaterialTexture = useCallback(async () => {
+    const mesh = selectedMesh();
+    if (!mesh || mesh.kind.type !== "mesh") return;
+    await applyCommand({
+      type: "setMeshMaterial",
+      id: mesh.id,
+      material: { ...mesh.kind.material, texture: null },
+    });
+    flash("Texture removed");
+  }, [applyCommand, flash, selectedMesh]);
+
+  const relinkAsset = useCallback(
+    async (assetId: string) => {
+      try {
+        const picked = await openDialog({ multiple: false });
+        const path = typeof picked === "string" ? picked : null;
+        if (!path) return;
+        await applyCommand({ type: "setAssetPath", id: assetId, path, byteSize: 0 });
+        flash("Asset relinked");
+      } catch (cause) {
+        fail(cause);
+      }
+    },
+    [applyCommand, fail, flash],
+  );
+
   const importTerrainDem = useCallback(async () => {
     try {
       const picked = await openDialog({
@@ -540,6 +611,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importMesh,
 
       refreshEngine,
+      importMaterialTexture,
+      clearMaterialTexture,
+      relinkAsset,
       importTerrainDem,
       importTerrainOverlay,
       setTerrainOverlayOpacity,
@@ -573,6 +647,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       dismissError() {
         setError(null);
       },
+
+      notify(message) {
+        flash(message);
+      },
     }),
     [
       addPrimitive,
@@ -583,6 +661,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       flash,
       guardUnsaved,
       importMesh,
+      importMaterialTexture,
+      clearMaterialTexture,
+      relinkAsset,
       importTerrainDem,
       importTerrainOverlay,
       clearTerrainOverlay,

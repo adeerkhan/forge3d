@@ -73,6 +73,12 @@ export interface SessionApi {
     ): Promise<void>;
     /** Pick and import a DEM, replacing the terrain's source. */
     importTerrainDem(): Promise<void>;
+    /** Pick an albedo texture (PNG/JPEG) for the selected mesh. */
+    importMaterialTexture(): Promise<void>;
+    /** Remove the selected mesh's texture. */
+    clearMaterialTexture(): Promise<void>;
+    /** Re-point an asset at a new file. */
+    relinkAsset(assetId: string): Promise<void>;
     /** Pick a raster overlay for the terrain. */
     importTerrainOverlay(): Promise<void>;
     /** Change or clear the overlay's opacity (0..1). */
@@ -83,6 +89,8 @@ export interface SessionApi {
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;
+    /** Short status message (used by viewport shortcuts). */
+    notify(message: string): void;
   };
 }
 

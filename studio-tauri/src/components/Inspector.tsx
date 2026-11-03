@@ -225,6 +225,45 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
+function AssetsPanel() {
+  const { state, actions } = useSession();
+  const project = state?.project;
+  if (!project || project.assets.length === 0) return null;
+  return (
+    <Section title="Assets">
+      <ul className="multi-list">
+        {project.assets.map((asset) => {
+          const usage = project.scene.objects.filter(
+            (object) =>
+              (object.kind.type === "mesh" &&
+                (object.kind.source.type === "gltf"
+                  ? object.kind.source.asset === asset.id
+                  : object.kind.material.texture === asset.id)) ||
+              (object.kind.type === "terrain" && object.kind.asset === asset.id),
+          ).length;
+          return (
+            <li key={asset.id}>
+              <span title={asset.path}>{asset.name}</span>
+              <span className="mono">{usage} use{usage === 1 ? "" : "s"}</span>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => void actions.relinkAsset(asset.id)}
+              >
+                Relink…
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="hint">
+        Missing files surface when the project opens; relinking points the asset
+        at a new path without touching scene references.
+      </p>
+    </Section>
+  );
+}
+
 function RenderSettingsEditor() {
   const { state, actions } = useSession();
   const render = state?.project.render;
@@ -254,7 +293,10 @@ function RenderSettingsEditor() {
 }
 
 function MaterialEditor({ object, material }: { object: SceneObject; material: Material }) {
-  const { actions } = useSession();
+  const { actions, state } = useSession();
+  const texture = material.texture
+    ? state?.project.assets.find((asset) => asset.id === material.texture)
+    : undefined;
   const commit = (next: Material) =>
     void actions.apply({ type: "setMeshMaterial", id: object.id, material: next });
   const channel = (index: 0 | 1 | 2) => (value: number) => {
@@ -273,6 +315,28 @@ function MaterialEditor({ object, material }: { object: SceneObject; material: M
       <div className="pair">
         <NumberField label="Roughness" value={material.roughness} step={0.05} min={0} max={1} onCommit={(roughness) => commit({ ...material, roughness })} />
         <NumberField label="Metallic" value={material.metallic} step={0.05} min={0} max={1} onCommit={(metallic) => commit({ ...material, metallic })} />
+      </div>
+      <div className="readout readout--compact">
+        <dt>Texture</dt>
+        <dd>{texture?.name ?? "none"}</dd>
+      </div>
+      <div className="inline-actions">
+        <button
+          type="button"
+          className="button button--small"
+          onClick={() => void actions.importMaterialTexture()}
+        >
+          {texture ? "Replace texture…" : "Add texture…"}
+        </button>
+        {texture && (
+          <button
+            type="button"
+            className="button button--small"
+            onClick={() => void actions.clearMaterialTexture()}
+          >
+            Remove
+          </button>
+        )}
       </div>
       <p className="hint">
         Studio renders this material; the Forge3D terrain pipeline does not
@@ -485,6 +549,7 @@ export function Inspector() {
             </div>
           </Section>
           <RenderSettingsEditor />
+          <AssetsPanel />
           <p className="hint">Select an object to edit its properties.</p>
         </div>
       </div>

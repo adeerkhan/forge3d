@@ -55,7 +55,7 @@ pub use project::{
 };
 pub use scene::{
     CameraObject, LightKind, LightObject, Material, MeshObject, MeshSource, ObjectKind, Primitive,
-    Scene, SceneObject, TerrainObject,
+    Scene, SceneObject, TerrainObject, TerrainOverlay,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 pub use workspace::{

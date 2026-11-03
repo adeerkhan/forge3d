@@ -128,7 +128,9 @@ class StudioRenderer:
         self.dem_path = dem_path
         # The renderer rejects view coordinates beyond +/-65,536 units, so a
         # country-scale DEM is scaled into that budget (proportions preserved).
-        self.scale = min(1.0, 60_000.0 / max(self.span_x, self.span_y))
+        # radius is 1.5 x span by default and the view limit is 65,536, so the
+        # scaled world must stay well below that (30,000 leaves headroom).
+        self.scale = min(1.0, 30_000.0 / max(self.span_x, self.span_y))
         self.heights = self.heights * self.scale
 
         env_path = Path(tempfile.gettempdir()) / "forge3d-studio-sky.hdr"
@@ -221,9 +223,15 @@ class StudioRenderer:
                 print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
 
         span = span_x
-        radius = float(camera.get("radius") or 1.5 * max(span_x, span_y)) * self.scale
-        target = camera.get("target") or [span_x / 2, span_y / 2, float(self.heights.mean())]
-        target = [float(target[0]) * self.scale, float(target[1]) * self.scale, float(target[2]) * self.scale]
+        radius = float(camera.get("radius") or 1.5 * max(self.span_x, self.span_y)) * self.scale
+        raw_target = camera.get("target") or [self.span_x / 2, self.span_y / 2, float(self.heights.mean())]
+        # Targets arrive in metres; the whole scene (heights, span, radius) is
+        # scaled into the renderer's view budget together.
+        target = [
+            float(raw_target[0]) * self.scale,
+            float(raw_target[1]) * self.scale,
+            float(raw_target[2]) * self.scale,
+        ]
 
         settings = make_terrain_params_config(
             size_px=(width, height),

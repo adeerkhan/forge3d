@@ -151,6 +151,13 @@ pub enum Command {
         world_span_xz: Option<[f64; 2]>,
     },
 
+    /// Re-point an asset at a new file (relinking after a move).
+    SetAssetPath {
+        id: crate::ids::AssetId,
+        path: String,
+        byte_size: u64,
+    },
+
     /// Replace render output settings.
     SetRenderSettings {
         render: crate::project::RenderSettings,
@@ -603,6 +610,33 @@ impl Command {
                 })
             }
 
+            Command::SetAssetPath {
+                id,
+                path,
+                byte_size,
+            } => {
+                if path.trim().is_empty() {
+                    return Err(CommandError::invalid("asset path", "must not be empty"));
+                }
+                let index = project
+                    .assets
+                    .iter()
+                    .position(|asset| asset.id == *id)
+                    .ok_or(CommandError::AssetNotFound { id: *id })?;
+                let previous = project.assets[index].path.clone();
+                let previous_size = project.assets[index].byte_size;
+                project.assets[index].path = path.clone();
+                project.assets[index].byte_size = *byte_size;
+                Ok(Outcome {
+                    inverse: Command::SetAssetPath {
+                        id: *id,
+                        path: previous,
+                        byte_size: previous_size,
+                    },
+                    affected: Vec::new(),
+                })
+            }
+
             Command::SetMeshMaterial { id, material } => {
                 material
                     .validate()
@@ -847,7 +881,7 @@ impl Command {
             | Command::SetTerrainOverlay { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. } => vec![*id],
-            Command::SetRenderSettings { .. } => Vec::new(),
+            Command::SetRenderSettings { .. } | Command::SetAssetPath { .. } => Vec::new(),
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -902,6 +936,9 @@ impl Command {
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),
+            Command::SetAssetPath { id, .. } => {
+                format!("Relink asset {}", crate::ids::short_id(id))
+            }
             Command::SetTerrainOverlay { id, overlay } => {
                 if overlay.is_some() {
                     format!("Overlay on {}", name_of(id))

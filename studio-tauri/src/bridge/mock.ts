@@ -55,7 +55,12 @@ function primitiveObject(
     kind: {
       type: "mesh",
       source: { type: "primitive", primitive },
-      material: { baseColor: [0.62, 0.66, 0.72], roughness: 0.6, metallic: 0.04 },
+      material: {
+        baseColor: [0.62, 0.66, 0.72],
+        roughness: 0.6,
+        metallic: 0.04,
+        texture: null,
+      },
     },
   };
 }
@@ -241,6 +246,8 @@ export function createMockBridge(): StudioBridge {
           return `Material of ${find(command.id).name}`;
         case "setRenderSettings":
           return "Render settings";
+        case "setAssetPath":
+          return "Relink asset";
         case "createObject":
           return `Create ${command.object.name}`;
         case "createPrimitive":
@@ -417,6 +424,14 @@ export function createMockBridge(): StudioBridge {
         requireProject().render = { ...command.render };
         return { label, affected: [] };
 
+      case "setAssetPath": {
+        const asset = requireProject().assets.find((entry) => entry.id === command.id);
+        if (!asset) throw new Error("asset does not exist");
+        asset.path = command.path;
+        asset.byteSize = command.byteSize;
+        return { label, affected: [] };
+      }
+
       case "setTerrainDem": {
         const object = find(command.id);
         if (object.kind.type !== "terrain") throw new Error("object is not a terrain");
@@ -591,6 +606,10 @@ export function createMockBridge(): StudioBridge {
     },
 
     discardRecovery: async () => {},
+
+    readImageAsset: async (): Promise<MeshFilePayload> => {
+      throw new Error("textures need the desktop shell");
+    },
 
     readMeshFile: async (): Promise<MeshFilePayload> => {
       throw new Error(

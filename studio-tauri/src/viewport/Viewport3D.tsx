@@ -286,6 +286,36 @@ export function Viewport3D() {
   } | null>(null);
   const inCameraView = useRef(false);
 
+  const textureCache = useRef(new Map<string, Promise<THREE.Texture>>());
+  const loadTexture = useCallback((path: string): Promise<THREE.Texture> => {
+    const cache = textureCache.current;
+    let pending = cache.get(path);
+    if (!pending) {
+      pending = bridge
+        .readImageAsset(path)
+        .then(
+          (payload) =>
+            new Promise<THREE.Texture>((resolve, reject) => {
+              const loader = new THREE.TextureLoader();
+              loader.load(
+                `data:image/${payload.kind === "orthophoto" && path.toLowerCase().endsWith(".png") ? "png" : "jpeg"};base64,${payload.base64}`,
+                (texture) => {
+                  texture.colorSpace = THREE.SRGBColorSpace;
+                  texture.wrapS = THREE.RepeatWrapping;
+                  texture.wrapT = THREE.RepeatWrapping;
+                  resolve(texture);
+                },
+                undefined,
+                reject,
+              );
+            }),
+        );
+      cache.set(path, pending);
+      pending.catch(() => cache.delete(path));
+    }
+    return pending;
+  }, []);
+
   const terrainCache = useRef(new Map<string, Promise<TerrainPreview>>());
   const readTerrain = useCallback(
     (path: string): Promise<TerrainPreview> => {
@@ -585,9 +615,26 @@ export function Viewport3D() {
       disposeChildren(group);
 
       if (object.kind.type === "mesh") {
-        const source = object.kind.source;
+        const meshKind = object.kind;
+        const source = meshKind.source;
         if (source.type === "primitive") {
-          group.add(buildPrimitive(source.primitive, object.kind.material));
+          const built = buildPrimitive(source.primitive, meshKind.material);
+          group.add(built);
+          const textureAsset = meshKind.material.texture
+            ? project.assets.find((entry) => entry.id === meshKind.material.texture)
+            : undefined;
+          if (textureAsset && built instanceof THREE.Mesh) {
+            const expected = signature;
+            const mesh = built;
+            loadTexture(textureAsset.path)
+              .then((texture) => {
+                if (group.userData.signature !== expected) return;
+                const material = mesh.material as THREE.MeshStandardMaterial;
+                material.map = texture;
+                material.needsUpdate = true;
+              })
+              .catch(() => undefined);
+          }
         } else {
           const asset = project.assets.find((entry) => entry.id === source.asset);
           if (!asset) {
@@ -734,7 +781,7 @@ export function Viewport3D() {
       runtime.gizmo.setSpace(space);
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
-  }, [cameraView, readMesh, readTerrain, space, state, terrainResolution, tool]);
+  }, [cameraView, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -840,7 +887,7 @@ export function Viewport3D() {
       (object) => object.id === project.scene.activeCamera,
     );
     if (!active) {
-      setProblem("There is no camera object to receive this view.");
+      setProblem("There is no camera object to receive this view — add one from Add.");
       return;
     }
     await actionsRef.current.apply({
@@ -852,6 +899,7 @@ export function Viewport3D() {
     // Numpad 1 should also put the viewport into camera mode.
     setCameraViewRef.current(true);
     setProblem(null);
+    actionsRef.current.notify(`Camera "${active.name}" set from this view`);
   }, [cameraTransformFromView]);
 
   useEffect(() => {
@@ -871,6 +919,11 @@ export function Viewport3D() {
   const renderedOnce = useRef(false);
   useEffect(() => {
     if (!renderedMode) {
+      renderedOnce.current = false;
+      return;
+    }
+    if (render.error) {
+      // A failed frame must not latch: let the next switch/render try again.
       renderedOnce.current = false;
       return;
     }
@@ -898,7 +951,7 @@ export function Viewport3D() {
     <div className="viewport" ref={containerRef}>
       <canvas ref={canvasRef} className="viewport-canvas" />
       {renderedMode && (
-        <div className="viewport-rendered">
+        <div className={`viewport-rendered ${render.frame && !render.busy ? "has-frame" : ""}`}>
           {render.frame && !render.busy && (
             <img
               src={`data:image/png;base64,${render.frame.png}`}

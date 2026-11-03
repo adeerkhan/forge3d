@@ -258,6 +258,9 @@ pub struct Material {
     pub roughness: f32,
     #[serde(default = "default_metallic")]
     pub metallic: f32,
+    /// Optional albedo texture (PNG/JPEG). The Solid viewport samples it.
+    #[serde(default)]
+    pub texture: Option<AssetId>,
 }
 
 fn default_base_color() -> [f32; 3] {
@@ -278,6 +281,7 @@ impl Default for Material {
             base_color: default_base_color(),
             roughness: default_roughness(),
             metallic: default_metallic(),
+            texture: None,
         }
     }
 }

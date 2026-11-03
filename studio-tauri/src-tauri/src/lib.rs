@@ -74,6 +74,7 @@ pub fn run() {
             commands::read_mesh_file,
             commands::terrain_preview,
             commands::import_terrain_dem,
+            commands::read_image_asset,
             commands::set_terrain_overlay,
             commands::forge3d_probe,
             commands::render_frame,

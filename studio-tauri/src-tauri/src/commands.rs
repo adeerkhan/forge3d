@@ -463,6 +463,30 @@ pub fn set_terrain_overlay(
         .ok_or_else(|| "no project is open".to_owned())
 }
 
+/// Read an image asset (PNG/JPEG) for the Solid viewport's textures.
+#[tauri::command]
+pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
+    let lower = path.to_ascii_lowercase();
+    if !(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")) {
+        return Err(format!(
+            "{path} is not a PNG/JPEG image; GeoTIFF textures are not yet decoded in the viewport"
+        ));
+    }
+    let kind = studio_core::AssetKind::Orthophoto;
+    let bytes = std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "texture".to_owned());
+    Ok(MeshFilePayload {
+        path,
+        name,
+        kind,
+        byte_size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
 #[tauri::command]
 pub fn render_frame(
     render: State<'_, RenderState>,

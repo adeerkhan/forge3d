@@ -92,7 +92,7 @@ fn scene_and_object_shapes_are_stable() {
     expect_keys(&cube["kind"], &["type", "source", "material"]);
     expect_keys(
         &cube["kind"]["material"],
-        &["baseColor", "roughness", "metallic"],
+        &["baseColor", "roughness", "metallic", "texture"],
     );
     expect_keys(&cube["kind"]["source"], &["type", "primitive"]);
     assert_eq!(cube["kind"]["source"]["type"], "primitive");

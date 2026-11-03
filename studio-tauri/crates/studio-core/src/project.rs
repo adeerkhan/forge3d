@@ -207,6 +207,13 @@ impl Project {
                     used.push(asset);
                 }
             }
+            if let Some(mesh) = object.mesh() {
+                if let Some(texture) = mesh.material.texture {
+                    if !used.contains(&texture) {
+                        used.push(texture);
+                    }
+                }
+            }
             if let Some(terrain) = object.terrain() {
                 if !used.contains(&terrain.asset) {
                     used.push(terrain.asset);
@@ -224,6 +231,19 @@ impl Project {
             }
         }
         used
+    }
+
+    /// How many objects reference an asset (dependency count for the UI).
+    pub fn asset_usage(&self, id: AssetId) -> usize {
+        self.scene
+            .objects
+            .iter()
+            .filter(|object| {
+                object.mesh().and_then(MeshObject::asset_id) == Some(id)
+                    || object.terrain().map(|terrain| terrain.asset) == Some(id)
+                    || object.mesh().and_then(|mesh| mesh.material.texture) == Some(id)
+            })
+            .count()
     }
 
     pub fn asset(&self, id: AssetId) -> Option<&Asset> {
@@ -256,6 +276,26 @@ impl Project {
             }
             asset_ids.push(asset.id);
         }
+        // Material textures must exist and be images.
+        for object in &self.scene.objects {
+            if let Some(mesh) = object.mesh() {
+                if let Some(texture) = mesh.material.texture {
+                    let Some(asset) = self.asset(texture) else {
+                        return Err(format!(
+                            "object {:?} uses a missing material texture {texture}",
+                            object.name
+                        ));
+                    };
+                    if !asset.kind.is_raster() {
+                        return Err(format!(
+                            "object {:?} uses {:?} as a texture, but it is {:?}",
+                            object.name, asset.name, asset.kind
+                        ));
+                    }
+                }
+            }
+        }
+
         // A mesh or terrain may only reference an asset the project carries;
         // dangling references are what "missing asset" panics are made of.
         for object in &self.scene.objects {

@@ -45,6 +45,8 @@ export interface StudioBridge {
   discardRecovery(id: string): Promise<void>;
   /** Read a `.gltf`/`.glb` file for import. Desktop shell only. */
   readMeshFile(path: string): Promise<MeshFilePayload>;
+  /** Read a PNG/JPEG for a viewport texture. */
+  readImageAsset(path: string): Promise<MeshFilePayload>;
   /** Sample a DEM into a heightfield for the Studio viewport. */
   terrainPreview(path: string, resolution?: number): Promise<TerrainPreview>;
   /** Replace the scene terrain's DEM with a raster the user picked. */

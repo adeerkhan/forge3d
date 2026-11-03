@@ -58,6 +58,8 @@ export const tauriBridge: StudioBridge = {
 
   readMeshFile: (path) => invoke<MeshFilePayload>("read_mesh_file", { path }),
 
+  readImageAsset: (path) => invoke<MeshFilePayload>("read_image_asset", { path }),
+
   terrainPreview: (path, resolution) =>
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
