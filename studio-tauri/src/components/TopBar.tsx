@@ -31,7 +31,6 @@ export function TopBar() {
   }, [menuOpen]);
 
   const project = state?.project;
-  const workspace = project?.workspace ?? "studio";
   const fileName = state?.path?.split(/[\\/]/).pop();
 
   return (
@@ -134,28 +133,6 @@ export function TopBar() {
         )}
       </div>
 
-      <div className="workspaces" role="tablist" aria-label="Workspace">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={workspace === "studio"}
-          className={`workspace-tab ${workspace === "studio" ? "is-active" : ""}`}
-          onClick={() => void actions.setWorkspace("studio")}
-        >
-          Studio
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={workspace === "forge3d"}
-          className={`workspace-tab ${workspace === "forge3d" ? "is-active" : ""}`}
-          title="Hand the project to the Forge3D viewer"
-          onClick={() => void actions.setWorkspace("forge3d")}
-        >
-          Forge3D
-        </button>
-      </div>
-
       <div className="topbar__actions">
         <button
           type="button"
@@ -187,8 +164,9 @@ export function TopBar() {
         <button
           type="button"
           className="button"
-          disabled
-          title="Rendered mode lands in Phase 4"
+          disabled={!state}
+          title="Switch the viewport to Rendered mode (Forge3D pipeline)"
+          onClick={() => void actions.setViewportMode("rendered")}
         >
           Render
         </button>

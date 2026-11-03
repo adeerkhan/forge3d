@@ -5,8 +5,6 @@ import type {
   AutosaveStatus,
   EditResult,
   EngineStatus,
-  Forge3dStatus,
-  Handoff,
   MeshFilePayload,
   RecoveryEntry,
   RenderFrame,
@@ -61,17 +59,6 @@ export const tauriBridge: StudioBridge = {
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
   forge3dProbe: (force) => invoke<EngineStatus>("forge3d_probe", { force: force ?? false }),
-
-  forge3dStatus: () => invoke<Forge3dStatus>("forge3d_status"),
-
-  forge3dHandoff: () => invoke<Handoff>("forge3d_handoff"),
-
-  forge3dLaunch: (width, height) =>
-    invoke<Forge3dStatus>("forge3d_launch", { width: width ?? null, height: height ?? null }),
-
-  forge3dSyncCamera: () => invoke<Forge3dStatus>("forge3d_sync_camera"),
-
-  forge3dStop: () => invoke<Forge3dStatus>("forge3d_stop"),
 
   renderFrame: (width, height) =>
     invoke<RenderFrame>("render_frame", { width, height }),

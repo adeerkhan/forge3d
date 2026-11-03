@@ -18,7 +18,7 @@ use tauri::State;
 use studio_core::workspace::Handoff;
 use studio_core::{AutosaveReport, Session, Workspace, AUTOSAVE_INTERVAL_SECONDS};
 
-use crate::forge3d::{EngineStatus, Forge3dState, Forge3dStatus};
+use crate::forge3d::{EngineStatus, Forge3dState};
 use crate::render::{RenderFrame, RenderRequest, RenderState, RenderStatus};
 use crate::session::AppState;
 
@@ -281,64 +281,10 @@ pub struct ShellInfo {
 
 // ---------------------------------------------------------------------- Forge3D
 
-/// Probe the Forge3D engine and viewer without opening a window.
+/// Probe the Forge3D engine without opening anything.
 #[tauri::command]
 pub fn forge3d_probe(forge: State<'_, Forge3dState>, force: Option<bool>) -> EngineStatus {
     forge.probe(force.unwrap_or(false))
-}
-
-#[tauri::command]
-pub fn forge3d_status(forge: State<'_, Forge3dState>) -> Forge3dStatus {
-    forge.status()
-}
-
-/// What the current project can carry into the Forge3D workspace.
-#[tauri::command]
-pub fn forge3d_handoff(state: State<'_, AppState>) -> Result<Handoff, String> {
-    current_handoff(&state)
-}
-
-/// Start (or reuse) the Forge3D viewer for the current revision.
-#[tauri::command]
-pub fn forge3d_launch(
-    forge: State<'_, Forge3dState>,
-    state: State<'_, AppState>,
-    app: tauri::AppHandle,
-    width: Option<u32>,
-    height: Option<u32>,
-) -> Result<Forge3dStatus, String> {
-    use tauri::Manager;
-    let plan = current_handoff(&state)?;
-    let app_data = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("no app-data directory available: {error}"))?;
-    forge.launch(
-        &plan,
-        &app_data,
-        width.unwrap_or(1280),
-        height.unwrap_or(720),
-    )?;
-    // The window exists; put the camera and sun where the project says.
-    forge.sync_camera(&plan)?;
-    Ok(forge.status())
-}
-
-/// Push the project's camera and sun into the running viewer.
-#[tauri::command]
-pub fn forge3d_sync_camera(
-    forge: State<'_, Forge3dState>,
-    state: State<'_, AppState>,
-) -> Result<Forge3dStatus, String> {
-    let plan = current_handoff(&state)?;
-    forge.sync_camera(&plan)?;
-    Ok(forge.status())
-}
-
-#[tauri::command]
-pub fn forge3d_stop(forge: State<'_, Forge3dState>) -> Forge3dStatus {
-    forge.stop();
-    forge.status()
 }
 
 fn current_handoff(state: &State<'_, AppState>) -> Result<Handoff, String> {

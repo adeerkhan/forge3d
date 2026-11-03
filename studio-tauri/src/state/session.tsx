@@ -17,8 +17,6 @@ import type {
   AutosaveStatus,
   Command,
   EngineStatus,
-  Forge3dStatus,
-  Handoff,
   RenderFrame,
   ViewportMode,
   PrimitiveShape,
@@ -27,7 +25,6 @@ import type {
   ShellInfo,
   Tool,
   ToolSpace,
-  Workspace,
 } from "../bridge/types";
 import { DEFAULT_PRIMITIVES } from "../bridge/types";
 
@@ -59,10 +56,8 @@ interface SessionApi {
   /** Look through the scene's active camera instead of the free view. */
   cameraView: boolean;
   setCameraView(enabled: boolean): void;
-  /** Forge3D workspace adapter state. */
+  /** Forge3D engine discovery (renderer + probe). */
   engine: EngineStatus | null;
-  forgeStatus: Forge3dStatus | null;
-  handoff: Handoff | null;
   /** Last embedded-renderer frame (Rendered viewport mode). */
   render: {
     frame: RenderFrame | null;
@@ -82,11 +77,7 @@ interface SessionApi {
     duplicateSelection(): Promise<void>;
     deleteSelection(): Promise<void>;
     importMesh(): Promise<void>;
-    setWorkspace(workspace: Workspace): Promise<void>;
-    refreshForge3d(force?: boolean): Promise<void>;
-    openForge3d(): Promise<void>;
-    syncForge3dCamera(): Promise<void>;
-    stopForge3d(): Promise<void>;
+    refreshEngine(force?: boolean): Promise<void>;
     setViewportMode(mode: ViewportMode): Promise<void>;
     renderViewport(width: number, height: number): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
@@ -109,8 +100,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [space, setSpace] = useState<ToolSpace>("world");
   const [cameraView, setCameraView] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
-  const [forgeStatus, setForgeStatus] = useState<Forge3dStatus | null>(null);
-  const [handoff, setHandoff] = useState<Handoff | null>(null);
   const [render, setRender] = useState<{ frame: RenderFrame | null; busy: boolean; error: string | null }>({
     frame: null,
     busy: false,
@@ -160,6 +149,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (noticeTimer.current !== null) window.clearTimeout(noticeTimer.current);
     };
   }, [fail]);
+
+  // One engine probe per session: the status bar reports whether the renderer
+  // can run, without a whole workspace for it.
+  useEffect(() => {
+    void refreshEngine();
+    // Mount-time probe only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Keep "autosaved 14:03" honest without a websocket: one cheap poll.
   useEffect(() => {
@@ -294,63 +291,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [applyCommand, fail, flash, select]);
 
-  const refreshForge3d = useCallback(
+  const refreshEngine = useCallback(
     async (force = false) => {
+      if (bridge.kind !== "tauri") return;
       try {
         setEngine(await bridge.forge3dProbe(force));
-        setForgeStatus(await bridge.forge3dStatus());
-        try {
-          setHandoff(await bridge.forge3dHandoff());
-        } catch {
-          // No project open: the panel shows the engine state only.
-          setHandoff(null);
-        }
-      } catch (cause) {
-        fail(cause);
+      } catch {
+        // A missing engine is reported through the status bar, not a failure.
       }
     },
-    [fail],
+    [],
   );
-
-  const openForge3d = useCallback(async () => {
-    try {
-      setForgeStatus(await bridge.forge3dLaunch());
-      setHandoff(await bridge.forge3dHandoff().catch(() => null));
-      flash("Forge3D viewer started");
-    } catch (cause) {
-      fail(cause);
-    }
-  }, [fail, flash]);
-
-  const syncForge3dCamera = useCallback(async () => {
-    try {
-      setForgeStatus(await bridge.forge3dSyncCamera());
-      flash("Camera and sun sent to Forge3D");
-    } catch (cause) {
-      fail(cause);
-    }
-  }, [fail, flash]);
-
-  const stopForge3d = useCallback(async () => {
-    try {
-      setForgeStatus(await bridge.forge3dStop());
-      flash("Forge3D viewer stopped");
-    } catch (cause) {
-      fail(cause);
-    }
-  }, [fail, flash]);
-
-  // While the viewer runs, keep diagnostics and status fresh.
-  useEffect(() => {
-    if (!forgeStatus?.running || bridge.kind !== "tauri") return;
-    const timer = window.setInterval(() => {
-      bridge
-        .forge3dStatus()
-        .then(setForgeStatus)
-        .catch(() => undefined);
-    }, 2000);
-    return () => window.clearInterval(timer);
-  }, [forgeStatus?.running]);
 
   const renderViewport = useCallback(
     async (width: number, height: number) => {
@@ -487,15 +438,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       deleteSelection,
       importMesh,
 
-      async setWorkspace(workspace) {
-        await applyCommand({ type: "setWorkspace", workspace });
-        if (workspace === "forge3d") await refreshForge3d();
-      },
-
-      refreshForge3d,
-      openForge3d,
-      syncForge3dCamera,
-      stopForge3d,
+      refreshEngine,
       setViewportMode,
       renderViewport,
 
@@ -535,15 +478,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       flash,
       guardUnsaved,
       importMesh,
-      openForge3d,
-      refreshForge3d,
+      refreshEngine,
       refreshRecovery,
       renderViewport,
       select,
       setViewportMode,
       state,
-      stopForge3d,
-      syncForge3dCamera,
     ],
   );
 
@@ -563,8 +503,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     cameraView,
     setCameraView,
     engine,
-    forgeStatus,
-    handoff,
     render,
     actions,
   };

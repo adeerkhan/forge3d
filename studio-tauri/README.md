@@ -32,11 +32,11 @@ sync, diagnostics).
 | Add / delete / duplicate | `command.rs`, `session.tsx` | done |
 | glTF / GLB import | `ImportGltf` command + `assets.ts` | done (see limitation) |
 | Look through the active camera | `Viewport3D.tsx` (`0`, toolbar) | done |
-| **Phase 3** — workspace switching | `setWorkspace` command, `TopBar` | done |
+| **Phase 3** — workspace switching | removed (see below) | dropped deliberately |
 | Capability report per object | `crates/studio-core/src/workspace.rs` | done, tested |
-| Engine / viewer probe | `src-tauri/src/forge3d.rs` | written, unbuilt here |
-| Viewer process + IPC bridge | `forge3d.rs`, `studio_bridge.py` | written, unbuilt here |
-| Camera + sun sync | `forge3d_sync_camera`, `SunAngles` | written, unbuilt here |
+| Engine discovery | `src-tauri/src/forge3d.rs` | done, shown in the status bar |
+| Separate viewer window | — | removed: rendering lives in the viewport |
+| Camera + sun transfer | `RenderRequest::from_handoff` | done |
 | Diagnostics + idempotent handoff | `forge3d.rs`, `workspace.rs` | done |
 | **Phase 4 (in progress)** — terrain-first default scene | `Project::starter`, `TerrainSeed` | done |
 | DEM heightfield preview in Studio | `terrain_preview`, `buildTerrainMesh` | done |
@@ -206,30 +206,15 @@ like "nothing happened" if you get them wrong:
    empty space and the render is blank. `TerrainObject::viewer_framing` reproduces
    that formula exactly and is pinned by a test.
 
-## The Forge3D workspace (Phase 3)
+## Engine discovery
 
-Switching the workspace tab moves the project into the Forge3D workspace. The
-viewer is a **separate window** driven over IPC; Studio keeps the project and
-every edit.
-
-The panel answers three questions, each from real state rather than a promise:
-
-1. **Can this machine run the viewer?** The shell probes a Python interpreter
-   (repo `.venv`, then `python3`) for `import forge3d` and for a resolvable
-   `interactive_viewer` binary, and names what is missing. If nothing is found,
-   the launch button is disabled with the reason as its tooltip.
-2. **What can the viewer take?** `workspace.rs` classifies each object against
-   the viewer's actual IPC surface: imported glTF meshes and cameras are fully
-   supported, directional sun is partial (no shadows/colour), primitives are
-   partial until geometry export lands in Phase 4, and point lights are
-   unsupported. Every row carries the reason, and scene-level degradations are
-   listed separately.
-3. **What did the viewer say?** The bridge process's stdout/stderr land in a
-   diagnostics pane, with exit and startup failures shown verbatim.
-
-Handoffs are idempotent per `(project, scene, revision)`: reopening the same
-revision reuses the running window instead of starting a second one. The payload
-is written to `<app-data>/forge3d/handoff.json` so it can be inspected.
+Studio probes a Python interpreter for `import forge3d` (repo `.venv` first, then
+`python3`, `FORGE3D_STUDIO_PYTHON` to override) and reports the result in the
+status bar — `forge3d 1.47.1` when the renderer can run, `engine unavailable` with
+the reason when it cannot. There is no separate viewer window any more: opening
+one was a Phase 3 detour, and it has been removed along with its workspace tab.
+The capability report it produced still exists in `workspace.rs`, where it feeds
+the render handoff.
 
 ## Known limitations
 

@@ -13,8 +13,6 @@ import type {
   Command,
   EditResult,
   EngineStatus,
-  Forge3dStatus,
-  Handoff,
   Project,
   RecoveryEntry,
   SessionState,
@@ -49,11 +47,6 @@ export interface StudioBridge {
 
   // Forge3D workspace adapter
   forge3dProbe(force?: boolean): Promise<EngineStatus>;
-  forge3dStatus(): Promise<Forge3dStatus>;
-  forge3dHandoff(): Promise<Handoff>;
-  forge3dLaunch(width?: number, height?: number): Promise<Forge3dStatus>;
-  forge3dSyncCamera(): Promise<Forge3dStatus>;
-  forge3dStop(): Promise<Forge3dStatus>;
 
   // Embedded renderer (Rendered viewport mode)
   renderFrame(width: number, height: number): Promise<RenderFrame>;

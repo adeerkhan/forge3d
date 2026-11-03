@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 
 import { EmptyState } from "./components/EmptyState";
-import { Forge3dWorkspace } from "./components/Forge3dWorkspace";
 import { Inspector } from "./components/Inspector";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { SceneTree } from "./components/SceneTree";
@@ -27,14 +26,8 @@ export default function App() {
               <SceneTree />
             </aside>
             <section className="workspace__center">
-              {state.project.workspace === "forge3d" ? (
-                <Forge3dWorkspace />
-              ) : (
-                <>
-                  <RecoveryBanner />
-                  <Viewport3D />
-                </>
-              )}
+              <RecoveryBanner />
+              <Viewport3D />
             </section>
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />

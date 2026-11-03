@@ -548,57 +548,8 @@ export function createMockBridge(): StudioBridge {
       packageVersion: null,
       viewerBinary: null,
       detail:
-        "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to connect the viewer.",
+        "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),
-
-    forge3dStatus: async () => ({
-      running: false,
-      ready: false,
-      pid: null,
-      error: null,
-      lastHandoffKey: null,
-      payloadPath: null,
-      diagnostics: ["preview harness: no Forge3D process"],
-    }),
-
-    forge3dHandoff: async () => {
-      const current = requireProject();
-      const previewDetail =
-        "Preview harness: the real capability rules run in the desktop shell.";
-      return {
-        projectId: current.id,
-        sceneId: current.scene.id,
-        revision,
-        target: "forge3d",
-        idempotencyKey: `${current.id}:${current.scene.id}:${revision}:forge3d`,
-        report: {
-          target: "forge3d",
-          objects: current.scene.objects.map((object) => ({
-            id: object.id,
-            name: object.name,
-            kind: object.kind.type,
-            level: "partial" as const,
-            detail: previewDetail,
-          })),
-          degradations: [previewDetail],
-          supportsCameraSync: true,
-          hasRenderableContent: true,
-        },
-        camera: null,
-        terrainCamera: null,
-        terrain: null,
-        assets: [],
-        sun: null,
-      };
-    },
-
-    forge3dLaunch: async () => {
-      throw new Error("the Forge3D viewer needs the desktop shell");
-    },
-
-    forge3dSyncCamera: async () => {
-      throw new Error("the Forge3D viewer needs the desktop shell");
-    },
 
     renderFrame: async (): Promise<RenderFrame> => {
       throw new Error(
@@ -618,15 +569,6 @@ export function createMockBridge(): StudioBridge {
       diagnostics: ["preview harness: no renderer"],
     }),
 
-    forge3dStop: async () => ({
-      running: false,
-      ready: false,
-      pid: null,
-      error: null,
-      lastHandoffKey: null,
-      payloadPath: null,
-      diagnostics: ["preview harness: no Forge3D process"],
-    }),
   };
 
   return bridge;

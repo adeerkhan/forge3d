@@ -1,34 +1,52 @@
-//! Forge3D workspace adapter: engine probe, viewer process, and diagnostics.
+//! Forge3D engine discovery and DEM access.
 //!
-//! The viewer is a **separate process with a window**, per the plan — it is not
-//! embedded in the Studio webview. Studio keeps the canonical project; this
-//! module only moves supported state into that process and reports what could
-//! not be moved.
+//! Studio no longer opens a separate viewer window: rendering happens in the
+//! viewport's Rendered mode (`render.rs`). What remains here is what that path
+//! and the terrain preview need — finding the interpreter that can import
+//! `forge3d`, resolving the default DEM, and measuring it.
 //!
-//! Process control is deliberately honest: if the engine or the viewer binary
-//! is missing, the probe says exactly what is missing and what to build. Nothing
-//! here fakes a running viewer.
+//! Process control is deliberately honest: if the engine cannot be imported,
+//! the probe says exactly what is missing.
 
-use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use serde_json::json;
-use studio_core::workspace::Handoff;
-use studio_core::AssetKind;
 
-/// Embedded so the installed app does not need to ship a separate Python file.
-const HELPER_SCRIPT: &str = include_str!("studio_bridge.py");
-
-const MAX_DIAGNOSTICS: usize = 300;
-
-/// Bundled DEM used as the default scene while Studio's own terrain preview is
-/// a sample. Overridable with `FORGE3D_STUDIO_DEM`.
+/// Bundled DEM used as the default scene. Overridable with `FORGE3D_STUDIO_DEM`.
 const DEFAULT_DEM_RELATIVE: &str = "assets/tif/Bryce_Canyon_1024.tif";
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Probe program: reports the package version and whether the viewer binary
+/// resolves. Opening a window is not required.
+const PROBE_SCRIPT: &str = r#"
+import json
+
+def main():
+    try:
+        import forge3d
+    except Exception as exc:
+        print(json.dumps({"ok": False, "detail": "import forge3d failed: %s" % (exc,)}))
+        return
+    version = getattr(forge3d, "__version__", "unknown")
+    try:
+        from forge3d._viewer_binary import find_viewer_binary
+        import forge3d.viewer as viewer
+        binary = find_viewer_binary(viewer.__file__)
+    except Exception as exc:
+        print(json.dumps({
+            "ok": False,
+            "version": version,
+            "detail": "viewer binary unavailable: %s. Build it with: cargo build --release --bin interactive_viewer" % (exc,),
+        }))
+        return
+    print(json.dumps({"ok": True, "version": version, "viewer": binary, "detail": "engine and viewer present"}))
+
+main()
+"#;
 
 /// Sampling script for the Studio heightfield preview (rasterio is already a
 /// dependency of the engine's terrain workflow).
@@ -59,7 +77,6 @@ try:
         transform = src.transform
         a, b, c, d, e, f = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
         # Mirror the viewer's footprint: origin (c, -f), span (|a|·w, |e|·h).
-        # Without a usable transform it falls back to DEM pixels at the origin.
         if all(isinstance(v, (int, float)) and v == v for v in (a, b, c, d, e, f)):
             origin_xz = [float(c), float(-f)]
             span_xz = [abs(float(a)) * width, abs(float(e)) * height]
@@ -84,42 +101,12 @@ except Exception as exc:
 
 print(json.dumps(payload))
 "#;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
-const READY_TIMEOUT: Duration = Duration::from_secs(45);
-
-/// Probe program: reports the package version and whether the viewer binary
-/// resolves, without opening a window.
-const PROBE_SCRIPT: &str = r#"
-import json
-
-def main():
-    try:
-        import forge3d
-    except Exception as exc:
-        print(json.dumps({"ok": False, "detail": "import forge3d failed: %s" % (exc,)}))
-        return
-    version = getattr(forge3d, "__version__", "unknown")
-    try:
-        from forge3d._viewer_binary import find_viewer_binary
-        import forge3d.viewer as viewer
-        binary = find_viewer_binary(viewer.__file__)
-    except Exception as exc:
-        print(json.dumps({
-            "ok": False,
-            "version": version,
-            "detail": "viewer binary unavailable: %s. Build it with: cargo build --release --bin interactive_viewer" % (exc,),
-        }))
-        return
-    print(json.dumps({"ok": True, "version": version, "viewer": binary, "detail": "engine and viewer present"}))
-
-main()
-"#;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineStatus {
     pub available: bool,
-    /// Interpreter that was probed successfully (or the last one tried).
+    /// Interpreter that was probed (the one Rendered mode will use).
     pub python: String,
     pub package_version: Option<String>,
     pub viewer_binary: Option<String>,
@@ -127,36 +114,10 @@ pub struct EngineStatus {
     pub detail: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Forge3dStatus {
-    pub running: bool,
-    pub ready: bool,
-    pub pid: Option<u32>,
-    pub error: Option<String>,
-    pub last_handoff_key: Option<String>,
-    pub payload_path: Option<String>,
-    pub diagnostics: Vec<String>,
-}
-
-#[derive(Default)]
-struct Inner {
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
-    pid: Option<u32>,
-    ready: bool,
-    error: Option<String>,
-    last_handoff_key: Option<String>,
-    payload_path: Option<PathBuf>,
-    next_id: u64,
-}
-
 pub struct Forge3dState {
-    engine: Mutex<Option<EngineStatus>>,
-    inner: Arc<Mutex<Inner>>,
-    log: Arc<Mutex<VecDeque<String>>>,
+    engine: std::sync::Mutex<Option<EngineStatus>>,
     /// Resolved default DEM plus its measured metadata (sampling is not free).
-    terrain_cache: Mutex<Option<(String, studio_core::TerrainSeed)>>,
+    terrain_cache: std::sync::Mutex<Option<(String, studio_core::TerrainSeed)>>,
 }
 
 impl Default for Forge3dState {
@@ -168,10 +129,8 @@ impl Default for Forge3dState {
 impl Forge3dState {
     pub fn new() -> Self {
         Self {
-            engine: Mutex::new(None),
-            inner: Arc::new(Mutex::new(Inner::default())),
-            log: Arc::new(Mutex::new(VecDeque::new())),
-            terrain_cache: Mutex::new(None),
+            engine: std::sync::Mutex::new(None),
+            terrain_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -190,19 +149,19 @@ impl Forge3dState {
 
         for python in interpreter_candidates() {
             match probe_interpreter(&python) {
-                Ok(status) if status.available => {
-                    if let Ok(mut guard) = self.engine.lock() {
-                        *guard = Some(status.clone());
-                    }
-                    return status;
-                }
                 Ok(status) => {
-                    let status_score = status.package_version.is_some();
-                    let best_score = best
+                    if status.available {
+                        if let Ok(mut guard) = self.engine.lock() {
+                            *guard = Some(status.clone());
+                        }
+                        return status;
+                    }
+                    let better = status.package_version.is_some();
+                    let current = best
                         .as_ref()
-                        .map(|current| current.package_version.is_some())
+                        .map(|entry| entry.package_version.is_some())
                         .unwrap_or(false);
-                    if best.is_none() || (status_score && !best_score) {
+                    if best.is_none() || (better && !current) {
                         best = Some(status);
                     }
                 }
@@ -227,8 +186,6 @@ impl Forge3dState {
             viewer_binary: None,
             detail: "no Python interpreter was found".to_owned(),
         });
-
-        push_log(&self.log, format!("engine probe: {}", last.detail));
         if let Ok(mut guard) = self.engine.lock() {
             *guard = Some(last.clone());
         }
@@ -236,7 +193,7 @@ impl Forge3dState {
     }
 
     /// The default scene's DEM, with its measured dimensions and elevation
-    /// range so the project can reproduce the viewer's framing without Python.
+    /// range so the project can reproduce the renderer's framing without Python.
     ///
     /// Sampling costs a Python start-up; the result is cached per path.
     pub fn default_terrain_seed(&self) -> Option<studio_core::TerrainSeed> {
@@ -289,9 +246,8 @@ impl Forge3dState {
                     seed.world_span_xz = pair(span);
                 }
             }
-            Err(error) => push_log(
-                &self.log,
-                format!("DEM metadata unavailable ({error}); the viewer will keep its own framing"),
+            Err(error) => log::warn!(
+                "DEM metadata unavailable ({error}); the renderer will use its own framing"
             ),
         }
 
@@ -300,341 +256,6 @@ impl Forge3dState {
         }
         Some(seed)
     }
-
-    pub fn status(&self) -> Forge3dStatus {
-        let inner = self.inner.lock().ok();
-        let diagnostics = self
-            .log
-            .lock()
-            .map(|log| log.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        match inner {
-            Some(inner) => Forge3dStatus {
-                running: inner.child.is_some(),
-                ready: inner.ready,
-                pid: inner.pid,
-                error: inner.error.clone(),
-                last_handoff_key: inner.last_handoff_key.clone(),
-                payload_path: inner
-                    .payload_path
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                diagnostics,
-            },
-            None => Forge3dStatus {
-                running: false,
-                ready: false,
-                pid: None,
-                error: Some("the Forge3D adapter is unavailable".to_owned()),
-                last_handoff_key: None,
-                payload_path: None,
-                diagnostics,
-            },
-        }
-    }
-
-    /// Start the viewer for a handoff. Idempotent: launching the same revision
-    /// twice reuses the running window instead of opening a second one.
-    pub fn launch(
-        &self,
-        handoff: &Handoff,
-        app_data: &Path,
-        width: u32,
-        height: u32,
-    ) -> Result<(), String> {
-        {
-            let inner = self.inner.lock().map_err(lock_error)?;
-            if inner.child.is_some()
-                && inner.ready
-                && inner.last_handoff_key.as_deref() == Some(handoff.idempotency_key.as_str())
-            {
-                push_log(
-                    &self.log,
-                    "handoff unchanged; reusing the running viewer".to_owned(),
-                );
-                return Ok(());
-            }
-        }
-        self.stop();
-
-        let engine = self.probe(false);
-        if !engine.available {
-            return Err(engine.detail);
-        }
-
-        let directory = app_data.join("forge3d");
-        std::fs::create_dir_all(&directory)
-            .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-        let payload_path = directory.join("handoff.json");
-        let payload = serde_json::to_vec_pretty(handoff)
-            .map_err(|error| format!("could not serialise the handoff: {error}"))?;
-        std::fs::write(&payload_path, payload)
-            .map_err(|error| format!("could not write {}: {error}", payload_path.display()))?;
-
-        let helper_path = directory.join("studio_bridge.py");
-        std::fs::write(&helper_path, HELPER_SCRIPT)
-            .map_err(|error| format!("could not write {}: {error}", helper_path.display()))?;
-
-        let gltf = handoff
-            .assets
-            .iter()
-            .find(|asset| matches!(asset.kind, AssetKind::Gltf | AssetKind::Glb))
-            .map(|asset| asset.path.clone());
-
-        push_log(
-            &self.log,
-            format!(
-                "starting viewer with {}",
-                gltf.clone().unwrap_or_else(|| "no asset".to_owned())
-            ),
-        );
-
-        let mut child = Command::new(&engine.python)
-            .arg(&helper_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not start {}: {error}", engine.python))?;
-
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "the bridge process has no stdin".to_owned())?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| "the bridge process has no stdout".to_owned())?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| "the bridge process has no stderr".to_owned())?;
-
-        let config = json!({
-            "width": width,
-            "height": height,
-            "fovDeg": handoff.camera.map(|camera| camera.fov_deg).unwrap_or(60.0),
-            "gltfPath": gltf,
-            "terrainPath": handoff.terrain.as_ref().map(|terrain| terrain.path.clone()),
-            "zScale": handoff.terrain.as_ref().map(|terrain| terrain.z_scale),
-            "timeout": 45,
-        });
-        writeln!(stdin, "{config}")
-            .map_err(|error| format!("could not configure the bridge: {error}"))?;
-        stdin
-            .flush()
-            .map_err(|error| format!("could not configure the bridge: {error}"))?;
-
-        {
-            let mut inner = self.inner.lock().map_err(lock_error)?;
-            inner.pid = Some(child.id());
-            inner.child = Some(child);
-            inner.stdin = Some(stdin);
-            inner.ready = false;
-            inner.error = None;
-            inner.payload_path = Some(payload_path.clone());
-        }
-
-        spawn_stdout_reader(stdout, Arc::clone(&self.inner), Arc::clone(&self.log));
-        spawn_stderr_reader(stderr, Arc::clone(&self.log));
-
-        let deadline = Instant::now() + READY_TIMEOUT;
-        loop {
-            {
-                let inner = self.inner.lock().map_err(lock_error)?;
-                if inner.ready {
-                    break;
-                }
-                if let Some(error) = inner.error.clone() {
-                    drop(inner);
-                    self.stop();
-                    return Err(error);
-                }
-                if inner.child.is_none() {
-                    return Err("the Forge3D viewer exited before it was ready".to_owned());
-                }
-            }
-            if Instant::now() > deadline {
-                self.stop();
-                return Err(format!(
-                    "the Forge3D viewer did not report ready within {}s",
-                    READY_TIMEOUT.as_secs()
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(80));
-        }
-
-        let mut inner = self.inner.lock().map_err(lock_error)?;
-        inner.last_handoff_key = Some(handoff.idempotency_key.clone());
-        push_log(&self.log, "viewer ready".to_owned());
-        Ok(())
-    }
-
-    /// Send camera/field-of-view/sun state to the running viewer.
-    ///
-    /// Terrain scenes orbit rather than look at: the viewer keeps its own radius
-    /// and centre (that is what frames a 4 km DEM), and Studio transfers the
-    /// direction. Non-terrain scenes use `cam_lookat`.
-    pub fn sync_camera(&self, handoff: &Handoff) -> Result<(), String> {
-        if handoff.terrain.is_some() {
-            if let Some(orbit) = handoff.terrain_camera {
-                match (orbit.radius, orbit.target) {
-                    (Some(radius), Some(target)) => {
-                        self.send_payload(json!({
-                            "cmd": "set_terrain_camera",
-                            "phi_deg": orbit.phi_deg,
-                            "theta_deg": orbit.theta_deg,
-                            "radius": radius,
-                            "fov_deg": orbit.fov_deg,
-                            "target": target,
-                        }))?;
-                    }
-                    _ => push_log(
-                        &self.log,
-                        "DEM dimensions unknown; the viewer keeps its own terrain framing"
-                            .to_owned(),
-                    ),
-                }
-            }
-            if let Some(sun) = handoff.sun {
-                self.send_payload(json!({
-                    "cmd": "set_terrain_sun",
-                    "azimuth_deg": sun.azimuth_deg,
-                    "elevation_deg": sun.elevation_deg,
-                    "intensity": sun.intensity,
-                    "source": "manual_angles",
-                }))?;
-            }
-            if let Some(terrain) = handoff.terrain.as_ref() {
-                if (terrain.z_scale - 1.0).abs() > f32::EPSILON {
-                    self.send_payload(json!({
-                        "cmd": "set_terrain",
-                        "z_scale": terrain.z_scale,
-                    }))?;
-                }
-            }
-            return Ok(());
-        }
-
-        if let Some(camera) = handoff.camera {
-            self.send_payload(json!({
-                "cmd": "cam_lookat",
-                "eye": [camera.eye.x, camera.eye.y, camera.eye.z],
-                "target": [camera.target.x, camera.target.y, camera.target.z],
-                "up": [camera.up.x, camera.up.y, camera.up.z],
-            }))?;
-            self.send_payload(json!({ "cmd": "set_fov", "deg": camera.fov_deg }))?;
-        }
-        if let Some(sun) = handoff.sun {
-            self.send_payload(json!({
-                "cmd": "lit_sun",
-                "azimuth_deg": sun.azimuth_deg,
-                "elevation_deg": sun.elevation_deg,
-            }))?;
-        }
-        Ok(())
-    }
-
-    pub fn send_payload(&self, payload: serde_json::Value) -> Result<(), String> {
-        let mut inner = self.inner.lock().map_err(lock_error)?;
-        inner.next_id += 1;
-        let id = inner.next_id;
-        let line = json!({ "id": id, "cmd": "call", "payload": payload }).to_string();
-        let stdin = inner
-            .stdin
-            .as_mut()
-            .ok_or_else(|| "the Forge3D viewer is not running".to_owned())?;
-        writeln!(stdin, "{line}")
-            .and_then(|_| stdin.flush())
-            .map_err(|error| format!("lost the connection to the Forge3D viewer: {error}"))
-    }
-
-    pub fn stop(&self) {
-        let Ok(mut inner) = self.inner.lock() else {
-            return;
-        };
-        if let Some(mut stdin) = inner.stdin.take() {
-            let _ = writeln!(stdin, "{}", json!({"id": 0, "cmd": "close"}));
-            let _ = stdin.flush();
-        }
-        if let Some(mut child) = inner.child.take() {
-            // Give the bridge a moment to close the viewer itself, then insist.
-            for _ in 0..10 {
-                match child.try_wait() {
-                    Ok(Some(_)) => break,
-                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                    Err(_) => break,
-                }
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        inner.ready = false;
-        inner.pid = None;
-        inner.last_handoff_key = None;
-        inner.payload_path = None;
-        drop(inner);
-        push_log(&self.log, "viewer stopped".to_owned());
-    }
-}
-
-fn lock_error<T>(_: T) -> String {
-    "the Forge3D adapter is unavailable after an internal error".to_owned()
-}
-
-fn push_log(log: &Arc<Mutex<VecDeque<String>>>, line: String) {
-    if let Ok(mut log) = log.lock() {
-        log.push_back(line);
-        while log.len() > MAX_DIAGNOSTICS {
-            log.pop_front();
-        }
-    }
-}
-
-fn spawn_stdout_reader(
-    stdout: impl Read + Send + 'static,
-    inner: Arc<Mutex<Inner>>,
-    log: Arc<Mutex<VecDeque<String>>>,
-) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            push_log(&log, line.clone());
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            match value.get("event").and_then(|event| event.as_str()) {
-                Some("ready") => {
-                    if let Ok(mut inner) = inner.lock() {
-                        inner.ready = true;
-                    }
-                }
-                Some("error") => {
-                    let message = value
-                        .get("message")
-                        .and_then(|message| message.as_str())
-                        .unwrap_or("the Forge3D viewer failed")
-                        .to_owned();
-                    if let Ok(mut inner) = inner.lock() {
-                        inner.error = Some(message);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Ok(mut inner) = inner.lock() {
-            inner.ready = false;
-        }
-        push_log(&log, "bridge process closed".to_owned());
-    });
-}
-
-fn spawn_stderr_reader(stderr: impl Read + Send + 'static, log: Arc<Mutex<VecDeque<String>>>) {
-    std::thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            push_log(&log, format!("stderr: {line}"));
-        }
-    });
 }
 
 /// Resolve the bundled/default DEM: `FORGE3D_STUDIO_DEM`, else the checkout's

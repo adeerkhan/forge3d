@@ -10,7 +10,7 @@ function time(unixMs: number | null | undefined): string {
 }
 
 export function StatusBar() {
-  const { state, autosave, recovery, bridgeKind, busy } = useSession();
+  const { state, autosave, recovery, bridgeKind, busy, engine } = useSession();
 
   const objects = state?.project.scene.objects.length ?? 0;
   const selected = state?.project.selection.length ?? 0;
@@ -20,6 +20,18 @@ export function StatusBar() {
       <span className={`status-chip status-chip--${bridgeKind}`}>
         {bridgeKind === "tauri" ? "Tauri shell" : "Preview harness"}
       </span>
+      {bridgeKind === "tauri" && (
+        <span
+          className={`status-engine ${engine?.available ? "is-ready" : ""}`}
+          title={engine?.detail ?? "Probing for the Forge3D engine…"}
+        >
+          {engine
+            ? engine.available
+              ? `forge3d ${engine.packageVersion ?? "?"}`
+              : "engine unavailable"
+            : "probing engine…"}
+        </span>
+      )}
       {state ? (
         <>
           <span>{objects} objects</span>

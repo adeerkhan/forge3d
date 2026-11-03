@@ -1447,6 +1447,14 @@ kbd {
   color: var(--text-dim);
 }
 
+.status-engine {
+  color: var(--text-dim);
+}
+
+.status-engine.is-ready {
+  color: var(--ok);
+}
+
 /* ---------------------------------------------------------------- toasts */
 
 .toast-stack {
