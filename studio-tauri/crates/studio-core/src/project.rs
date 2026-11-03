@@ -17,6 +17,12 @@ use crate::scene::{
     SceneObject, TerrainObject,
 };
 
+/// Width of the terrain in the Studio viewport's scene units.
+///
+/// The viewport draws a DEM across this many units regardless of its real size,
+/// and the renderer works in metres; every conversion between the two uses it.
+pub const SCENE_TERRAIN_SIZE: f32 = 12.0;
+
 /// Format tag written into every project file.
 pub const FORMAT: &str = "studio3d";
 

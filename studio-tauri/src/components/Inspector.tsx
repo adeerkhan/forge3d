@@ -233,8 +233,7 @@ function TerrainEditor({
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
-  const { actions, terrainResolution, setTerrainResolution, framingPercent, setFramingPercent } =
-    useSession();
+  const { actions, terrainResolution, setTerrainResolution } = useSession();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -270,36 +269,25 @@ function TerrainEditor({
         }
       />
       <label className="field">
-        <span className="field-label">Framing · {framingPercent}%</span>
+        <span className="field-label">
+          Solid mesh · {terrainResolution} × {terrainResolution}
+        </span>
         <input
           className="slider"
           type="range"
-          min={25}
-          max={300}
-          step={5}
-          value={framingPercent}
-          onChange={(event) => setFramingPercent(Number(event.target.value))}
+          min={32}
+          max={512}
+          step={32}
+          value={terrainResolution}
+          onChange={(event) => setTerrainResolution(Number(event.target.value))}
         />
       </label>
 
-      <label className="field">
-        <span className="field-label">Preview resolution</span>
-        <select
-          className="input input--select"
-          value={terrainResolution}
-          onChange={(event) => setTerrainResolution(Number(event.target.value))}
-        >
-          <option value={64}>64 × 64 — fastest</option>
-          <option value={96}>96 × 96</option>
-          <option value={160}>160 × 160</option>
-          <option value={256}>256 × 256 — closest to the DEM</option>
-        </select>
-      </label>
-
       <p className="hint">
-        Framing drives both views: the solid camera and the Rendered frame share
-        it, so they show the terrain at the same size. Solid draws a sampled
-        heightfield; the renderer always reads the original GeoTIFF.
+        The slider is the heightfield detail the Solid view builds from this DEM
+        (32 = blocky, 512 = close to the source grid). The renderer always reads
+        the original GeoTIFF, so Rendered is unaffected by this setting — press
+        End to put the renderer's camera where your viewport is looking.
       </p>
     </Section>
   );

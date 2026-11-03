@@ -14,7 +14,7 @@ import type {
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
-import type { RenderView, TerrainPreview } from "../bridge/types";
+import type { TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
 
 const DEG = Math.PI / 180;
@@ -141,9 +141,6 @@ function buildLightGizmo(light: LightObject): THREE.Group {
 
 const TERRAIN_VIEW_SIZE = 12;
 
-/** Orbit distance that makes the 12-unit terrain fill the viewport at 100%. */
-const BASE_ORBIT_DISTANCE = 18;
-
 /**
  * A displaced grid from a sampled DEM.
  *
@@ -268,8 +265,6 @@ export function Viewport3D() {
     cameraView,
     render,
     terrainResolution,
-    framingPercent,
-    setFramingPercent,
   } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -427,19 +422,12 @@ export function Viewport3D() {
     });
 
     orbit.addEventListener("end", () => {
-      // Scrolling changes the framing: keep the slider honest.
-      const distance = runtime.camera.position.distanceTo(runtime.orbit.target);
-      if (distance > 0.01) {
-        const percent = Math.round((BASE_ORBIT_DISTANCE / distance) * 100);
-        framingSetterRef.current(Math.min(300, Math.max(25, percent)));
-      }
       if (!modeRef.current) return;
       const { width, height } = sizeRef.current;
       void actionsRef.current.renderViewport(
         Math.max(320, Math.round(width)),
         Math.max(240, Math.round(height)),
         "preview",
-        currentRenderViewRef.current(),
       );
     });
 
@@ -800,52 +788,67 @@ export function Viewport3D() {
   modeRef.current = renderedMode;
   const sizeRef = useRef(size);
   sizeRef.current = size;
-  const framingSetterRef = useRef(setFramingPercent);
-  framingSetterRef.current = setFramingPercent;
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  /** The solid camera as a scene transform (X, then Y, then Z). */
+  const cameraTransformFromView = useCallback((): Transform | null => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return null;
+    const euler = new THREE.Euler().setFromQuaternion(runtime.camera.quaternion, "ZYX");
+    return {
+      translation: {
+        x: runtime.camera.position.x,
+        y: runtime.camera.position.y,
+        z: runtime.camera.position.z,
+      },
+      rotationDeg: {
+        x: euler.x / DEG,
+        y: euler.y / DEG,
+        z: euler.z / DEG,
+      },
+      scale: { x: 1, y: 1, z: 1 },
+    };
+  }, []);
+
   /**
-   * The solid view's camera expressed in the renderer's terms, so Rendered
-   * frames the scene exactly like the viewport (orientation included).
+   * Store the current viewport view as the scene's active camera, so the
+   * renderer uses exactly what the user is looking at. Blender uses
+   * Ctrl+Alt+Numpad0; this is bound to End / Numpad 1 as requested.
    */
-  const currentRenderView = useCallback((): RenderView | undefined => {
+  const captureCamera = useCallback(async () => {
     const runtime = runtimeRef.current;
     const project = stateRef.current?.project;
-    const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
-    if (!runtime || !terrain || terrain.kind.type !== "terrain") return undefined;
-    const span = terrain.kind.worldSpanXz;
-    if (!span) return undefined;
+    if (!runtime || !project) return;
+    const transform = cameraTransformFromView();
+    if (!transform) return;
 
-    const offset = runtime.camera.position.clone().sub(runtime.orbit.target);
-    const distance = offset.length();
-    if (distance < 1e-4) return undefined;
-    const direction = offset.normalize();
-    const thetaDeg = (Math.acos(Math.min(1, Math.max(-1, direction.y))) * 180) / Math.PI;
-    const phiDeg = ((Math.atan2(direction.z, direction.x) * 180) / Math.PI + 360) % 360;
-    const radius = (distance / TERRAIN_VIEW_SIZE) * Math.max(span[0], span[1]);
-    return { phiDeg, thetaDeg, radius };
-  }, []);
-  const currentRenderViewRef = useRef(currentRenderView);
-  currentRenderViewRef.current = currentRenderView;
-
-  // The framing slider moves the solid camera; Rendered inherits it.
-  useEffect(() => {
-    const runtime = runtimeRef.current;
-    if (!runtime || !inCameraView.current) {
-      const percent = Math.min(300, Math.max(25, framingPercent));
-      const distance = BASE_ORBIT_DISTANCE * (100 / percent);
-      if (runtime) {
-        const offset = runtime.camera.position.clone().sub(runtime.orbit.target);
-        if (offset.length() > 1e-4) {
-          runtime.camera.position
-            .copy(runtime.orbit.target)
-            .add(offset.normalize().multiplyScalar(distance));
-          runtime.orbit.update();
-        }
-      }
+    const active = project.scene.objects.find(
+      (object) => object.id === project.scene.activeCamera,
+    );
+    if (!active) {
+      setProblem("There is no camera object to receive this view.");
+      return;
     }
-  }, [framingPercent]);
+    await actionsRef.current.apply({
+      type: "setTransform",
+      id: active.id,
+      transform,
+    });
+    await actionsRef.current.apply({ type: "setActiveCamera", id: active.id });
+    setProblem(null);
+  }, [cameraTransformFromView]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "End" || event.code === "Numpad1") {
+        event.preventDefault();
+        void captureCamera();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [captureCamera]);
 
   // Entering Rendered mode renders once at the current viewport size; orbiting
   // in this mode does not re-render (each frame costs seconds), so the toolbar
@@ -862,7 +865,6 @@ export function Viewport3D() {
       Math.max(320, Math.round(size.width)),
       Math.max(240, Math.round(size.height)),
       "preview",
-      currentRenderViewRef.current(),
     );
   }, [actions, render.busy, renderedMode, size.height, size.width]);
 

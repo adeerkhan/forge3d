@@ -240,9 +240,14 @@ the render handoff.
 - **Primitives still do not reach Forge3D.** The Phase 4 default scene is terrain
   precisely because that path is complete; exporting primitive meshes as glTF is
   the remaining piece of Rendered mode.
-- **Rendering from Studio is not implemented yet.** The viewer can snapshot (that
-  is how the render below was produced), but there is no "Render" button that
-  writes a still into the project's `renders/` directory.
+- **Country-scale framing exceeds the renderer's view range.** View coordinates
+  are clamped to ±65,536 units, so a 353 km DEM (Switzerland) cannot be framed in
+  one shot; the gallery's Swiss example is an 18 km close-up for that reason.
+  Wide maps need either a scaled scene or an engine-side normalisation
+  (`experiments/swiss-land-cover.py` reproduces the case).
+- **Overlays are not in the UI yet.** The engine drapes raster overlays with
+  preserved colours (proven in the experiment above), but Studio has no overlay
+  asset/panel; that is the natural next cartography feature.
 
 ## Browser preview harness
 
