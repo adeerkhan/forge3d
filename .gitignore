@@ -286,6 +286,7 @@ __pycache__/
 
 # Whitelist doc/gallery images that must be in the repo
 !docs/assets/highres.png
+!docs/assets/splat-fused-map.webp
 !tests/golden/
 !tests/golden/terrain/
 !tests/golden/terrain/*.png
@@ -402,6 +403,7 @@ examples/.cache/
 examples/out/
 examples/output/
 examples/**/*.py
+!examples/c06_population_publication.py
 !examples/moon_south_pole.py
 !examples/orbis_swiss_alps_descent.py
 !examples/mapscene_thematic_rasters.py
@@ -415,8 +417,10 @@ examples/**/*.py
 !examples/c05_qgis.py
 !examples/c05_qgis_3d.py
 !examples/c05_report.py
+!examples/splat_fused_map.py
 tests/test_*example*.py
 tests/test_*examples*.py
+!tests/test_splat_fused_map_example.py
 .superpowers/
 scripts/*
 !scripts/aether_acceptance_evidence.py
@@ -433,8 +437,10 @@ scripts/*
 !scripts/run_nvidia_visual_acceptance.py
 !scripts/run_nvidia_determinism_acceptance.py
 !scripts/run_browser_probe.py
+!scripts/windows_native_diagnosis.py
 
 # forge3d outputs (A13) 
+/.repair-evidence/
 out/
 diag_out/
 
@@ -466,3 +472,4 @@ landuse/landuse/glad_cropland_2019.tif
 
 # Understand-Anything knowledge graph (generated, ~1.4 MB, not source)
 .ua/
+!scripts/nephele_acceptance.py

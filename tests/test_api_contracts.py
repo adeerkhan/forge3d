@@ -25,6 +25,13 @@ from forge3d._native import NATIVE_AVAILABLE, get_native_module
 from _toml_compat import load_toml
 
 
+def test_c06_publication_python_surface():
+    from forge3d import publication
+    for name in publication.__all__:
+        assert name in f3d.__all__
+        assert getattr(f3d, name) is getattr(publication, name)
+
+
 def test_d04_python_composition_public_surface():
     from forge3d.map_scene import RenderPassInput, RenderPassSpec
 
@@ -99,6 +106,7 @@ class TestNativeModuleSymbols:
 
     EXPECTED_CLASSES = [
         "Scene",
+        "_LabelCompositor",
         "Session",
         "Colormap1D",
         "MaterialSet",
@@ -106,6 +114,7 @@ class TestNativeModuleSymbols:
         "OverlayLayer",
         "TerrainRenderParams",
         "TerrainRenderer",
+        "Medium",
         "AovFrame",
         "HdrFrame",
         "OfflineBatchResult",
@@ -161,6 +170,8 @@ class TestNativeModuleSymbols:
     # ---- Registered free functions (wrap_pyfunction in lib.rs) ----
 
     EXPECTED_FUNCTIONS = [
+        "_render_volumetric_reference",
+        "_nephele_physical_samples",
         "open_viewer",
         "open_terrain_viewer",
         "enumerate_adapters",
@@ -1353,6 +1364,47 @@ class TestTerrainRendererHeightStreamingContract:
             label="TerrainRenderer height-streaming methods",
         )
 
+    def test_anamnesis_report_has_additive_bypass_reason(self):
+        from pathlib import Path
+
+        _assert_expected_symbols(
+            _native.TerrainRenderer, ["last_anamnesis_cache_report"],
+            label="ANAMNESIS cache report including bypass_reason: str | None",
+        )
+        stub = (Path(__file__).resolve().parents[1] / "python/forge3d/__init__.pyi").read_text(encoding="utf-8")
+        assert "bypass_reason: str | None" in stub
+
+    def test_anamnesis_private_snapshot_helper_is_registered(self):
+        _assert_expected_symbols(
+            _native, ["_anamnesis_snapshot_recipes", "_anamnesis_prepare_context", "_anamnesis_prepare_label_scene", "_anamnesis_packed_snapshot"],
+            label="ANAMNESIS private recipe snapshot", value_kind="callable",
+        )
+        assert "_anamnesis_snapshot_recipes" not in f3d.__all__
+        assert not hasattr(f3d, "_anamnesis_snapshot_recipes")
+        assert "_anamnesis_prepare_context" not in f3d.__all__
+        assert not hasattr(f3d, "_anamnesis_prepare_context")
+        for name in ("_anamnesis_prepare_label_scene", "_anamnesis_packed_snapshot", "_AnamnesisPackedSnapshot", "_LabelCompositor"):
+            assert name not in f3d.__all__
+            assert not hasattr(f3d, name)
+
+    def test_anamnesis_private_signature_helper_is_registered(self):
+        _assert_expected_symbols(
+            _native, ["_anamnesis_entry_signatures"],
+            label="ANAMNESIS private entry signatures", value_kind="callable",
+        )
+        assert "_anamnesis_entry_signatures" not in f3d.__all__
+        assert not hasattr(f3d, "_anamnesis_entry_signatures")
+        assert callable(_native._anamnesis_plain_key)
+        assert "_anamnesis_plain_key" not in f3d.__all__
+        assert not hasattr(f3d, "_anamnesis_plain_key")
+
+    def test_anamnesis_resource_probe_is_registered(self):
+        _assert_expected_symbols(
+            _native.TerrainRenderer,
+            ["_anamnesis_resource_fingerprint", "_anamnesis_default_resource_fingerprint"],
+            label="ANAMNESIS native scene resource identity",
+        )
+
 
 class TestTerrainRendererInteractiveContract:
     def test_fixed_frame_entry_and_diagnostics_exist(self):
@@ -1473,6 +1525,9 @@ class TestSsgiSsrSettingsWiring:
         """TerrainRenderParams must expose decoded SSAO/SSGI/SSR/TAA settings."""
         assert hasattr(_native.TerrainRenderParams, "screen_space_settings")
         assert callable(getattr(_native.TerrainRenderParams, "screen_space_settings"))
+
+    def test_terrain_params_exposes_terrain_shading_model(self):
+        assert hasattr(_native.TerrainRenderParams, "terrain_shading_model")
 
     def test_terrain_camera_projection_registered_and_stubbed(self):
         import ast
@@ -2170,3 +2225,11 @@ def test_scene_stub_matches_runtime():
     assert not missing, (
         f"Stub declares methods not found on native Scene: {missing}"
     )
+
+
+def test_sequence_result_has_additive_bypass_reason():
+    from pathlib import Path
+    from forge3d.anamnesis import SequenceResult
+    assert SequenceResult.__dataclass_fields__["bypass_reason"].default is None
+    stub = Path(__file__).resolve().parents[1] / "python/forge3d/anamnesis.pyi"
+    assert "bypass_reason: str | None" in stub.read_text(encoding="utf-8")

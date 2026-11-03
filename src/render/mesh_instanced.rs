@@ -76,6 +76,7 @@ pub struct VertexPN {
 pub struct TerrainBlendContext<'a> {
     pub heightmap_view: &'a wgpu::TextureView,
     pub world_to_uv_scale_bias: [f32; 4],
+    /// Height scale, height bias, Z-up flag (0 = viewer Y-up, 1 = offscreen Z-up), padding.
     pub height_to_world: [f32; 4],
 }
 
@@ -1245,14 +1246,14 @@ mod tests {
             },
         );
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        crate::core::gpu::wait_for_device_idle(&device);
 
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        crate::core::gpu::wait_for_device_idle(&device);
         rx.recv().ok()?.ok()?;
 
         let data = slice.get_mapped_range();

@@ -19,7 +19,7 @@ Utilities:
     has_gpu             - Check GPU availability
 """
 
-__version__ = "1.45.0"
+__version__ = "1.47.1"
 version = __version__
 
 import numpy as np
@@ -425,7 +425,8 @@ class Renderer:
         self, *, certificate: bool | str | Path = False, cache: str | Path | None = None
     ) -> np.ndarray:
         """Render a basic triangle pattern (fallback test method)."""
-        _ = cache
+        from ._cache_policy import report_cache_bypass
+        report_cache_bypass(cache, "__init__.render_triangle_rgba")
         from . import _degradation
 
         _degradation.record(
@@ -502,11 +503,13 @@ def dem_stats(heightmap: np.ndarray) -> dict:
 # -----------------------------------------------------------------------------
 from . import geometry
 from . import io
+from . import media
 
 # -----------------------------------------------------------------------------
 # P4: Map Plate / Creator Workflow
 # -----------------------------------------------------------------------------
 from .map_plate import MapPlate, MapPlateConfig, BBox, PlateRegion
+from .publication import PublicationSource, PublicationExtent, PublicationRecipe
 from .legend import Legend, LegendConfig
 from .raster_style import RasterHeightSurfaceStyle, CategoricalRasterStyle, BivariateRasterStyle, RasterStyleResult
 from .scale_bar import ScaleBar, ScaleBarConfig
@@ -946,6 +949,7 @@ __all__ = [
     "widgets",
     "astro",
     "sky",
+    "media",
     # Interactive viewer
     "open_viewer",
     "open_viewer_async",
@@ -959,6 +963,9 @@ __all__ = [
     # P4: Map Plate / Creator Workflow
     "MapPlate",
     "MapPlateConfig",
+    "PublicationSource",
+    "PublicationExtent",
+    "PublicationRecipe",
     "BBox",
     "PlateRegion",
     "Legend",

@@ -136,7 +136,8 @@ class ScaleBar:
     @_captured_cpu_render("python.scale_bar.render", "scale_bar.cpu", draw_calls=1)
     def render(self, *, certificate: bool | str = False, cache: str | None = None) -> np.ndarray:
         """Render geometry and its label through the shared native text engine."""
-        _ = cache
+        from ._cache_policy import report_cache_bypass
+        report_cache_bypass(cache, "scale_bar.render")
         from ._map_scene_render import _draw_text
 
         image, label, anchor = self.render_geometry()
@@ -156,7 +157,8 @@ class ScaleBar:
         self, *, cache: str | os.PathLike[str] | None = None
     ) -> tuple[np.ndarray, str, tuple[int, int]]:
         """Return deterministic bar geometry plus native-label placement metadata."""
-        _ = cache  # deterministic CPU helper; accepted for render-surface consistency
+        from ._cache_policy import report_cache_bypass
+        report_cache_bypass(cache, "scale_bar.render_geometry")
         from ._map_scene_render import _text_outline_metrics
 
         cfg = self.config
@@ -168,10 +170,11 @@ class ScaleBar:
         unit_factor = UNIT_FACTORS[cfg.units]
         unit_label = UNIT_LABELS[cfg.units]
         display_distance = nice_distance * unit_factor
-        if display_distance >= 1:
-            label = f"{int(display_distance)} {unit_label}"
-        else:
-            label = f"{display_distance:.1f} {unit_label}"
+        if cfg.units == "km" and nice_distance < 1000:
+            display_distance, unit_label = nice_distance, "m"
+        # Nice intervals may be fractional. Never round 0.05 km to 0.1 km,
+        # or truncate a fractional distance above one in another unit.
+        label = f"{display_distance:g} {unit_label}"
         label_width, outline_height, bounds = _text_outline_metrics(label, float(cfg.font_size))
         label_height = max(outline_height, max(1, int(math.ceil(cfg.font_size * 1.25))))
         total_width = max(actual_bar_px + 2 * cfg.padding, label_width + 2 * cfg.padding)

@@ -480,9 +480,15 @@ def test_e_validation_profiles_are_exhaustive_and_honest():
     fast_lane = set(ci_pytest_lane.fast_lane_files())
     expected_fast = {
         "tests/test_aether_acceptance_evidence.py",
+        "tests/test_nephele_acceptance.py",
+        "tests/test_nephele_fixture_contracts.py",
+        "tests/test_nephele_public_api.py",
         "tests/test_install_smoke.py",
         "tests/test_license.py",
         "tests/test_api_contracts.py",
+        "tests/test_publication.py",
+        "tests/test_publication_ci.py",
+        "tests/test_scale_bar_projected_units.py",
         "tests/test_native_capabilities.py",
         "tests/test_solar_spa.py",
         "tests/test_capability_negotiation.py",
@@ -618,6 +624,7 @@ def test_e_anamnesis_physical_jobs_are_acceptance_scoped_honestly():
         "test-anamnesis-portability-seed",
         "test-anamnesis-portability",
         "test-anamnesis-production",
+        "test-anamnesis-hermeticity",
     ):
         job = ci_yml.split(f"  {job_name}:", 1)[1].split(
             "\n    runs-on:", 1
@@ -635,12 +642,22 @@ def test_e_anamnesis_physical_jobs_are_acceptance_scoped_honestly():
         "\n  # ============================================================================\n  # Hosted determinism families", 1
     )[0]
     assert "test_real_gpu_600_frame_acceptance" in production
+    hermeticity = ci_yml.split("  test-anamnesis-hermeticity:", 1)[1].split("\n  # ====", 1)[0]
+    for test_name in (
+        "test_private_label_compositor_matches_scene_and_clears_reused_quads",
+        "test_private_label_compositor_reports_real_work_and_releases_allocations",
+        "test_private_label_compositor_rejects_invalid_inputs_before_rendering",
+        "test_prepared_material_upload_owns_pixels_before_context_wait",
+        "test_material_preparation_propagates_context_failure_without_gpu_allocation",
+    ):
+        assert f"tests/test_anamnesis_scene.py::{test_name}" in hermeticity
     aggregate = ci_yml.split("  full-acceptance-summary:", 1)[1]
     assert "anamnesis_physical_selected=" in aggregate
     for job_name in (
         "test-anamnesis-portability-seed",
         "test-anamnesis-portability",
         "test-anamnesis-production",
+        "test-anamnesis-hermeticity",
     ):
         assert (
             f"check_selected \"$anamnesis_physical_selected\" "
@@ -818,6 +835,7 @@ def test_f_pr_core_is_lightweight_and_full_profiles_are_acceptance_only():
         "test-golden-images",
         "test-m06-full-geospatial-viewer",
         "test-anamnesis-production",
+        "test-anamnesis-hermeticity",
         "test-python-full-linux",
         "test-python-full-windows",
         "test-python-full-macos",
@@ -903,6 +921,41 @@ def test_substratia_physical_evidence_is_exact_head_and_cannot_be_bypassed():
     assert "FORGE3D_RUN_METAL_DIAGNOSTIC" in metal_diagnostic
     assert "continue-on-error: true" in metal_diagnostic
     assert "test-substratia-gpu," not in acceptance.split("\n    runs-on:", 1)[0]
+
+
+def test_nephele_physical_exclusion_is_one_hosted_site_and_six_required_gates():
+    import ast
+
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    slow_job = _workflow_job(workflow, "test-python-slow")
+    exclusion = "--deselect=tests/test_nephele_physical.py"
+    assert workflow.count(exclusion) == 1
+    assert slow_job.count(exclusion) == 1
+    assert re.findall(r"--(?:deselect|ignore(?:-glob)?)(?:=|\s+)(\S+)", workflow) == [
+        "tests/test_nephele_physical.py"
+    ]
+    assert re.findall(r"--deselect(?:=|\s+)(\S+)", slow_job) == ["tests/test_nephele_physical.py"]
+    assert "--ignore" not in slow_job
+    args = ci_pytest_lane.build_pytest_args("full", [], slow=True)
+    assert args[args.index("-o") + 1] == "python_functions=test* gate*"
+    assert "tests/test_nephele_physical.py" in args
+    assert not any(arg.startswith(("--ignore", "--deselect")) for arg in args)
+    physical = ast.parse((ROOT / "tests/test_nephele_physical.py").read_text(encoding="utf-8"))
+    names = {node.name for node in physical.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    gates = {
+        "gate1_estimator_majorant_rr", "gate2_energy", "gate3_realtime_reference",
+        "gate4_terrain_coupling", "gate5_compute_shadow_ridgeline", "gate6_determinism_memory",
+    }
+    assert names == gates | {"physical"}
+    assert not any(isinstance(node, ast.ClassDef) for node in physical.body)
+    gpu = _workflow_job(workflow, "test-nephele-gpu")
+    assert "gpu-nvidia" in gpu and "Windows" in gpu and "X64" in gpu
+    assert "tests/test_nephele_physical.py" in gpu
+    assert "assert_junit_zero_skips.py" in gpu
+    assert "continue-on-error: true" not in gpu
+    summary = _workflow_job(workflow, "full-acceptance-summary")
+    assert "test-nephele-gpu" in summary.split("runs-on:", 1)[0]
+    assert "needs.test-nephele-gpu.result" in summary
 
 
 def test_hosted_windows_globe_omission_is_explicit_and_scoped():

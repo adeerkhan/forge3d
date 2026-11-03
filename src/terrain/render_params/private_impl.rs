@@ -21,6 +21,16 @@ impl TerrainRenderParams {
         let lod = params.getattr("lod")?;
         let sampling = params.getattr("sampling")?;
         let clamp = params.getattr("clamp")?;
+        let media_value = params.getattr("media")?;
+        let media = if media_value.is_none() {
+            None
+        } else {
+            Some(
+                media_value
+                    .getattr("_native")?
+                    .extract::<Py<crate::media_py::PyMedium>>()?,
+            )
+        };
 
         let water_optics = super::native_water::parse_water_optics(&params)?;
         let decoded = DecodedTerrainSettings {
@@ -78,6 +88,15 @@ impl TerrainRenderParams {
             None => None,
         };
 
+        // Preserve the public Python reference and rendering behavior. Unknown
+        // custom input types remain renderable but cannot safely enter the cache.
+        let anamnesis_input_snapshot = py
+            .import_bound("forge3d._anamnesis_params")
+            .and_then(|module| module.getattr("input_snapshot"))
+            .and_then(|snapshot| snapshot.call1((&params,)))
+            .and_then(|snapshot| snapshot.extract::<Vec<u8>>())
+            .ok();
+
         Ok(Self {
             size_px: core.size_px,
             render_scale: core.render_scale,
@@ -109,6 +128,7 @@ impl TerrainRenderParams {
             camera_mode: core.camera_mode,
             culling: core.culling,
             shading: core.shading,
+            terrain_shading_model: core.terrain_shading_model,
             vt_store_path: core.vt_store_path,
             prefetch_horizon_ms: core.prefetch_horizon_ms,
             vt_upload_budget_bytes: core.vt_upload_budget_bytes,
@@ -128,6 +148,8 @@ impl TerrainRenderParams {
             sampling: sampling.unbind(),
             clamp: clamp.unbind(),
             python_object: params.into_py(py),
+            media,
+            anamnesis_input_snapshot,
             decoded,
             water_optics,
         })

@@ -1,14 +1,82 @@
 use super::*;
 use crate::terrain::render_params;
+use numpy::IntoPyArray;
 use numpy::PyUntypedArrayMethods;
 use pyo3::types::PyDict;
 use sha2::{Digest, Sha256};
+
+fn terrain_cache_bypass_reason(
+    scene: &TerrainScene,
+    params: &render_params::TerrainRenderParams,
+) -> Option<&'static str> {
+    if params.media.is_some() {
+        // NEPHELE owns persistent temporal media resources; draw executes it
+        // without the native cache, so never derive a key for it.
+        return Some("participating_media");
+    }
+    if params.anamnesis_input_snapshot.is_none() {
+        return Some("parameter_identity_unavailable");
+    }
+    let decoded = params.decoded();
+    if decoded.vt.enabled && !decoded.vt.layers.is_empty() {
+        return Some("material_virtual_textures");
+    }
+    if matches!(
+        decoded.shadow.technique.to_ascii_uppercase().as_str(),
+        "VSM" | "EVSM" | "MSM"
+    ) {
+        return Some("moment_shadows");
+    }
+    scene.anamnesis_cache_bypass_reason()
+}
 
 fn append_content_digest(target: &mut Vec<u8>, domain: &[u8], content: &[u8]) {
     target.extend_from_slice(&(domain.len() as u64).to_le_bytes());
     target.extend_from_slice(domain);
     target.extend_from_slice(&(content.len() as u64).to_le_bytes());
     target.extend_from_slice(&Sha256::digest(content));
+}
+
+fn resize_scalar_nearest(
+    values: Vec<f32>,
+    source: (u32, u32),
+    destination: (u32, u32),
+) -> anyhow::Result<Vec<f32>> {
+    anyhow::ensure!(
+        values.len() == (u64::from(source.0) * u64::from(source.1)) as usize,
+        "scalar capture size does not match its source dimensions"
+    );
+    if source == destination {
+        return Ok(values);
+    }
+    let mut resized =
+        Vec::with_capacity((u64::from(destination.0) * u64::from(destination.1)) as usize);
+    for y in 0..destination.1 {
+        let source_y = (u64::from(y) * u64::from(source.1) / u64::from(destination.1)) as u32;
+        for x in 0..destination.0 {
+            let source_x = (u64::from(x) * u64::from(source.0) / u64::from(destination.0)) as u32;
+            resized.push(values[(source_y * source.0 + source_x) as usize]);
+        }
+    }
+    Ok(resized)
+}
+
+fn anamnesis_resource_state(
+    material_set: &crate::render::material_set::MaterialSet,
+    env_maps: &crate::lighting::ibl_wrapper::IBL,
+    adapter: &wgpu::Adapter,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> PyResult<Vec<u8>> {
+    let mut state = Vec::new();
+    append_content_digest(&mut state, b"material", &material_set.anamnesis_bytes(device, queue)?);
+    let ibl = env_maps
+        .anamnesis_bytes()
+        .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+    append_content_digest(&mut state, b"ibl", &ibl);
+    let adapter = format!("{:?}", adapter.get_info());
+    append_content_digest(&mut state, b"physical-adapter", adapter.as_bytes());
+    Ok(state)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -26,18 +94,11 @@ fn terrain_cache_options<'py>(
     let Some(cache) = cache else {
         return Ok(None);
     };
-    if matches!(
-        params
-            .decoded()
-            .shadow
-            .technique
-            .to_ascii_uppercase()
-            .as_str(),
-        "VSM" | "EVSM" | "MSM"
-    ) {
-        return Err(PyRuntimeError::new_err(
-            "native terrain ANAMNESIS rejects moment-shadow techniques until their moment texture is a declared graph output",
-        ));
+    if terrain_cache_bypass_reason(scene, params).is_some() {
+        // Moment textures and mutable streaming/scatter resources are not
+        // complete graph outputs. Accept the inert cache option and encode
+        // freshly instead of serving an incomplete declaration.
+        return Ok(None);
     }
     let root = cache.extract::<std::path::PathBuf>().or_else(|_| {
         cache
@@ -49,6 +110,13 @@ fn terrain_cache_options<'py>(
         .getattr("asdict")?
         .call1((params.python_object.bind(py),))?;
     let params_mapping = params_dict.downcast::<PyDict>()?;
+    // The public LUT constructor owns a float32 ndarray. JSON cannot encode
+    // that container directly; preserve every normalized sample in the key.
+    if let Some(lut) = params_mapping.get_item("height_curve_lut")? {
+        if !lut.is_none() {
+            params_mapping.set_item("height_curve_lut", lut.call_method0("tolist")?)?;
+        }
+    }
     let canonical = py.import_bound("forge3d._canonical_json")?;
     let kwargs = PyDict::new_bound(py);
     kwargs.set_item("error_context", "native terrain ANAMNESIS state")?;
@@ -85,8 +153,14 @@ fn terrain_cache_options<'py>(
         .call((shadow_projection,), Some(&kwargs))?
         .extract::<Vec<u8>>()?;
 
+    let snapshot = params
+        .anamnesis_input_snapshot
+        .as_deref()
+        .ok_or_else(|| PyRuntimeError::new_err("terrain parameter identity unavailable"))?;
+    append_content_digest(&mut shadow_bytes, b"decoded-input-snapshot", snapshot);
     let mut state = Vec::new();
     state.extend_from_slice(b"forge3d.terrain.native-inputs/v2\0");
+    append_content_digest(&mut state, b"decoded-input-snapshot", snapshot);
     state.extend_from_slice(&(params_bytes.len() as u64).to_le_bytes());
     state.extend_from_slice(&params_bytes);
     let material_bytes = material_set
@@ -144,26 +218,37 @@ fn terrain_cache_options<'py>(
             None => state.push(0),
         }
     }
+    let detail = &params.decoded().detail;
+    let mut material_maps = std::collections::BTreeMap::new();
     for path in [
         params.decoded().materials.normal_path.as_ref(),
         params.decoded().materials.roughness_path.as_ref(),
         params.decoded().materials.mask_path.as_ref(),
         params.decoded().materials.albedo_path.as_ref(),
+        detail
+            .detail_normal_path
+            .as_ref()
+            .filter(|_| detail.enabled && detail.detail_strength > 0.0),
     ] {
         match path {
             Some(path) => {
                 state.push(1);
-                let content = std::fs::read(path).map_err(|error| {
-                    PyRuntimeError::new_err(format!(
-                        "failed to identity terrain material map {path:?}: {error}"
-                    ))
-                })?;
+                let content = match material_maps.entry(path.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(std::fs::read(path).map_err(|error| {
+                            PyRuntimeError::new_err(format!(
+                                "failed to identify terrain material map {path:?}: {error}"
+                            ))
+                        })?)
+                    }
+                };
                 let extension = std::path::Path::new(path)
                     .extension()
                     .and_then(|value| value.to_str())
                     .unwrap_or_default()
                     .to_ascii_lowercase();
-                append_content_digest(&mut state, extension.as_bytes(), &content);
+                append_content_digest(&mut state, extension.as_bytes(), content);
             }
             None => state.push(0),
         }
@@ -175,12 +260,61 @@ fn terrain_cache_options<'py>(
         .append_anamnesis_external_state(&mut shadow_bytes)
         .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
     super::anamnesis::TerrainCacheOptions::new(root, state, height_bytes, shadow_bytes)
-        .map(Some)
+        .map(|mut options| {
+            options.material_maps = material_maps;
+            Some(options)
+        })
         .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))
 }
 
 #[pymethods]
 impl TerrainRenderer {
+    /// Private sequence-adapter boundary: identify the resources owned by
+    /// this renderer without opening a store or encoding a terrain frame.
+    fn _anamnesis_resource_fingerprint(
+        &self,
+        py: Python<'_>,
+        material_set: &crate::render::material_set::MaterialSet,
+        env_maps: &crate::lighting::ibl_wrapper::IBL,
+    ) -> PyResult<Option<Py<pyo3::types::PyBytes>>> {
+        if !self.scene.supports_anamnesis_cache() {
+            return Ok(None);
+        }
+        let mut state = anamnesis_resource_state(material_set, env_maps, &self.scene.adapter, &self.scene.device, &self.scene.queue)?;
+        self.scene
+            .append_anamnesis_external_state(&mut state)
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        Ok(Some(
+            pyo3::types::PyBytes::new_bound(py, &Sha256::digest(state)).unbind(),
+        ))
+    }
+
+    /// Identity of fresh default resources, without compiling an unused
+    /// TerrainScene. An existing renderer always uses the instance probe.
+    #[staticmethod]
+    #[pyo3(signature = (material_set, env_maps, context_ready=None))]
+    fn _anamnesis_default_resource_fingerprint(
+        py: Python<'_>,
+        material_set: &crate::render::material_set::MaterialSet,
+        env_maps: &crate::lighting::ibl_wrapper::IBL,
+        context_ready: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<pyo3::types::PyBytes>> {
+        let prepared = py.allow_threads(|| material_set.prepare_material_upload());
+        if let Some(ready) = context_ready {
+            // Propagate the original initialization result before trying the
+            // context again. A failed initializer must not be retried here.
+            ready.call_method0("result")?;
+        }
+        let ctx = crate::core::gpu::try_ctx()?;
+        if let Some(prepared) = prepared {
+            py.allow_threads(|| material_set.upload_prepared_material(&ctx.device, &ctx.queue, prepared))
+                .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        }
+        let mut state = anamnesis_resource_state(material_set, env_maps, &ctx.adapter, &ctx.device, &ctx.queue)?;
+        super::anamnesis::append_default_external_state(&mut state);
+        Ok(pyo3::types::PyBytes::new_bound(py, &Sha256::digest(state)).unbind())
+    }
+
     #[new]
     pub fn new(session: &crate::core::session::Session) -> PyResult<Self> {
         let ctx = crate::core::gpu::try_ctx()?;
@@ -197,6 +331,7 @@ impl TerrainRenderer {
             scene,
             last_anamnesis_report: crate::core::anamnesis::CacheReport::default(),
             last_anamnesis_graph_submissions: 0,
+            last_anamnesis_bypass_reason: None,
         })
     }
 
@@ -262,6 +397,8 @@ impl TerrainRenderer {
     ) -> PyResult<Py<crate::Frame>> {
         self.last_anamnesis_report = crate::core::anamnesis::CacheReport::default();
         self.last_anamnesis_graph_submissions = 0;
+        self.last_anamnesis_bypass_reason = None;
+        self.scene.last_anamnesis_pass_keys.clear();
         if self
             .scene
             .offline_session_active()
@@ -281,10 +418,36 @@ impl TerrainRenderer {
         self.scene
             .validate_material_vt_request(params, material_set.materials().len() as u32)
             .map_err(|error| PyRuntimeError::new_err(format!("Rendering failed: {error:#}")))?;
+        if let Some(media) = &params.media {
+            let media = media.borrow(py);
+            self.scene
+                .prepare_realtime_media_for_terrain(
+                    params,
+                    params.decoded(),
+                    media.medium(),
+                    media.version_value(),
+                )
+                .map_err(|error| {
+                    PyRuntimeError::new_err(format!("Media preparation failed: {error:#}"))
+                })?;
+        } else {
+            self.scene.clear_realtime_media().map_err(|error| {
+                PyRuntimeError::new_err(format!("Media removal failed: {error:#}"))
+            })?;
+        }
 
         let certificate_enabled = certificate
             .as_ref()
             .is_some_and(|value| !value.is_none() && !matches!(value.extract::<bool>(), Ok(false)));
+        self.last_anamnesis_bypass_reason = if cache.is_some() {
+            if certificate_enabled {
+                Some("certificate")
+            } else {
+                terrain_cache_bypass_reason(&self.scene, params)
+            }
+        } else {
+            None
+        };
         let cache_options = terrain_cache_options(
             py,
             if certificate_enabled {
@@ -335,11 +498,12 @@ impl TerrainRenderer {
     ) -> PyResult<(Py<crate::Frame>, Py<crate::AovFrame>)> {
         self.last_anamnesis_report = crate::core::anamnesis::CacheReport::default();
         self.last_anamnesis_graph_submissions = 0;
-        if cache.as_ref().is_some_and(|value| !value.is_none()) {
-            return Err(PyRuntimeError::new_err(
-                "native terrain ANAMNESIS does not yet serialize the multi-attachment AOV graph; use cache=None",
-            ));
-        }
+        self.last_anamnesis_bypass_reason = None;
+        self.scene.last_anamnesis_pass_keys.clear();
+        // ANAMNESIS does not yet serialize the multi-attachment AOV graph.
+        // Every attachment is freshly encoded; no cache is opened or served.
+        self.last_anamnesis_bypass_reason = cache.as_ref().map(|_| "render_with_aov");
+        drop(cache);
         if self
             .scene
             .offline_session_active()
@@ -355,6 +519,23 @@ impl TerrainRenderer {
             .map_err(|error| {
                 PyRuntimeError::new_err(format!("Rendering with AOV failed: {error:#}"))
             })?;
+        if let Some(media) = &params.media {
+            let media = media.borrow(py);
+            self.scene
+                .prepare_realtime_media_for_terrain(
+                    params,
+                    params.decoded(),
+                    media.medium(),
+                    media.version_value(),
+                )
+                .map_err(|error| {
+                    PyRuntimeError::new_err(format!("Media preparation failed: {error:#}"))
+                })?;
+        } else {
+            self.scene.clear_realtime_media().map_err(|error| {
+                PyRuntimeError::new_err(format!("Media removal failed: {error:#}"))
+            })?;
+        }
 
         let (frame, aov_frame) = self
             .scene
@@ -370,6 +551,288 @@ impl TerrainRenderer {
 
         crate::core::certificate::emit_certificate_for_kwarg(py, certificate.as_ref())?;
         Ok((Py::new(py, frame)?, Py::new(py, aov_frame)?))
+    }
+
+    /// Acceptance-only deterministic capture for NEPHELE physical gates.
+    /// This deliberately remains a private native method rather than a stable
+    /// public rendering API.
+    #[pyo3(signature = (material_set, env_maps, params, heightmap, *, terrain_occlusion_in_media=true, include_no_medium=false, capture_radiance_provider=false, capture_scatter_components=false))]
+    fn _capture_nephele_acceptance<'py>(
+        &mut self,
+        py: Python<'py>,
+        material_set: &crate::render::material_set::MaterialSet,
+        env_maps: &crate::lighting::ibl_wrapper::IBL,
+        params: &render_params::TerrainRenderParams,
+        heightmap: PyReadonlyArray2<'py, f32>,
+        terrain_occlusion_in_media: bool,
+        include_no_medium: bool,
+        capture_radiance_provider: bool,
+        capture_scatter_components: bool,
+    ) -> PyResult<PyObject> {
+        let media = params.media.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("NEPHELE acceptance capture requires TerrainRenderParams.media")
+        })?;
+        let aov = &params.decoded().aov;
+        if ![
+            aov.transmittance,
+            aov.in_scatter,
+            aov.cloud_shadow,
+            aov.optical_depth,
+        ]
+        .into_iter()
+        .all(|selected| selected)
+        {
+            return Err(PyRuntimeError::new_err(
+                "NEPHELE acceptance capture requires all four media AOV selectors",
+            ));
+        }
+        let (acceptance_capture, _allocation_scope) = self
+            .scene
+            .begin_certificate_capture("terrain._capture_nephele_acceptance");
+        let media = media.borrow(py);
+        self.scene
+            .prepare_realtime_media_for_terrain(
+                params,
+                params.decoded(),
+                media.medium(),
+                media.version_value(),
+            )
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "NEPHELE acceptance media preparation failed: {error:#}"
+                ))
+            })?;
+        let previous_occlusion = self
+            .scene
+            .replace_media_terrain_occlusion_enabled(terrain_occlusion_in_media)
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        let rendered = self.scene.render_internal_with_aov(
+            material_set,
+            env_maps,
+            params,
+            heightmap.clone(),
+            None,
+            0.0,
+        );
+        let restore = self
+            .scene
+            .replace_media_terrain_occlusion_enabled(previous_occlusion);
+        let (frame, aov_frame) = rendered.map_err(|error| {
+            PyRuntimeError::new_err(format!("NEPHELE acceptance render failed: {error:#}"))
+        })?;
+        restore.map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "NEPHELE acceptance state restoration failed: {error:#}"
+            ))
+        })?;
+
+        // Read the enabled transport's termination evidence before the
+        // optional no-medium baseline temporarily detaches and recreates the
+        // media resources.  Reattached resources have no executed termination
+        // history and must never replace the enabled capture's evidence.
+        let (termination, internal_viewport, froxel_depth, _termination_allocation) = self
+            .scene
+            .read_realtime_media_termination_slice()
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        if termination.iter().any(|value| !value.is_finite()) {
+            return Err(PyRuntimeError::new_err(
+                "NEPHELE acceptance termination readback contains non-finite values",
+            ));
+        }
+
+        // Optional B2 readback observes the uploaded directional radiance and
+        // diffuse irradiance before a no-medium capture detaches the resources.
+        let radiance_provider = if capture_radiance_provider {
+            let resources = self
+                .scene
+                .media_resources
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("media_resources mutex poisoned"))?;
+            let resources = resources.as_ref().ok_or_else(|| {
+                PyRuntimeError::new_err("B2 capture requires attached realtime media")
+            })?;
+            let values = crate::core::hdr::read_hdr_texture(
+                self.scene.device.as_ref(),
+                self.scene.queue.as_ref(),
+                &resources.radiance_provider,
+                internal_viewport.0,
+                internal_viewport.1,
+                wgpu::TextureFormat::Rgba16Float,
+            )
+            .map_err(|error| PyRuntimeError::new_err(format!("B2 readback failed: {error:#}")))?;
+            Some((values, resources.diffuse_ibl))
+        } else {
+            None
+        };
+
+        let no_medium_frame = if include_no_medium {
+            self.scene.clear_realtime_media().map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "NEPHELE acceptance no-medium detachment failed: {error:#}"
+                ))
+            })?;
+            let no_medium = self.scene.render_nephele_acceptance_no_medium(
+                material_set,
+                env_maps,
+                params,
+                heightmap,
+            );
+            let reattach = self.scene.prepare_realtime_media_for_terrain(
+                params,
+                params.decoded(),
+                media.medium(),
+                media.version_value(),
+            );
+            let no_medium = no_medium.map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "NEPHELE acceptance no-medium render failed: {error:#}"
+                ))
+            })?;
+            reattach.map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "NEPHELE acceptance media reattachment failed: {error:#}"
+                ))
+            })?;
+            Some(no_medium)
+        } else {
+            None
+        };
+
+        let (beauty, media_aovs, no_medium_beauty, multiple_scatter_luminance) = py
+            .allow_threads(|| {
+                Ok::<_, anyhow::Error>((
+                    frame.read_rgb_u8()?,
+                    aov_frame.read_all_media_rgb()?,
+                    no_medium_frame
+                        .map(|frame| frame.read_rgb_u8())
+                        .transpose()?,
+                    capture_scatter_components
+                        .then(|| aov_frame.read_in_scatter_multiple_luminance())
+                        .transpose()?,
+                ))
+            })
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("NEPHELE acceptance readback failed: {error:#}"))
+            })?;
+        if media_aovs
+            .iter()
+            .flat_map(|array| array.iter())
+            .any(|value| !value.is_finite())
+        {
+            return Err(PyRuntimeError::new_err(
+                "NEPHELE acceptance media AOV readback contains non-finite values",
+            ));
+        }
+        let termination = resize_scalar_nearest(termination, internal_viewport, params.size_px)
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        let viewport = params.size_px;
+        let termination = ndarray::Array2::from_shape_vec(
+            (viewport.1 as usize, viewport.0 as usize),
+            termination,
+        )
+        .map_err(|_| PyRuntimeError::new_err("failed to reshape termination_slice"))?;
+        let diagnostics = aov_frame.media_diagnostics_value().map_err(|error| {
+            PyRuntimeError::new_err(format!("NEPHELE acceptance diagnostics failed: {error:#}"))
+        })?;
+        let diagnostic_u64 = |name: &str| -> PyResult<u64> {
+            diagnostics
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    PyRuntimeError::new_err(format!(
+                        "NEPHELE acceptance diagnostic {name} is missing or invalid"
+                    ))
+                })
+        };
+        let staging_bytes = self
+            .scene
+            .realtime_media_staging_bytes()
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        self.scene.finish_certificate_capture(acceptance_capture);
+        let allocation_report = crate::core::certificate::completed_ledger_report()
+            .map_err(|error| PyRuntimeError::new_err(format!("{error:#}")))?;
+        let memory = PyDict::new_bound(py);
+        memory.set_item(
+            "peak_host_visible_bytes",
+            allocation_report.peak_host_visible_bytes,
+        )?;
+        memory.set_item(
+            "froxel_device_local_bytes",
+            diagnostic_u64("froxel_device_local_bytes")?,
+        )?;
+        memory.set_item(
+            "density_majorant_device_local_bytes",
+            diagnostic_u64("density_device_local_bytes")?
+                + diagnostic_u64("majorant_device_local_bytes")?,
+        )?;
+        memory.set_item("staging_bytes", staging_bytes)?;
+        memory.set_item(
+            "readback_bytes",
+            media::acceptance_readback_bytes(
+                viewport,
+                internal_viewport,
+                no_medium_beauty.is_some(),
+            ) + u64::from(capture_radiance_provider)
+                * u64::from(internal_viewport.0)
+                * u64::from(internal_viewport.1)
+                * 8,
+        )?;
+
+        let result = PyDict::new_bound(py);
+        if let Some((radiance, irradiance)) = radiance_provider {
+            result.set_item("radiance_provider", radiance.into_pyarray_bound(py))?;
+            result.set_item("diffuse_ibl", irradiance)?;
+        }
+        result.set_item("beauty", beauty.into_pyarray_bound(py))?;
+        if let Some(no_medium_beauty) = no_medium_beauty {
+            result.set_item("no_medium_beauty", no_medium_beauty.into_pyarray_bound(py))?;
+        }
+        for (name, array) in [
+            "transmittance",
+            "in_scatter",
+            "cloud_shadow",
+            "optical_depth",
+        ]
+        .into_iter()
+        .zip(media_aovs)
+        {
+            result.set_item(name, array.into_pyarray_bound(py))?;
+        }
+        if let Some(luminance) = multiple_scatter_luminance {
+            result.set_item("in_scatter_multiple_luminance", luminance.into_pyarray_bound(py))?;
+        }
+        result.set_item("termination_slice", termination.into_pyarray_bound(py))?;
+        result.set_item("froxel_depth", froxel_depth)?;
+        result.set_item("memory", memory)?;
+        let (camera_eye, camera_view, _) = TerrainScene::build_camera_matrices(params);
+        let camera_target = glam::Vec3::from_array(params.cam_target);
+        let camera_forward = (camera_target - camera_eye).normalize();
+        let camera_right = glam::Vec3::new(
+            camera_view.x_axis.x,
+            camera_view.y_axis.x,
+            camera_view.z_axis.x,
+        );
+        let camera_up = glam::Vec3::new(
+            camera_view.x_axis.y,
+            camera_view.y_axis.y,
+            camera_view.z_axis.y,
+        );
+        let camera_contract = PyDict::new_bound(py);
+        camera_contract.set_item("origin", camera_eye.to_array())?;
+        camera_contract.set_item("look_at", camera_target.to_array())?;
+        camera_contract.set_item("up", camera_up.to_array())?;
+        camera_contract.set_item("right", camera_right.to_array())?;
+        camera_contract.set_item("forward", camera_forward.to_array())?;
+        camera_contract.set_item("fov_y", params.fov_y_deg)?;
+        result.set_item("camera_contract", camera_contract)?;
+        let diagnostics_json = serde_json::to_string(&diagnostics)
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        result.set_item(
+            "diagnostics",
+            py.import_bound("json")?
+                .call_method1("loads", (diagnostics_json,))?,
+        )?;
+        Ok(result.into())
     }
 
     pub fn info(&self) -> String {
@@ -390,6 +853,8 @@ impl TerrainRenderer {
         dict.set_item("bytes_written", report.bytes_written)?;
         dict.set_item("wall_ms_saved", report.wall_ms_saved)?;
         dict.set_item("hit_rate", report.hit_rate())?;
+        dict.set_item("pass_keys", &self.scene.last_anamnesis_pass_keys)?;
+        dict.set_item("bypass_reason", self.last_anamnesis_bypass_reason)?;
         dict.set_item(
             "graph_command_submissions",
             self.last_anamnesis_graph_submissions,
@@ -1216,6 +1681,7 @@ impl TerrainRenderer {
             max_gpu_visible_bytes,
             false,
             crate::terrain::page_table::OverviewUvTransform::identity(),
+            super::streaming::DEFAULT_HEIGHT_OVERVIEW_SIZE,
         )
         .map_err(|e| PyRuntimeError::new_err(format!("enable_height_streaming failed: {:#}", e)))?;
         self.scene.height_streaming = Some(state);
@@ -1256,8 +1722,7 @@ impl TerrainRenderer {
         super::streaming::validate_flat_height_streaming_lod(lod)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let tile_resolution = tile_resolution.clamp(8, 1024);
-        let reader: std::sync::Arc<dyn crate::terrain::page_table::HeightReader> =
-            dataset.reader();
+        let reader: std::sync::Arc<dyn crate::terrain::page_table::HeightReader> = dataset.reader();
         let overview = overview_lonlat_bounds
             .map(crate::terrain::page_table::OverviewUvTransform::from_lonlat_bounds)
             .transpose()
@@ -1280,6 +1745,7 @@ impl TerrainRenderer {
             max_gpu_visible_bytes,
             false,
             overview,
+            super::streaming::DEFAULT_HEIGHT_OVERVIEW_SIZE,
         )
         .map_err(|error| {
             PyRuntimeError::new_err(format!("enable_height_streaming_cog failed: {error:#}"))
@@ -1311,23 +1777,8 @@ impl TerrainRenderer {
         overview_lonlat_bounds: Option<(f64, f64, f64, f64)>,
         max_gpu_visible_bytes: Option<u64>,
     ) -> PyResult<()> {
-        if !(terrain_extent_m.is_finite() && terrain_extent_m > 0.0) {
-            return Err(PyRuntimeError::new_err(
-                "terrain_extent_m must be a positive finite value",
-            ));
-        }
-        let tile_resolution = tile_resolution.clamp(8, 1024);
-        let reader: std::sync::Arc<dyn crate::terrain::page_table::HeightReader> =
-            dataset.reader();
-        let overview = overview_lonlat_bounds
-            .map(crate::terrain::page_table::OverviewUvTransform::from_lonlat_bounds)
-            .transpose()
-            .map_err(pyo3::exceptions::PyValueError::new_err)?
-            .unwrap_or_else(crate::terrain::page_table::OverviewUvTransform::identity);
-        let state = super::streaming::HeightVtFamilyRuntime::new(
-            self.scene.device.clone(),
-            self.scene.queue.clone(),
-            self.scene.allocation_owner.clone(),
+        self.enable_height_streaming_cog_globe_with_overview_capacity(
+            dataset,
             terrain_extent_m,
             ring_count,
             ring_resolution,
@@ -1335,19 +1786,12 @@ impl TerrainRenderer {
             tile_resolution,
             max_in_flight,
             pool_size,
-            reader,
             coarse_prefill,
             max_resident_bytes,
+            overview_lonlat_bounds,
             max_gpu_visible_bytes,
-            true,
-            overview,
+            super::streaming::DEFAULT_HEIGHT_OVERVIEW_SIZE,
         )
-        .map_err(|error| {
-            PyRuntimeError::new_err(format!("enable_height_streaming_cog_globe failed: {error:#}"))
-        })?;
-        self.scene.height_streaming = Some(state);
-        self.scene.geometry_provider = None;
-        Ok(())
     }
 
     /// BOP-P2-02: drop the streaming state; renders fall back to the
@@ -1384,17 +1828,20 @@ impl TerrainRenderer {
                 "COG globe height streaming requires stream_height_tiles_globe() with f64 ECEF coordinates",
             ));
         }
-        let stats = state.stream_step(
-            queue.as_ref(),
-            super::streaming::HeightStreamingCamera::Flat(glam::Vec3::new(
-                camera_pos.0,
-                camera_pos.1,
-                camera_pos.2,
-            )),
-            &feedback_uvs,
-            max_uploads,
-        )
-        .map_err(|error| PyRuntimeError::new_err(format!("height streaming failed: {error:#}")))?;
+        let stats = state
+            .stream_step(
+                queue.as_ref(),
+                super::streaming::HeightStreamingCamera::Flat(glam::Vec3::new(
+                    camera_pos.0,
+                    camera_pos.1,
+                    camera_pos.2,
+                )),
+                &feedback_uvs,
+                max_uploads,
+            )
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("height streaming failed: {error:#}"))
+            })?;
         height_streaming_stats_to_py(py, &stats)
     }
 
@@ -1415,8 +1862,8 @@ impl TerrainRenderer {
                 "globe streaming camera ECEF must be finite and non-zero",
             ));
         }
-        let focus = camera.normalize()
-            * crate::terrain::clipmap::globe::GlobeFrame::WGS84_MEAN_RADIUS_M;
+        let focus =
+            camera.normalize() * crate::terrain::clipmap::globe::GlobeFrame::WGS84_MEAN_RADIUS_M;
         self.stream_height_tiles_globe_focus(py, camera, focus, max_uploads)
     }
 
@@ -1442,9 +1889,9 @@ impl TerrainRenderer {
                 "height streaming not enabled; call enable_height_streaming() first",
             )
         })?;
-        let stats = state
-            .stats()
-            .map_err(|error| PyRuntimeError::new_err(format!("height streaming failed: {error:#}")))?;
+        let stats = state.stats().map_err(|error| {
+            PyRuntimeError::new_err(format!("height streaming failed: {error:#}"))
+        })?;
         height_streaming_stats_to_py(py, &stats)
     }
 }
@@ -1475,20 +1922,86 @@ impl TerrainRenderer {
                 "flat height streaming requires stream_height_tiles()",
             ));
         }
-        let stats = state.stream_step(
-            queue.as_ref(),
-            super::streaming::HeightStreamingCamera::Globe {
-                camera_anchor: camera_ecef,
-                focus_ecef,
-            },
-            &feedback_uvs,
-            max_uploads,
-        )
-        .map_err(|error| PyRuntimeError::new_err(format!("height streaming failed: {error:#}")))?;
+        let stats = state
+            .stream_step(
+                queue.as_ref(),
+                super::streaming::HeightStreamingCamera::Globe {
+                    camera_anchor: camera_ecef,
+                    focus_ecef,
+                },
+                &feedback_uvs,
+                max_uploads,
+            )
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("height streaming failed: {error:#}"))
+            })?;
         // Globe meshes encode a new camera-relative tangent frame after each
         // ECEF update, even when their local 2D center remains near zero.
         self.scene.geometry_provider = None;
         height_streaming_stats_to_py(py, &stats)
+    }
+}
+
+impl TerrainRenderer {
+    /// Reserve the exact regional overview capacity required by the internal
+    /// GlobeTerrainScene switching path. This does not add a Python API option.
+    #[cfg(all(feature = "cog_streaming", feature = "enable-globe"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn enable_height_streaming_cog_globe_with_overview_capacity(
+        &mut self,
+        dataset: &crate::terrain::cog::py_bindings::PyCogDataset,
+        terrain_extent_m: f32,
+        ring_count: u32,
+        ring_resolution: u32,
+        lod: u32,
+        tile_resolution: u32,
+        max_in_flight: usize,
+        pool_size: usize,
+        coarse_prefill: bool,
+        max_resident_bytes: Option<u64>,
+        overview_lonlat_bounds: Option<(f64, f64, f64, f64)>,
+        max_gpu_visible_bytes: Option<u64>,
+        overview_reservation_size: u32,
+    ) -> PyResult<()> {
+        if !(terrain_extent_m.is_finite() && terrain_extent_m > 0.0) {
+            return Err(PyRuntimeError::new_err(
+                "terrain_extent_m must be a positive finite value",
+            ));
+        }
+        let tile_resolution = tile_resolution.clamp(8, 1024);
+        let reader: std::sync::Arc<dyn crate::terrain::page_table::HeightReader> = dataset.reader();
+        let overview = overview_lonlat_bounds
+            .map(crate::terrain::page_table::OverviewUvTransform::from_lonlat_bounds)
+            .transpose()
+            .map_err(pyo3::exceptions::PyValueError::new_err)?
+            .unwrap_or_else(crate::terrain::page_table::OverviewUvTransform::identity);
+        let state = super::streaming::HeightVtFamilyRuntime::new(
+            self.scene.device.clone(),
+            self.scene.queue.clone(),
+            self.scene.allocation_owner.clone(),
+            terrain_extent_m,
+            ring_count,
+            ring_resolution,
+            lod,
+            tile_resolution,
+            max_in_flight,
+            pool_size,
+            reader,
+            coarse_prefill,
+            max_resident_bytes,
+            max_gpu_visible_bytes,
+            true,
+            overview,
+            overview_reservation_size,
+        )
+        .map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "enable_height_streaming_cog_globe failed: {error:#}"
+            ))
+        })?;
+        self.scene.height_streaming = Some(state);
+        self.scene.geometry_provider = None;
+        Ok(())
     }
 }
 
@@ -1507,10 +2020,7 @@ fn height_streaming_stats_to_py(
     dict.set_item("tiles_uploaded", stats.tiles_uploaded)?;
     dict.set_item("coarse_prefilled", stats.coarse_prefilled)?;
     dict.set_item("resident_height_bytes", stats.resident_height_bytes)?;
-    dict.set_item(
-        "gpu_visible_current_bytes",
-        stats.gpu_visible_current_bytes,
-    )?;
+    dict.set_item("gpu_visible_current_bytes", stats.gpu_visible_current_bytes)?;
     dict.set_item(
         "gpu_visible_high_water_bytes",
         stats.gpu_visible_high_water_bytes,
@@ -1525,4 +2035,18 @@ fn height_streaming_stats_to_py(
     dict.set_item("required_leaf_tiles", stats.required_leaf_tiles)?;
     dict.set_item("page_table_updates", stats.page_table_updates)?;
     Ok(dict.into())
+}
+
+#[cfg(test)]
+mod nephele_acceptance_tests {
+    use super::resize_scalar_nearest;
+
+    #[test]
+    fn termination_slice_resolves_to_public_capture_dimensions() {
+        let source = vec![0.0, 1.0, 2.0, 3.0];
+        let resolved = resize_scalar_nearest(source, (2, 2), (4, 4)).unwrap();
+        assert_eq!(resolved.len(), 16);
+        assert_eq!(&resolved[0..4], &[0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(&resolved[12..16], &[2.0, 2.0, 3.0, 3.0]);
+    }
 }

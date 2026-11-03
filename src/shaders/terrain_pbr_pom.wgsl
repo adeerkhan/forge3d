@@ -180,6 +180,7 @@ struct TerrainShadingUniforms {
     clamp1 : vec4<f32>,           // ambient_min, ambient_max, shadow_min, shadow_max
     clamp2 : vec4<f32>,           // occlusion_min, occlusion_max, lod_level, anisotropy
     height_curve : vec4<f32>,     // x=mode, y=strength, z=power, w=lambert_contrast (P5-L)
+    physical_base_color : vec4<f32>, // authored linear rgb, w=single untextured material enabled
 };
 
 struct OverlayUniforms {
@@ -191,7 +192,7 @@ struct OverlayUniforms {
     params4 : vec4<f32>, // detail_enabled, detail_scale, detail_normal_strength, detail_albedo_noise
     params5 : vec4<f32>, // detail_fade_start, detail_fade_end, output_srgb_eotf, offline_hdr_output
     params6 : vec4<f32>, // material_slope_bias, nodata_height_below, nodata_enabled, raster_rgba
-    params7 : vec4<f32>, // DEM detail strength, reserved, reserved, reserved
+    params7 : vec4<f32>, // DEM detail strength, terrain_shading_model, reserved, reserved
 };
 
 struct IblUniforms {
@@ -748,6 +749,10 @@ struct FogUniforms {
     aether_sun_direction: vec4<f32>,
     // x=bottom radius, y=top radius, z=scattering height count, w=nu count.
     aether_planet_lut: vec4<f32>,
+    // x=NEPHELE enabled, y/z=visible froxel width/height, w=depth slices.
+    media_params: vec4<f32>,
+    // x=near, y=far, z=log(far/near), w=off-axis froxel border.
+    media_depth: vec4<f32>,
 }
 
 @group(4) @binding(0)
@@ -758,6 +763,26 @@ var sky_atmosphere_tex: texture_2d<f32>;
 
 @group(4) @binding(2)
 var aether_accumulated_scattering_tex: texture_3d<f32>;
+
+@group(4) @binding(3)
+var nephele_light_transmittance_tex: texture_3d<f32>;
+
+@group(4) @binding(4)
+var nephele_surface_cloudlight_tex: texture_2d<f32>;
+
+fn nephele_same_medium_direct_transmittance(screen_position: vec2<f32>, distance_m: f32) -> vec3<f32> {
+    if (fog_uniforms.media_params.x < 0.5) { return vec3<f32>(1.0); }
+    let dimensions = max(vec3<f32>(textureDimensions(nephele_light_transmittance_tex)), vec3<f32>(1.0));
+    // The canonical froxel grid stores one XY sample per 8x8 framebuffer
+    // tile plus one off-axis border texel on every side.
+    let xy = det_div2(screen_position, vec2<f32>(8.0)) + vec2<f32>(fog_uniforms.media_depth.w);
+    let near = max(fog_uniforms.media_depth.x, 1e-6);
+    let distance_ratio = max(det_div(distance_m, near), 1.0);
+    let log2_range = max(fog_uniforms.media_depth.z * 1.4426950408889634, 1e-6);
+    let unit_depth = clamp(det_div(det_log2(distance_ratio), log2_range), 0.0, 1.0);
+    let froxel_coord = clamp(vec3<f32>(det_div2(xy, dimensions.xy), unit_depth), vec3<f32>(0.0), vec3<f32>(1.0));
+    return clamp(textureSampleLevel(nephele_light_transmittance_tex, material_samp, froxel_coord, 0.0).rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+}
 
 // ──────────────────────────────────────────────────────────────────────────
 // P4: Water Planar Reflection Uniforms (@group(5))
@@ -871,6 +896,16 @@ var<uniform> material_layer_uniforms: MaterialLayerUniforms;
 
 
 const TERRAIN_VT_MATERIAL_CAPACITY: u32 = 4u;
+// Five sampling coordinates, each for the existing four material identities.
+// Fixed vector slots avoid a dynamic private request array/count loop in FXC.
+// Zero means no resident request; key+1 is the existing feedback key encoding.
+var<private> terrain_vt_provenance_x: vec4<u32> = vec4<u32>(0u);
+var<private> terrain_vt_provenance_y: vec4<u32> = vec4<u32>(0u);
+var<private> terrain_vt_provenance_z: vec4<u32> = vec4<u32>(0u);
+var<private> terrain_vt_provenance_normal: vec4<u32> = vec4<u32>(0u);
+var<private> terrain_vt_provenance_mask: vec4<u32> = vec4<u32>(0u);
+var<private> terrain_vt_provenance_invalid: u32 = 0u;
+
 const TERRAIN_VT_FAMILY_ALBEDO: u32 = 0u;
 const TERRAIN_VT_FAMILY_NORMAL: u32 = 1u;
 const TERRAIN_VT_FAMILY_MASK: u32 = 2u;
@@ -963,8 +998,9 @@ struct TerrainFrameCounters {
 @group(6) @binding(16)
 var<storage, read_write> terrain_frame_counters: TerrainFrameCounters;
 
-// ORBIS acceptance bindings are reachable only from the compute entry below;
-// ordinary terrain render entry points therefore retain their seven groups.
+// TERRAIN_ORBIS_BINDINGS_BEGIN
+// Source-isolated from ordinary modules: wgpu validates every global binding,
+// even when the selected entry point does not reference it.
 struct OrbisProbeUniforms {
     absolute_view_proj: mat4x4<f32>,
     local_to_ecef: mat4x4<f32>,
@@ -999,6 +1035,7 @@ struct OrbisDrawIndexedIndirectArgs {
 @group(7) @binding(3) var<storage, read> orbis_selection_header: OrbisOutputHeader;
 @group(7) @binding(4) var<storage, read> orbis_selected_draws: array<OrbisDrawIndexedIndirectArgs>;
 @group(7) @binding(5) var<storage, read> orbis_mesh_indices: array<u32>;
+// TERRAIN_ORBIS_BINDINGS_END
 struct TerrainMaterialNoise {
     snow_macro: f32,
     snow_detail: f32,
@@ -1316,7 +1353,8 @@ fn sample_water_reflection(
     // Wave-based UV distortion
     // Wave normal deviation from flat (0,0,1) creates UV offset (Z up)
     let wave_strength = water_reflection_uniforms.reflection_params.z;
-    let wave_distortion = det_barrier2((wave_normal.xy - vec2<f32>(0.0, 0.0)) * wave_strength);
+    let wave_horizontal = select(wave_normal.xy, wave_normal.xz, terrain_yup_active());
+    let wave_distortion = det_barrier2((wave_horizontal - vec2<f32>(0.0, 0.0)) * wave_strength);
 
     // Shore attenuation: reduce distortion near shore (calmer water at edges)
     let shore_atten_width = water_reflection_uniforms.reflection_params.w;
@@ -1777,8 +1815,13 @@ fn normalize_for_shadow(tex_coord: vec2<f32>) -> vec3<f32> {
 
     // Compute shadow-normalized Z (matches shadow depth shader: world_z = h_curved * h_exag)
     let shadow_z = h_curved * h_exag;
-
-    return vec3<f32>(world_xy.x, world_xy.y, shadow_z);
+    
+    let shadow_height = det_fma(h_curved, h_max - h_min, h_min) * h_exag;
+    return select(
+        vec3<f32>(world_xy.x, world_xy.y, shadow_z),
+        vec3<f32>(world_xy.x, shadow_height, world_xy.y),
+        u_terrain.camera_mode_params.x == 2.0,
+    );
 }
 
 /// Calculate shadow visibility for terrain
@@ -1988,8 +2031,8 @@ fn vs_main(@builtin(vertex_index) vertex_id : u32) -> VertexOutput {
     let grid_size = u32(max(u_terrain.camera_mode_params.y, 64.0));
 
     var uv : vec2<f32>;
-
-    if (camera_mode == 1u) {
+    
+    if (camera_mode != 0u) {
         // MESH MODE: Use grid coordinates for perspective-correct terrain rendering
         // Generate triangle mesh from vertex_id
         // For a grid_size x grid_size grid, we have (grid_size-1)^2 quads, each with 2 triangles
@@ -2062,20 +2105,32 @@ fn vs_main(@builtin(vertex_index) vertex_id : u32) -> VertexOutput {
 
     // Use centered Z for mesh mode clip position, but keep original for world_position
     // (world_position is used for lighting which expects real elevation)
-    let world_pos = vec3<f32>(world_xy.x, world_xy.y, world_z_original);
+    let world_pos = select(
+        vec3<f32>(world_xy.x, world_xy.y, world_z_original),
+        vec3<f32>(world_xy.x, world_z_original, world_xy.y),
+        camera_mode == 2u,
+    );
     out.world_position = world_pos;
-    out.world_normal = vec3<f32>(0.0, 0.0, 1.0); // Z-up, recalculated in fragment shader
+    out.world_normal = select(
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        camera_mode == 2u,
+    );
     // Preserve oversized fullscreen UVs until interpolation; fragment UVs
     // then cover the complete tile, just as the mesh grid does.
     // A finite bound preserves the value-safety proof without shrinking the
     // oversized fullscreen triangle, whose vertex UVs are exactly 0 or 2.
     out.tex_coord = clamp(uv, vec2<f32>(0.0), vec2<f32>(2.0));
     out.tile_id = 0u;
-
-    if (camera_mode == 1u) {
+    
+    if (camera_mode != 0u) {
         // MESH MODE: Apply view and projection matrices for proper perspective
         // Use centered Z for clip position so terrain is visible from camera at origin
-        let mesh_world_pos = vec3<f32>(world_xy.x, world_xy.y, world_z_centered);
+        let mesh_world_pos = select(
+            vec3<f32>(world_xy.x, world_xy.y, world_z_centered),
+            vec3<f32>(world_xy.x, world_z_original, world_xy.y),
+            camera_mode == 2u,
+        );
         out.clip_position = det_mat4_mul_vec4(
             u_terrain.proj,
             det_mat4_mul_vec4(u_terrain.view, vec4<f32>(mesh_world_pos, 1.0)),
@@ -2097,6 +2152,48 @@ fn sample_height_geom_level(uv: vec2<f32>, lod: f32) -> f32 {
     let h_min = u_shading.clamp0.x;
     let h_max = u_shading.clamp0.y;
     return det_fma(apply_height_curve01(t), h_max - h_min, h_min);
+}
+
+// Geometric normal of the exact bilinear DEM cell under uv. In the Y-up
+// terrain mode this mirrors hybrid_terrain_traversal.wgsl::terrain_normal_at:
+// the same four corner heights, exaggeration, cell spacing, and analytic
+// bilinear derivatives are used by the production reference surface.
+fn terrain_reference_geometric_normal(uv: vec2<f32>) -> vec3<f32> {
+    let dimensions = max(logical_height_dimensions(), vec2<f32>(2.0));
+    let cell_count = max(dimensions - vec2<f32>(1.0), vec2<f32>(1.0));
+    let texel = det_barrier2(clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * cell_count);
+    let cell = min(floor(texel), cell_count - vec2<f32>(1.0));
+    let local = texel - cell;
+
+    let uv00 = det_div2(cell, cell_count);
+    let uv10 = det_div2(cell + vec2<f32>(1.0, 0.0), cell_count);
+    let uv01 = det_div2(cell + vec2<f32>(0.0, 1.0), cell_count);
+    let uv11 = det_div2(cell + vec2<f32>(1.0, 1.0), cell_count);
+    let exaggeration = u_terrain.spacing_h_exag.z;
+    let h00 = det_barrier(sample_height_geom_level(uv00, 0.0) * exaggeration);
+    let h10 = det_barrier(sample_height_geom_level(uv10, 0.0) * exaggeration);
+    let h01 = det_barrier(sample_height_geom_level(uv01, 0.0) * exaggeration);
+    let h11 = det_barrier(sample_height_geom_level(uv11, 0.0) * exaggeration);
+    let dh_du = det_mix(h10 - h00, h11 - h01, local.y);
+    let dh_dv = det_mix(h01 - h00, h11 - h10, local.x);
+    let cell_spacing = max(
+        det_div2(u_terrain.spacing_h_exag.xy, cell_count),
+        // Keep the reciprocal out of zero/denormal inputs, matching the
+        // minimum normal f32 used by the deterministic normalization helper.
+        vec2<f32>(1.17549435e-38),
+    );
+
+    let z_up = vec3<f32>(
+        -det_div(dh_du, cell_spacing.x),
+        -det_div(dh_dv, cell_spacing.y),
+        1.0,
+    );
+    let y_up = vec3<f32>(
+        -det_div(dh_du, cell_spacing.x),
+        1.0,
+        -det_div(dh_dv, cell_spacing.y),
+    );
+    return det_normalize3(select(z_up, y_up, u32(u_terrain.camera_mode_params.x) == 2u));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2220,11 +2317,11 @@ fn calculate_normal_lod_aware(uv: vec2<f32>) -> vec3<f32> {
     let vertical_scale = max(u_terrain.spacing_h_exag.z * 0.5, 1e-3);
     // Geometry frame (+X east, +Y south = +v, +Z up), the frame of world
     // positions, the sun and the view vector.
-    return det_normalize3(vec3<f32>(
+    return det_normalize3(terrain_zup_to_geometry(vec3<f32>(
         -det_div(dx, world_texel.x),
         -det_div(dy, world_texel.y),
         vertical_scale,
-    ));
+    )));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2433,7 +2530,7 @@ fn calculate_normal_multiscale(uv: vec2<f32>) -> vec3<f32> {
     combined_dy = det_div(combined_dy, total_weight);
 
     // Geometry frame (+X east, +Y south, +Z up), matching calculate_normal_lod_aware.
-    return det_normalize3(vec3<f32>(-combined_dx, -combined_dy, vertical_scale));
+    return det_normalize3(terrain_zup_to_geometry(vec3<f32>(-combined_dx, -combined_dy, vertical_scale)));
 }
 
 /// Calculate normal from height map using Sobel filter (LEGACY - not LOD-aware).
@@ -2456,7 +2553,7 @@ fn calculate_normal(uv : vec2<f32>, texel_size : vec2<f32>) -> vec3<f32> {
 
     let vertical_scale = max(u_terrain.spacing_h_exag.z * 0.5, 1e-3);
     // Geometry frame (+X east, +Y south, +Z up), matching calculate_normal_lod_aware.
-    return det_normalize3(vec3<f32>(-dx, -dy, vertical_scale));
+    return det_normalize3(terrain_zup_to_geometry(vec3<f32>(-dx, -dy, vertical_scale)));
 }
 
 /// Compute geometric normal from screen-space derivatives of world position.
@@ -2643,6 +2740,72 @@ fn terrain_vt_feedback_index(family_slot: u32, material_index: u32, mip_level: u
     return (((logical_material * max(terrain_vt_uniforms.config2.x, 1u)) + mip_level) * base_pages_y + tile_y) * base_pages_x + tile_x;
 }
 
+// Keep resident sampling's call graph free of UAV-dependent branches.
+// FXC ps_5_1 rejects later normal derivatives when an earlier atomic result
+// controls fragment-lane execution. The unique-page count uses exactly the
+// same bit transition as before, but only as an arithmetic atomic increment.
+fn terrain_vt_write_provenance_feedback_key(key_index: u32) {
+    let word_index = key_index / 32u;
+    if (word_index >= max(terrain_vt_uniforms.config3.x, 1u)) {
+        atomicAdd(&terrain_vt_feedback[1], 1u);
+        return;
+    }
+    let shift = key_index % 32u;
+    let bit = 1u << shift;
+    let previous = atomicOr(&terrain_vt_feedback[word_index + 2u], bit);
+    let newly_set = ((~previous) & bit) >> shift;
+    atomicAdd(&terrain_vt_feedback[0], newly_set);
+}
+
+fn terrain_vt_write_resident_provenance_feedback(
+    family_slot: u32, material_index: u32, mip_level: u32, tile_x: u32, tile_y: u32, provenance_slot: u32,
+) {
+    if (terrain_vt_uniforms.config2.w == 0u
+        || tile_x >= max(terrain_vt_uniforms.config1.z, 1u)
+        || tile_y >= max(terrain_vt_uniforms.config1.w, 1u)) {
+        return;
+    }
+    // Material sampling records only private values. Publish after shade_main
+    // has evaluated every normal derivative; no UAV is reachable from shading.
+    let encoded = terrain_vt_feedback_index(family_slot, material_index, mip_level, tile_x, tile_y) + 1u;
+    let component = vec4<u32>(material_index) == vec4<u32>(0u, 1u, 2u, 3u);
+    switch provenance_slot {
+        case 0u: { terrain_vt_provenance_x = select(terrain_vt_provenance_x, vec4<u32>(encoded), component); }
+        case 1u: { terrain_vt_provenance_y = select(terrain_vt_provenance_y, vec4<u32>(encoded), component); }
+        case 2u: { terrain_vt_provenance_z = select(terrain_vt_provenance_z, vec4<u32>(encoded), component); }
+        case 3u: { terrain_vt_provenance_normal = select(terrain_vt_provenance_normal, vec4<u32>(encoded), component); }
+        case 4u: { terrain_vt_provenance_mask = select(terrain_vt_provenance_mask, vec4<u32>(encoded), component); }
+        default: { terrain_vt_provenance_invalid += 1u; }
+    }
+}
+
+fn terrain_vt_commit_provenance_key(encoded: u32) {
+    if (encoded != 0u) {
+        terrain_vt_write_provenance_feedback_key(encoded - 1u);
+    }
+}
+
+fn terrain_vt_commit_provenance_quad(keys: vec4<u32>) {
+    terrain_vt_commit_provenance_key(keys.x);
+    terrain_vt_commit_provenance_key(keys.y);
+    terrain_vt_commit_provenance_key(keys.z);
+    terrain_vt_commit_provenance_key(keys.w);
+}
+
+fn terrain_vt_flush_provenance_feedback() {
+    if (!terrain_vt_provenance_capture()) {
+        return;
+    }
+    terrain_vt_commit_provenance_quad(terrain_vt_provenance_x);
+    terrain_vt_commit_provenance_quad(terrain_vt_provenance_y);
+    terrain_vt_commit_provenance_quad(terrain_vt_provenance_z);
+    terrain_vt_commit_provenance_quad(terrain_vt_provenance_normal);
+    terrain_vt_commit_provenance_quad(terrain_vt_provenance_mask);
+    if (terrain_vt_provenance_invalid != 0u) {
+        atomicAdd(&terrain_vt_feedback[1], terrain_vt_provenance_invalid);
+    }
+}
+
 fn terrain_vt_write_feedback(family_slot: u32, material_index: u32, mip_level: u32, tile_x: u32, tile_y: u32) {
     if (terrain_vt_uniforms.config2.w == 0u) {
         return;
@@ -2655,16 +2818,7 @@ fn terrain_vt_write_feedback(family_slot: u32, material_index: u32, mip_level: u
     let key_index = terrain_vt_feedback_index(family_slot, material_index, mip_level, tile_x, tile_y);
     let capacity = max(terrain_vt_uniforms.config3.x, 1u);
     if (terrain_vt_provenance_capture()) {
-        let word_index = key_index / 32u;
-        if (word_index >= capacity) {
-            atomicAdd(&terrain_vt_feedback[1], 1u);
-            return;
-        }
-        let bit = 1u << (key_index % 32u);
-        let previous = atomicOr(&terrain_vt_feedback[word_index + 2u], bit);
-        if ((previous & bit) == 0u) {
-            atomicAdd(&terrain_vt_feedback[0], 1u);
-        }
+        terrain_vt_write_provenance_feedback_key(key_index);
         return;
     }
     // `+ 1` keeps 0 reserved for an empty slot in malformed/partial readback.
@@ -2859,6 +3013,7 @@ fn terrain_vt_resolve_family_uv(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>,
     layer: f32,
+    provenance_slot: u32,
 ) -> vec4<f32> {
     if (!terrain_vt_enabled() || !terrain_vt_family_enabled(family_slot)) {
         return vec4<f32>(
@@ -2891,12 +3046,13 @@ fn terrain_vt_resolve_family_uv(
         );
         if (entry.z > 0.5) {
             if (terrain_vt_provenance_capture()) {
-                terrain_vt_write_feedback(
+                terrain_vt_write_resident_provenance_feedback(
                     family_slot,
                     material_index,
                     mip_level,
                     page.x,
                     page.y,
+                    provenance_slot,
                 );
             }
             let page_origin = det_barrier2(vec2<f32>(f32(page.x), f32(page.y)) * page_size);
@@ -3064,10 +3220,11 @@ fn terrain_vt_sample_family_uv(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>,
     layer: f32,
+    provenance_slot: u32,
 ) -> vec3<f32> {
     // Color (albedo) path: resident tiles yield linear color; fallback colors
     // are authored as linear and used as-is.
-    return terrain_vt_resolve_family_uv(family_slot, uv, ddx_uv, ddy_uv, layer).rgb;
+    return terrain_vt_resolve_family_uv(family_slot, uv, ddx_uv, ddy_uv, layer, provenance_slot).rgb;
 }
 
 // Data-family sampling (normal / mask): resident tiles are decoded back to
@@ -3082,7 +3239,7 @@ fn terrain_vt_sample_family_data(
     ddy_uv: vec2<f32>,
     layer: f32,
 ) -> vec4<f32> {
-    let resolved = terrain_vt_resolve_family_uv(family_slot, uv, ddx_uv, ddy_uv, layer);
+    let resolved = terrain_vt_resolve_family_uv(family_slot, uv, ddx_uv, ddy_uv, layer, select(4u, 3u, family_slot == TERRAIN_VT_FAMILY_NORMAL));
     if (resolved.w > 0.5) {
         let linear_data_atlas = terrain_vt_uniforms
             .family_info[min(family_slot, 2u)].virtual_size.z != 0u;
@@ -3110,13 +3267,14 @@ fn sample_material_layer_uv(
     ddx_uv: vec2<f32>,
     ddy_uv: vec2<f32>,
     layer: f32,
+    provenance_slot: u32,
 ) -> vec3<f32> {
     if (!terrain_vt_enabled() || !terrain_vt_family_enabled(TERRAIN_VT_FAMILY_ALBEDO)) {
         let layer_index = i32(layer);
         return textureSampleGrad(material_albedo_tex, material_samp, uv, layer_index, ddx_uv, ddy_uv).rgb;
     }
 
-    return terrain_vt_sample_family_uv(TERRAIN_VT_FAMILY_ALBEDO, uv, ddx_uv, ddy_uv, layer);
+    return terrain_vt_sample_family_uv(TERRAIN_VT_FAMILY_ALBEDO, uv, ddx_uv, ddy_uv, layer, provenance_slot);
 }
 
 /// Triplanar sampling with textureSampleGrad for correct mip selection.
@@ -3132,9 +3290,9 @@ fn sample_triplanar(
     let weights = compute_triplanar_weights(normal, blend_sharpness);
 
     let tri = terrain_vt_triplanar_feedback_uvs(world_pos, scale);
-    let color_x = sample_material_layer_uv(tri.uv_x, tri.ddx_x, tri.ddy_x, layer);
-    let color_y = sample_material_layer_uv(tri.uv_y, tri.ddx_y, tri.ddy_y, layer);
-    let color_z = sample_material_layer_uv(tri.uv_z, tri.ddx_z, tri.ddy_z, layer);
+    let color_x = sample_material_layer_uv(tri.uv_x, tri.ddx_x, tri.ddy_x, layer, 0u);
+    let color_y = sample_material_layer_uv(tri.uv_y, tri.ddx_y, tri.ddy_y, layer, 1u);
+    let color_z = sample_material_layer_uv(tri.uv_z, tri.ddx_z, tri.ddy_z, layer, 2u);
 
     return det_barrier3(det_barrier3(color_x * weights.x) + det_barrier3(color_y * weights.y)) + det_barrier3(color_z * weights.z);
 }
@@ -3419,6 +3577,11 @@ fn build_terrain_uv_tbn(normal: vec3<f32>, surface_up: vec3<f32>) -> mat3x3<f32>
     var east = vec3<f32>(1.0, 0.0, 0.0);
     var south = vec3<f32>(0.0, 1.0, 0.0);
     var handedness = 1.0;
+    if (terrain_yup_active()) {
+        // `mesh:yup` swaps raster south onto +Z, which flips the frame's handedness.
+        south = vec3<f32>(0.0, 0.0, 1.0);
+        handedness = -1.0;
+    }
     if (orbis_globe_active()) {
         east = det_barrier3(det_cross3(orbis_render_pole(), surface_up));
         if (det_dot3(east, east) == 0.0) {
@@ -3437,11 +3600,27 @@ fn build_terrain_uv_tbn(normal: vec3<f32>, surface_up: vec3<f32>) -> mat3x3<f32>
     return mat3x3<f32>(tangent, bitangent, normal);
 }
 
-/// Terrain geometry frame (+X east, +Y south, +Z up) to the Y-up environment
-/// cubemap frame (+X east, +Y up, +Z south). The ORBIS globe keeps its own
-/// render frame unchanged.
+/// True for the `mesh:yup` terrain mode, whose geometry frame is already Y-up
+/// (+X east, +Y up, +Z south).
+fn terrain_yup_active() -> bool {
+    return u32(u_terrain.camera_mode_params.x) == 2u;
+}
+
+/// Z-up terrain vector (+X east, +Y south, +Z up) to the active geometry
+/// frame: unchanged in Z-up modes, swizzled to Y-up in `mesh:yup`.
+fn terrain_zup_to_geometry(v: vec3<f32>) -> vec3<f32> {
+    return select(v, vec3<f32>(v.x, v.z, v.y), terrain_yup_active());
+}
+
+/// Terrain geometry frame to the Y-up environment cubemap frame (+X east,
+/// +Y up, +Z south). The ORBIS globe keeps its own render frame and the
+/// `mesh:yup` geometry frame already is the environment frame.
 fn terrain_to_env(v: vec3<f32>) -> vec3<f32> {
-    return select(vec3<f32>(v.x, v.z, v.y), v, orbis_globe_active());
+    return select(
+        vec3<f32>(v.x, v.z, v.y),
+        v,
+        orbis_globe_active() || terrain_yup_active(),
+    );
 }
 
 fn rotate_y(v : vec3<f32>, sin_theta : f32, cos_theta : f32) -> vec3<f32> {
@@ -4007,7 +4186,9 @@ fn apply_atmospheric_fog(
     screen_pos: vec2<f32>,
 ) -> vec3<f32> {
     let density_raw = fog_uniforms.params0.x;
-    let fog_enabled = density_raw > 0.0;
+    // NEPHELE owns spatial-media transport. Keep the analytic-sky/AETHER
+    // boundary, but bypass the independent legacy height-fog density model.
+    let fog_enabled = density_raw > 0.0 && fog_uniforms.media_params.x < 0.5;
     let sky_enabled = fog_uniforms.sky_params0.x > 0.5;
     let sky_aerial_enabled = sky_enabled && fog_uniforms.sky_params0.z > 0.5;
     let aether_enabled = fog_uniforms.fog_inscatter.w > 0.5;
@@ -4149,6 +4330,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
         discard;
     }
     let debug_mode = u32(u_overlay.params1.y + 0.5);
+    let lambert_physical = u_overlay.params7.y > 0.5;
 
     // Compute all normal variants for diagnostics
     let base_normal = det_normalize3(input.world_normal);
@@ -4533,7 +4715,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
         let wave_dy = det_barrier((det_barrier(det_barrier(wave1) + det_barrier(wave2)) + det_barrier(wave3)) * wind_sin) + det_barrier(det_barrier(cross_wave) * wind_cos);
 
         // Build perturbed normal in the terrain geometry frame (Z is up)
-        shading_normal = det_normalize3(vec3<f32>(wave_dx, wave_dy, 1.0));
+        shading_normal = det_normalize3(terrain_zup_to_geometry(vec3<f32>(wave_dx, wave_dy, 1.0)));
     }
     if (is_physical_water) {
         shading_normal = n_dd;
@@ -4640,6 +4822,11 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
     let overlay_rgb = overlay_rgba.rgb;
 
     // Apply overlay blend to material albedo (if overlay is active)
+    if (lambert_physical && !is_water && u_shading.physical_base_color.w > 0.5) {
+        // Preserve the authored f32 reflectance for a single constant material;
+        // the sRGB8 material texture remains available for all general cases.
+        albedo = u_shading.physical_base_color.rgb;
+    }
     var material_albedo = albedo; // Store original triplanar albedo
     if (overlay_strength_raw > 1e-5 && u_overlay.params6.w < 0.5) {
         let strength = clamp(overlay_strength_raw, 0.0, 1.0);
@@ -4692,7 +4879,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             // image's top-to-bottom row convention, without the old zoom.
             drape_uv = vec2<f32>(input.tex_coord.x, 1.0 - input.tex_coord.y);
         }
-        let drape = textureSample(material_drape_tex, material_map_samp, drape_uv);
+        let drape = textureSampleLevel(material_drape_tex, material_map_samp, drape_uv, 0.0);
         final_albedo = det_mix3(final_albedo, drape.rgb, drape.a);
     }
 
@@ -4714,7 +4901,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
     // P4: Apply slope+elevation hue variation to increase h_std metric
     // Combines slope (steep=redder, flat=yellower) and elevation spread
     // The caller can set strength to zero when the supplied palette must remain authoritative.
-    if (!is_water) {
+    if (!is_water && !lambert_physical) {
         let hue_variation_strength = clamp(u_overlay.params3.z, 0.0, 0.2);
         albedo = det_barrier3(apply_slope_hue_variation(albedo, slope_factor, height_norm, hue_variation_strength));
     }
@@ -4841,8 +5028,8 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             lambert_k,           // P5-L: Lambert contrast parameter
         );
     }
-    lighting = det_barrier3(lighting) * u_terrain.sun_exposure.w;
-    lighting = det_barrier3(lighting) * u_shading.light_params.rgb;
+    lighting = det_barrier3(det_barrier3(lighting) * u_terrain.sun_exposure.w);
+    lighting = det_barrier3(det_barrier3(lighting) * u_shading.light_params.rgb);
 
     // P3-10: Apply CSM shadow visibility (optional, gated by TERRAIN_USE_SHADOWS)
     var shadow_debug_color = vec3<f32>(0.0);
@@ -4869,7 +5056,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
         // shadow_visibility: 0.0 = fully shadowed, 1.0 = fully lit
         // Map to [SHADOW_MIN, 1.0] for softer shadows that don't go pitch black
         let direct_shadow = det_mix(SHADOW_MIN, 1.0, shadow_visibility);
-        lighting = det_barrier3(lighting) * direct_shadow;
+        lighting = det_barrier3(det_barrier3(lighting) * direct_shadow);
 
         // Compute factor for IBL shadow (used below)
         shadow_factor = det_mix(1.0 - SHADOW_IBL_FACTOR, 1.0, shadow_visibility);
@@ -4877,9 +5064,13 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
         // Legacy POM-based shadow factor (preserved for backward compatibility)
         if (shadow_enabled && pom_enabled) {
             let shadow_factor = clamp(det_mix(0.4, 1.0, occlusion), u_shading.clamp1.z, u_shading.clamp1.w);
-            lighting = det_barrier3(lighting) * shadow_factor;
+            lighting = det_barrier3(det_barrier3(lighting) * shadow_factor);
         }
     }
+    // Every direct-light path consumes the light-ray transmittance produced
+    // from the same canonical 3-D medium as the froxel integration.
+    let same_medium_direct_t = nephele_same_medium_direct_transmittance(input.clip_position.xy, view_distance);
+    lighting = lighting * same_medium_direct_t;
 
     // Apply IBL rotation (terrain-specific feature)
     let rotated_normal = rotate_y(terrain_to_env(shading_normal), u_ibl.sin_theta, u_ibl.cos_theta);
@@ -5446,8 +5637,8 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
         var shaded = vec3<f32>(0.0);
 
         if (is_physical_water) {
-            shaded = shade_physical_water(input.world_position, uv, shading_normal, view_dir,
-                                          light_dir, albedo, roughness, f0, shadow_visibility);
+            shaded = det_barrier3(shade_physical_water(input.world_position, uv, shading_normal, view_dir,
+                                          light_dir, albedo, roughness, f0, shadow_visibility));
         } else if (is_water) {
             // Water: specular-dominant shading (minimal diffuse, strong reflections)
             // Fresnel is already baked into eval_ibl via fresnel_schlick_roughness
@@ -5484,7 +5675,7 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             // Sun contribution - NO artificial boost; proper GGX + low roughness = natural glints
             let sun_color = vec3<f32>(1.0, 0.98, 0.95); // Slightly warm sun
             let sun_intensity = u_shading.light_params.z; // Use actual sun intensity (no boost!)
-            let sun_spec = det_barrier3(det_barrier3(direct_spec * sun_color) * sun_intensity) * n_dot_l;
+            let sun_spec = det_barrier3(det_barrier3(det_barrier3(direct_spec * sun_color) * sun_intensity) * n_dot_l) * same_medium_direct_t;
 
             // ─────────────────────────────────────────────────────────────────────
             // P4: Planar Reflection Integration
@@ -5544,10 +5735,62 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             // Water color: keep a stable artist-tunable blue tint while local/global
             // reflections come from the blended probe + planar + IBL path above.
             shaded =
-                det_barrier3(det_barrier3(reflective) +
+                det_barrier3(det_barrier3(det_barrier3(reflective) +
                 WATER_BASE_TINT * WATER_BASE_TINT_SCALE) +
-                det_barrier3(det_barrier3(water_scatter) * WATER_SCATTER_SCALE);
+                det_barrier3(det_barrier3(water_scatter) * WATER_SCATTER_SCALE));
 
+        } else if (lambert_physical) {
+            // OD-9c physical terrain surface. The planar/Y-up normal is the
+            // exact analytic bilinear-cell normal used by the reference
+            // traversal. ORBIS retains its displaced globe geometric normal.
+            let physical_normal = select(
+                terrain_reference_geometric_normal(uv),
+                height_normal_lod,
+                orbis_globe,
+            );
+            let n_dot_l = max(det_dot3(physical_normal, light_dir), 0.0);
+
+            // V_terrain is the raw product of the two production visibility
+            // estimators. Do not apply the stylized shadow or AO floors.
+            let sun_vis_uv = clamp(input.tex_coord, vec2<f32>(0.0), vec2<f32>(1.0));
+            let sun_vis_tex_size = vec2<f32>(textureDimensions(sun_vis_tex, 0));
+            let sun_vis_pixel = vec2<i32>(sun_vis_uv * sun_vis_tex_size);
+            let sun_vis_clamped_pixel = clamp(
+                sun_vis_pixel,
+                vec2<i32>(0),
+                vec2<i32>(sun_vis_tex_size) - vec2<i32>(1),
+            );
+            let sun_vis_sample = textureLoad(sun_vis_tex, sun_vis_clamped_pixel, 0).r;
+            let terrain_visibility = det_barrier(shadow_visibility * sun_vis_sample);
+
+            // light_params.rgb is sun_color * intensity in radiance units.
+            // The terrain IBL cube stores normalized irradiance E_env / PI.
+            // Convert it back to irradiance so the physical equation divides
+            // by PI exactly once below.
+            let lambert_brdf = det_div3(albedo, vec3<f32>(PI));
+            let direct_radiance = det_barrier3(
+                det_barrier3(
+                    det_barrier3(lambert_brdf * u_shading.light_params.rgb) * n_dot_l
+                ) * same_medium_direct_t
+            ) * terrain_visibility;
+            let rotated_physical_normal = rotate_y(
+                physical_normal,
+                u_ibl.sin_theta,
+                u_ibl.cos_theta,
+            );
+            let environment_irradiance = textureSampleLevel(
+                envIrradiance,
+                envSampler,
+                rotated_physical_normal,
+                0.0,
+            ).rgb;
+            let environment_radiance = det_div3(
+                det_barrier3(albedo * det_barrier3(
+                    det_barrier3(environment_irradiance * u_ibl.intensity) * PI
+                )),
+                vec3<f32>(PI),
+            );
+            shaded = det_barrier3(det_barrier3(direct_radiance) + det_barrier3(environment_radiance));
         } else {
             // ══════════════════════════════════════════════════════════════════════
             // P2-S4: Terrain Lighting Composition (structure locked per spec)
@@ -5645,8 +5888,10 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             // Direct product for full contrast range (no sqrt compression)
             // P3 requires lf_max/lf_min >= 4.5
             // Use combined_shadow which includes both CSM and heightfield sun visibility
-            let ao_shadow_factor = det_barrier(ao_clamped) * det_barrier(combined_shadow); // Range [0.195, 1.0]
-            let diffuse_lit = diffuse_raw * det_barrier(ao_shadow_factor);
+            // NEPHELE direct lighting consumes canonical medium transmittance.
+            let direct_shadow = combined_shadow;
+            let ao_shadow_factor = det_barrier(ao_clamped) * det_barrier(direct_shadow); // Range [0.195, 1.0]
+            let diffuse_lit = det_barrier(diffuse_raw * det_barrier(ao_shadow_factor));
 
             // P3-S1: IBL term adds minimal fill light
             // Reduced to allow deeper shadows while preventing pitch-black
@@ -5654,18 +5899,18 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             let ibl_diffuse_biased = blended_diffuse;
             let ibl_diffuse_factor = det_barrier(det_length3(ibl_diffuse_biased) * u_ibl.intensity);
             let ibl_term = det_barrier(det_barrier(ibl_diffuse_factor) * AMBIENT_FLOOR) * 0.35;
-            let terrain_sss = evaluate_terrain_subsurface(
+            let terrain_sss = det_barrier3(evaluate_terrain_subsurface(
                 terrain_subsurface,
                 albedo,
                 shading_normal,
                 view_dir,
                 light_dir,
-                combined_shadow,
-                ibl_diffuse_factor,
+                direct_shadow,
+                ibl_diffuse_factor),
             );
 
             // P2-S4: lighting_factor = diffuse_lit + ibl_term
-            let lighting_factor = det_barrier(diffuse_lit) + det_barrier(ibl_term);
+            let lighting_factor = det_barrier3(diffuse_lit * same_medium_direct_t) + vec3<f32>(det_barrier(ibl_term));
 
             // Apply lighting factor to albedo
             // Spec H-03: Lighting modulates brightness, not colormap lookup
@@ -5677,11 +5922,21 @@ fn shade_main(input : VertexOutput) -> FragmentOutput {
             let spec_capped = min(spec_contrib, albedo * 0.20);
 
             // Final terrain shading
-            shaded = det_barrier3(det_barrier3(lit_albedo) + spec_capped) + det_barrier3(terrain_sss);
+            shaded = det_barrier3(det_barrier3(det_barrier3(lit_albedo) + spec_capped) + det_barrier3(terrain_sss * same_medium_direct_t));
         }
 
+        // Sunlight single-scattered by the canonical medium and incident on
+        // this terrain hit. The field stores irradiance; apply the actual
+        // material's Lambert BRDF once, before exposure and camera transport.
+        if (!is_water && fog_uniforms.media_params.x > 0.5) {
+            let dimensions = vec2<i32>(textureDimensions(nephele_surface_cloudlight_tex));
+            let pixel = clamp(vec2<i32>(input.clip_position.xy), vec2<i32>(0), dimensions - 1);
+            let boundary = textureLoad(nephele_surface_cloudlight_tex, pixel, 0);
+            let irradiance = select(max(boundary.rgb, vec3<f32>(0.0)), boundary.rgb, boundary.a > 1.0);
+            shaded = shaded + det_barrier3(det_div3(albedo, vec3<f32>(PI)) * irradiance);
+        }
         let exposure = max(u_shading.light_params.w, 0.0);
-        shaded = det_barrier3(shaded) * exposure;
+        shaded = det_barrier3(det_barrier3(shaded) * exposure);
 
         // P2: Apply atmospheric fog after exposure, before tonemap
         // When fog_density = 0, this is a no-op preserving P1 output
@@ -5866,6 +6121,7 @@ fn forward_shade_with_feedback(input : VertexOutput) -> FragmentOutput {
     let feedback_ddx_world = terrain_screen_ddx_world(input.world_position);
     let feedback_ddy_world = terrain_screen_ddy_world(input.world_position);
     let out = shade_main(input);
+    terrain_vt_flush_provenance_feedback();
     atomicAdd(&terrain_frame_counters.material_invocations, 1u);
     atomicAdd(&terrain_frame_counters.forward_material_invocations, 1u);
     terrain_vt_write_surface_feedback(
@@ -5890,6 +6146,7 @@ fn fs_aov_main(input : VertexOutput) -> FragmentOutput {
     let feedback_ddx_world = terrain_screen_ddx_world(input.world_position);
     let feedback_ddy_world = terrain_screen_ddy_world(input.world_position);
     var out = shade_main(input);
+    terrain_vt_flush_provenance_feedback();
     atomicAdd(&terrain_frame_counters.material_invocations, 1u);
     atomicAdd(&terrain_frame_counters.forward_material_invocations, 1u);
     terrain_vt_write_surface_feedback(
@@ -5959,9 +6216,9 @@ fn clipmap_sample_height_level(
     let level_base = det_barrier2(floor(level_cell) * level_step);
     let level_t = fract(level_cell);
     let h00 = sample_height_bilinear(level_base);
-    let h10 = sample_height_bilinear(det_barrier2(level_base) + vec2<f32>(level_step.x, 0.0));
-    let h01 = sample_height_bilinear(det_barrier2(level_base) + vec2<f32>(0.0, level_step.y));
-    let h11 = sample_height_bilinear(det_barrier2(level_base) + level_step);
+    let h10 = sample_height_bilinear(det_barrier2(det_barrier2(level_base) + vec2<f32>(level_step.x, 0.0)));
+    let h01 = sample_height_bilinear(det_barrier2(det_barrier2(level_base) + vec2<f32>(0.0, level_step.y)));
+    let h11 = sample_height_bilinear(det_barrier2(det_barrier2(level_base) + level_step));
     return det_mix(det_mix(h00, h10, level_t.x), det_mix(h01, h11, level_t.x), level_t.y);
 }
 
@@ -6256,6 +6513,7 @@ fn vs_clipmap_main(
     return out;
 }
 
+// TERRAIN_ORBIS_PROBE_BEGIN
 fn orbis_project(matrix: mat4x4<f32>, position: vec3<f32>) -> vec4<f32> {
     let clip = det_mat4_mul_vec4(matrix, vec4<f32>(position, 1.0));
     return vec4<f32>(det_div2(clip.xy, vec2<f32>(clip.w)), clip.w, 0.0);
@@ -6351,3 +6609,4 @@ fn orbis_metric_probe(@builtin(global_invocation_id) invocation: vec3<u32>) {
     sample.production.w = select(0.0, 1.0, clip_morph.x < 0.0);
     orbis_projection_samples[index] = sample;
 }
+// TERRAIN_ORBIS_PROBE_END

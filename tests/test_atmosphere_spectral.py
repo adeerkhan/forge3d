@@ -306,7 +306,9 @@ def test_terrain_group_four_is_the_dedicated_shared_atmosphere_group() -> None:
     assert (
         "@group(4) @binding(2)\nvar aether_accumulated_scattering_tex" in shader
     )
-    assert shader.count("@group(4)") == 4  # one ownership comment + three resources
+    assert "@group(4) @binding(3)\nvar nephele_light_transmittance_tex" in shader
+    assert "@group(4) @binding(4)\nvar nephele_surface_cloudlight_tex" in shader
+    assert shader.count("@group(4)") == 6  # ownership comment + five resources
     assert "terrain_pbr_pom.atmosphere_bind_group_layout" in layouts
     assert "group exclusively owns fog, sky, and AETHER LUT resources" in layouts
     assert "@group(4): dedicated shared atmosphere (bindings 0-2)" in pipeline
@@ -329,10 +331,25 @@ def test_oblique_zup_sky_uses_authoritative_terrain_camera() -> None:
     )
 
     for source in (forward, aov):
-        assert (
-            "let (camera_eye, camera_view, camera_proj) = "
-            "Self::build_camera_matrices(params);"
-        ) in source
+        if source is forward:
+            camera_selection = source.split(
+                "let (camera_eye, camera_view, camera_proj) =", 1
+            )[1].split("let camera_height", 1)[0]
+            assert camera_selection.strip() == """if let Some(frame) = render_targets.concordia.as_ref() {
+                let view = glam::Mat4::from_cols_array_2d(&frame.current_uniforms.view);
+                (
+                    view.inverse().w_axis.truncate(),
+                    view,
+                    glam::Mat4::from_cols_array_2d(&frame.current_uniforms.proj),
+                )
+            } else {
+                Self::build_camera_matrices(params)
+            };"""
+        else:
+            assert (
+                "let (camera_eye, camera_view, camera_proj) = "
+                "Self::build_camera_matrices(params);"
+            ) in source
         sky_call = source.split("let sky_texture = self.render_sky_texture(", 1)[
             1
         ].split(")?;", 1)[0]

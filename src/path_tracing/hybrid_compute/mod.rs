@@ -19,6 +19,7 @@ use crate::sdf::HybridScene;
 mod aether_post;
 mod aether_reference;
 mod layouts;
+mod media_reference;
 mod render;
 #[cfg(feature = "splat-fusion")]
 mod render_fused;
@@ -29,8 +30,12 @@ mod terrain_albedo;
 pub mod terrain_heightfield;
 
 pub use aether_reference::{AetherSpectralReferenceDesc, AetherSpectralReferenceOutput};
+pub use media_reference::TerrainMediaReferenceOutput;
 #[cfg(feature = "splat-fusion")]
-pub use render_fused::{FusedRenderDesc, FusedRenderOutput, FusedTerrainDesc};
+pub use render_fused::{
+    env_from_hdr_image, load_fused_env, FusedEnvMap, FusedRenderDesc, FusedRenderOutput,
+    FusedTerrainDesc,
+};
 pub use render_terrain::{CameraModel, TerrainReferenceDesc, TerrainReferenceOutput};
 pub use terrain_heightfield::{
     AlbedoSampling, MinMaxPrecision, TerrainAlbedoMap, TerrainPtScene,
