@@ -372,7 +372,10 @@ export function Viewport3D() {
     let lastQuaternion: Quaternion = [0, 0, 0, 1];
     const tick = () => {
       frame = requestAnimationFrame(tick);
-      orbit.update();
+      // OrbitControls.update() ends with `camera.lookAt(target)`, which would
+      // overwrite the camera-view quaternion every frame. While looking through
+      // the project camera, the model owns the view.
+      if (!inCameraView.current) orbit.update();
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
       if (
@@ -565,6 +568,9 @@ export function Viewport3D() {
     for (const id of project.selection) {
       const group = runtime.objects.get(id);
       if (!group) continue;
+      // The box around the camera we are looking through is drawn from inside
+      // itself and reads as stray lines across the view.
+      if (cameraView && id === activeCameraId) continue;
       const helper = new THREE.BoxHelper(group, ACCENT);
       runtime.scene.add(helper);
       runtime.helpers.push(helper);

@@ -909,6 +909,7 @@ dependencies = [
  "env_logger",
  "log",
  "serde",
+ "serde_json",
  "studio-core",
  "tauri",
  "tauri-build",
