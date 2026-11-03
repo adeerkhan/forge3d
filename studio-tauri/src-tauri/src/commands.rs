@@ -19,6 +19,7 @@ use studio_core::workspace::Handoff;
 use studio_core::{AutosaveReport, Session, Workspace, AUTOSAVE_INTERVAL_SECONDS};
 
 use crate::forge3d::{EngineStatus, Forge3dState, Forge3dStatus};
+use crate::render::{RenderFrame, RenderRequest, RenderState, RenderStatus};
 use crate::session::AppState;
 
 /// Edit result: what the command did, plus the new snapshot.
@@ -350,4 +351,37 @@ fn current_handoff(state: &State<'_, AppState>) -> Result<Handoff, String> {
         snapshot.revision,
         Workspace::Forge3d,
     ))
+}
+
+// ---------------------------------------------------------------------- render
+
+/// Render the current scene at `width` × `height` through the embedded
+/// Forge3D pipeline (the same one the golden tests certify).
+#[tauri::command]
+pub fn render_frame(
+    render: State<'_, RenderState>,
+    forge: State<'_, Forge3dState>,
+    state: State<'_, AppState>,
+    width: Option<u32>,
+    height: Option<u32>,
+) -> Result<RenderFrame, String> {
+    let handoff = current_handoff(&state)?;
+    let request = RenderRequest::from_handoff(
+        &handoff,
+        width.unwrap_or(960).clamp(64, 4096),
+        height.unwrap_or(600).clamp(64, 4096),
+    )?;
+    let python = forge.probe(false).python;
+    render.render(&python, &request.dem, request.to_payload())
+}
+
+#[tauri::command]
+pub fn render_status(render: State<'_, RenderState>) -> RenderStatus {
+    render.status()
+}
+
+#[tauri::command]
+pub fn render_stop(render: State<'_, RenderState>) -> RenderStatus {
+    render.stop();
+    render.status()
 }

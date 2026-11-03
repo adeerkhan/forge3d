@@ -20,6 +20,8 @@ import type {
   LightObject,
   MeshFilePayload,
   ObjectKind,
+  RenderFrame,
+  RenderStatus,
   Primitive,
   Project,
   SceneObject,
@@ -597,6 +599,24 @@ export function createMockBridge(): StudioBridge {
     forge3dSyncCamera: async () => {
       throw new Error("the Forge3D viewer needs the desktop shell");
     },
+
+    renderFrame: async (): Promise<RenderFrame> => {
+      throw new Error(
+        "Rendered mode runs the Forge3D pipeline, which needs the desktop shell",
+      );
+    },
+
+    renderStatus: async (): Promise<RenderStatus> => ({
+      running: false,
+      dem: null,
+      diagnostics: ["preview harness: no renderer"],
+    }),
+
+    renderStop: async (): Promise<RenderStatus> => ({
+      running: false,
+      dem: null,
+      diagnostics: ["preview harness: no renderer"],
+    }),
 
     forge3dStop: async () => ({
       running: false,

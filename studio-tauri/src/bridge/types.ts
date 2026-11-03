@@ -268,6 +268,21 @@ export interface EngineStatus {
   detail: string;
 }
 
+export interface RenderFrame {
+  width: number;
+  height: number;
+  /** Render time in milliseconds. */
+  ms: number;
+  /** Base64 PNG. */
+  png: string;
+}
+
+export interface RenderStatus {
+  running: boolean;
+  dem: string | null;
+  diagnostics: string[];
+}
+
 export interface Forge3dStatus {
   running: boolean;
   ready: boolean;

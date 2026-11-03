@@ -255,7 +255,7 @@ function disposeChildren(group: THREE.Group): void {
 }
 
 export function Viewport3D() {
-  const { state, actions, tool, space, cameraView } = useSession();
+  const { state, actions, tool, space, cameraView, render } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<Runtime | null>(null);
@@ -263,6 +263,7 @@ export function Viewport3D() {
   actionsRef.current = actions;
 
   const [quaternion, setQuaternion] = useState<Quaternion>([0, 0, 0, 1]);
+  const [size, setSize] = useState({ width: 960, height: 600 });
   const [problem, setProblem] = useState<string | null>(null);
   const savedView = useRef<{
     position: THREE.Vector3;
@@ -369,6 +370,11 @@ export function Viewport3D() {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      setSize((current) =>
+        current.width === width && current.height === height
+          ? current
+          : { width, height },
+      );
     };
     const observer = new ResizeObserver(resize);
     observer.observe(container);
@@ -729,12 +735,64 @@ export function Viewport3D() {
     runtime.orbit.update();
   }, []);
 
+  const mode = state?.project.viewport.mode ?? "solid";
+  const renderedMode = mode === "rendered";
+
+  // Entering Rendered mode renders once at the current viewport size; orbiting
+  // in this mode does not re-render (each frame costs seconds), so the toolbar
+  // offers an explicit re-render.
+  const renderedOnce = useRef(false);
+  useEffect(() => {
+    if (!renderedMode) {
+      renderedOnce.current = false;
+      return;
+    }
+    if (renderedOnce.current || render.busy) return;
+    renderedOnce.current = true;
+    void actions.renderViewport(
+      Math.max(320, Math.round(size.width)),
+      Math.max(240, Math.round(size.height)),
+    );
+  }, [actions, render.busy, renderedMode, size.height, size.width]);
+
   const scene = state?.project.scene;
   const camera = scene?.objects.find((object) => object.id === scene.activeCamera);
 
   return (
     <div className="viewport" ref={containerRef}>
       <canvas ref={canvasRef} className="viewport-canvas" />
+      {renderedMode && (
+        <div className="viewport-rendered">
+          {render.frame && !render.busy && (
+            <img
+              src={`data:image/png;base64,${render.frame.png}`}
+              alt="Forge3D render of the current scene"
+            />
+          )}
+          <div className="viewport-rendered__bar">
+            <span>
+              {render.busy
+                ? "Rendering with the Forge3D terrain pipeline…"
+                : render.frame
+                  ? `${render.frame.width} × ${render.frame.height} · ${Math.round(render.frame.ms)} ms`
+                  : "No frame rendered yet"}
+            </span>
+            <button
+              type="button"
+              className="button button--small"
+              disabled={render.busy}
+              onClick={() =>
+                void actions.renderViewport(
+                  Math.max(320, Math.round(size.width)),
+                  Math.max(240, Math.round(size.height)),
+                )
+              }
+            >
+              {render.busy ? "Rendering…" : "Re-render"}
+            </button>
+          </div>
+        </div>
+      )}
       <ViewportToolbar />
       <AxisGizmo quaternion={quaternion} onPick={viewAlong} />
       <div className="viewport-overlay viewport-overlay--bottom">
@@ -749,7 +807,10 @@ export function Viewport3D() {
           {camera ? `Active camera: ${camera.name}` : "No active camera"}
         </span>
       </div>
-      {problem && <div className="viewport-problem">{problem}</div>}
+      {problem && !renderedMode && <div className="viewport-problem">{problem}</div>}
+      {renderedMode && render.error && (
+        <div className="viewport-problem">{render.error}</div>
+      )}
     </div>
   );
 }

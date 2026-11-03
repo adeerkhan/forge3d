@@ -41,7 +41,8 @@ sync, diagnostics).
 | **Phase 4 (in progress)** — terrain-first default scene | `Project::starter`, `TerrainSeed` | done |
 | DEM heightfield preview in Studio | `terrain_preview`, `buildTerrainMesh` | done |
 | Viewer launch verified end-to-end | bridge smoke + PNG snapshot | done |
-| Render still from Studio, render settings UI | — | next |
+| **Rendered viewport mode (embedded)** | `studio_render.py`, `render.rs` | done |
+| Render still to disk, render settings UI | — | next |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -166,6 +167,22 @@ npx tsc --noEmit               # UI types
 
 The tool strip also holds **Global/Local** axis orientation and the **Add** menu
 (cube, sphere, plane, import glTF/GLB).
+
+## Solid and Rendered modes (Phase 4)
+
+The Studio viewport has two modes, toggled in the viewport toolbar:
+
+- **Solid** — the Three.js editor view: orbit, gizmos, instant selection.
+- **Rendered** — the Forge3D terrain pipeline, rendered offscreen and displayed
+  in the viewport. Same engine, same shaders, same PBR/POM/shadows/sky settings
+  as the golden-tested renders; no second window.
+
+Implementation: `src-tauri/src/render.rs` keeps one Python process alive
+(`studio_render.py`) — session, renderer, and a generated neutral sky HDR are
+built once, because shader compilation and IBL prefiltering dominate start-up.
+Each frame is a JSON request (camera, sun, size) answered with a base64 PNG. A
+960 × 600 frame takes roughly 5 s on the RTX 5060; that is why Rendered mode
+renders on demand (and on entering the mode) rather than every orbit tick.
 
 ## The default scene is a DEM (Phase 4)
 

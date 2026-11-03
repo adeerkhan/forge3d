@@ -6,6 +6,7 @@
 
 mod commands;
 mod forge3d;
+mod render;
 mod session;
 
 use std::time::Duration;
@@ -13,6 +14,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 use forge3d::Forge3dState;
+use render::RenderState;
 
 pub use session::AppState;
 
@@ -31,6 +33,7 @@ pub fn run() {
             log::info!("recovery snapshots: {}", autosave_dir.display());
             app.manage(AppState::new(autosave_dir));
             app.manage(Forge3dState::new());
+            app.manage(RenderState::new());
             spawn_autosave_loop(app.handle().clone());
             Ok(())
         })
@@ -75,6 +78,9 @@ pub fn run() {
             commands::forge3d_launch,
             commands::forge3d_sync_camera,
             commands::forge3d_stop,
+            commands::render_frame,
+            commands::render_status,
+            commands::render_stop,
             commands::shell_info,
         ])
         .run(tauri::generate_context!())

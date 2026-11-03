@@ -9,6 +9,8 @@ import type {
   Handoff,
   MeshFilePayload,
   RecoveryEntry,
+  RenderFrame,
+  RenderStatus,
   SessionState,
   ShellInfo,
   TerrainPreview,
@@ -70,4 +72,11 @@ export const tauriBridge: StudioBridge = {
   forge3dSyncCamera: () => invoke<Forge3dStatus>("forge3d_sync_camera"),
 
   forge3dStop: () => invoke<Forge3dStatus>("forge3d_stop"),
+
+  renderFrame: (width, height) =>
+    invoke<RenderFrame>("render_frame", { width, height }),
+
+  renderStatus: () => invoke<RenderStatus>("render_status"),
+
+  renderStop: () => invoke<RenderStatus>("render_stop"),
 };

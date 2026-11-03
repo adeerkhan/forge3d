@@ -58,8 +58,9 @@ export function Forge3dWorkspace() {
         <div>
           <h1>Forge3D workspace</h1>
           <p className="hint">
-            The viewer opens as its own window. Studio keeps the project, the
-            canvas, and every edit; nothing here is destructive.
+            Rendered mode is embedded in the Studio viewport. This panel drives
+            the optional for inspection window and reports what Forge3D can take
+            from the project; nothing here is destructive.
           </p>
         </div>
         <div className="forge3d__actions">
@@ -74,7 +75,7 @@ export function Forge3dWorkspace() {
             }
             onClick={() => void actions.openForge3d()}
           >
-            <ImportIcon size={14} /> Open in Forge3D
+            <ImportIcon size={14} /> Open viewer window
           </button>
           <button
             type="button"

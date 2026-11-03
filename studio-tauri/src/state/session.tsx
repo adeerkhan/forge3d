@@ -19,6 +19,8 @@ import type {
   EngineStatus,
   Forge3dStatus,
   Handoff,
+  RenderFrame,
+  ViewportMode,
   PrimitiveShape,
   RecoveryEntry,
   SessionState,
@@ -61,6 +63,12 @@ interface SessionApi {
   engine: EngineStatus | null;
   forgeStatus: Forge3dStatus | null;
   handoff: Handoff | null;
+  /** Last embedded-renderer frame (Rendered viewport mode). */
+  render: {
+    frame: RenderFrame | null;
+    busy: boolean;
+    error: string | null;
+  };
   actions: {
     newProject(): Promise<void>;
     openProject(): Promise<void>;
@@ -79,6 +87,8 @@ interface SessionApi {
     openForge3d(): Promise<void>;
     syncForge3dCamera(): Promise<void>;
     stopForge3d(): Promise<void>;
+    setViewportMode(mode: ViewportMode): Promise<void>;
+    renderViewport(width: number, height: number): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;
@@ -101,6 +111,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [forgeStatus, setForgeStatus] = useState<Forge3dStatus | null>(null);
   const [handoff, setHandoff] = useState<Handoff | null>(null);
+  const [render, setRender] = useState<{ frame: RenderFrame | null; busy: boolean; error: string | null }>({
+    frame: null,
+    busy: false,
+    error: null,
+  });
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((message: string) => {
@@ -337,6 +352,35 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return () => window.clearInterval(timer);
   }, [forgeStatus?.running]);
 
+  const renderViewport = useCallback(
+    async (width: number, height: number) => {
+      setRender((current) => ({ ...current, busy: true, error: null }));
+      try {
+        const frame = await bridge.renderFrame(width, height);
+        setRender({ frame, busy: false, error: null });
+      } catch (cause) {
+        setRender({
+          frame: null,
+          busy: false,
+          error: cause instanceof Error ? cause.message : String(cause),
+        });
+      }
+    },
+    [],
+  );
+
+  const setViewportMode = useCallback(
+    async (mode: ViewportMode) => {
+      const project = state?.project;
+      if (!project) return;
+      await applyCommand({
+        type: "setViewport",
+        viewport: { ...project.viewport, mode },
+      });
+    },
+    [applyCommand, state],
+  );
+
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
       async newProject() {
@@ -452,6 +496,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       openForge3d,
       syncForge3dCamera,
       stopForge3d,
+      setViewportMode,
+      renderViewport,
 
       async restoreRecovery(id) {
         setBusy(true);
@@ -492,7 +538,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       openForge3d,
       refreshForge3d,
       refreshRecovery,
+      renderViewport,
       select,
+      setViewportMode,
       state,
       stopForge3d,
       syncForge3dCamera,
@@ -517,6 +565,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     engine,
     forgeStatus,
     handoff,
+    render,
     actions,
   };
 

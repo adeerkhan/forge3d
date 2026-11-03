@@ -19,6 +19,8 @@ import type {
   RecoveryEntry,
   SessionState,
   MeshFilePayload,
+  RenderFrame,
+  RenderStatus,
   ShellInfo,
   TerrainPreview,
 } from "./types";
@@ -52,6 +54,11 @@ export interface StudioBridge {
   forge3dLaunch(width?: number, height?: number): Promise<Forge3dStatus>;
   forge3dSyncCamera(): Promise<Forge3dStatus>;
   forge3dStop(): Promise<Forge3dStatus>;
+
+  // Embedded renderer (Rendered viewport mode)
+  renderFrame(width: number, height: number): Promise<RenderFrame>;
+  renderStatus(): Promise<RenderStatus>;
+  renderStop(): Promise<RenderStatus>;
 }
 
 export interface OpenResult {

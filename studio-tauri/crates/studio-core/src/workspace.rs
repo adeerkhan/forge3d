@@ -129,6 +129,10 @@ pub struct TerrainHandoff {
     pub z_scale: f32,
     /// DEM pixel size, when known (diagnostics only).
     pub dimensions: Option<[u32; 2]>,
+    /// Viewer-basis footprint in metres, when georeferenced.
+    pub world_span_xz: Option<[f64; 2]>,
+    /// Elevation range in metres, `[min, max]`.
+    pub elevation_range: Option<[f32; 2]>,
 }
 
 /// Sun direction in the viewer's terms (`lit_sun`).
@@ -418,6 +422,8 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
         path: asset.path.clone(),
         z_scale: terrain.z_scale,
         dimensions: terrain.dimensions,
+        world_span_xz: terrain.world_span_xz,
+        elevation_range: terrain.elevation_range,
     })
 }
 

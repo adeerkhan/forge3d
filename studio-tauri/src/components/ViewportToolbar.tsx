@@ -29,8 +29,18 @@ const PRIMITIVES: Array<{ shape: PrimitiveShape; label: string }> = [
 
 /** Tool strip floating over the viewport: the Blender-style tool palette. */
 export function ViewportToolbar() {
-  const { state, actions, tool, setTool, space, setSpace, cameraView, setCameraView, bridgeKind } =
-    useSession();
+  const {
+    state,
+    actions,
+    tool,
+    setTool,
+    space,
+    setSpace,
+    cameraView,
+    setCameraView,
+    bridgeKind,
+    render,
+  } = useSession();
   const [addOpen, setAddOpen] = useState(false);
   const addRef = useRef<HTMLDivElement>(null);
 
@@ -50,6 +60,7 @@ export function ViewportToolbar() {
     };
   }, [addOpen]);
 
+  const mode = state?.project.viewport.mode ?? "solid";
   const selection = state?.project.selection ?? [];
   const hasSelection = selection.length > 0;
   const canTransform = hasSelection;
@@ -165,6 +176,39 @@ export function ViewportToolbar() {
           <TrashIcon size={15} />
         </button>
       </div>
+
+      <span className="toolbar-divider" />
+
+      <div className="toolbar-segment" role="group" aria-label="Viewport mode">
+        <button
+          type="button"
+          className={`segment-button ${mode === "solid" ? "is-active" : ""}`}
+          title="Solid mode — fast editing"
+          onClick={() => void actions.setViewportMode("solid")}
+        >
+          Solid
+        </button>
+        <button
+          type="button"
+          className={`segment-button ${mode === "rendered" ? "is-active" : ""}`}
+          title="Rendered mode — Forge3D PBR terrain pipeline"
+          onClick={() => void actions.setViewportMode("rendered")}
+        >
+          Rendered
+        </button>
+      </div>
+
+      {mode === "rendered" && (
+        <button
+          type="button"
+          className="tool-button tool-button--wide"
+          disabled={render.busy}
+          title="Render the current view again"
+          onClick={() => void actions.renderViewport(960, 600)}
+        >
+          {render.busy ? "Rendering…" : "Re-render"}
+        </button>
+      )}
 
       <span className="toolbar-divider" />
 
