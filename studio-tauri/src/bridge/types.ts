@@ -40,7 +40,7 @@ export interface LightObject {
   intensity: number;
 }
 
-export type AssetKind = "gltf" | "glb";
+export type AssetKind = "gltf" | "glb" | "dem" | "orthophoto";
 
 /** An imported source file. Stored relative to the project where possible. */
 export interface Asset {
@@ -55,9 +55,23 @@ export type MeshSource =
   | { type: "primitive"; primitive: Primitive }
   | { type: "gltf"; asset: string; node: string | null };
 
+/** A DEM-backed terrain object (Forge3D-native). */
+export interface TerrainObject {
+  asset: string;
+  zScale: number;
+  albedo: string | null;
+  dimensions: [number, number] | null;
+  /** Viewer-basis world origin `[mapX, -mapY]`, metres. */
+  worldOriginXz: [number, number] | null;
+  /** Viewer-basis world span, metres (the viewer's terrain world units). */
+  worldSpanXz: [number, number] | null;
+  elevationRange: [number, number] | null;
+}
+
 /** Internally tagged enum: the payload is flattened next to `type`. */
 export type ObjectKind =
   | { type: "mesh"; source: MeshSource }
+  | ({ type: "terrain" } & TerrainObject)
   | ({ type: "camera" } & CameraObject)
   | ({ type: "light" } & LightObject);
 
@@ -202,6 +216,36 @@ export interface ForgeAsset {
 }
 
 /** What the Forge3D workspace receives for one project revision. */
+/** A DEM sampled for the Studio viewport (heights are row-major, bottom-up). */
+export interface TerrainPreview {
+  ok: boolean;
+  width: number;
+  height: number;
+  minElevation: number;
+  maxElevation: number;
+  extentMeters: [number, number];
+  originXz: [number, number];
+  spanXz: [number, number];
+  resolution: number;
+  heights: number[];
+}
+
+export interface TerrainHandoff {
+  assetId: string;
+  name: string;
+  path: string;
+  zScale: number;
+  dimensions: [number, number] | null;
+}
+
+export interface TerrainCamera {
+  phiDeg: number;
+  thetaDeg: number;
+  fovDeg: number;
+  radius: number | null;
+  target: [number, number, number] | null;
+}
+
 export interface Handoff {
   projectId: string;
   sceneId: string;
@@ -210,6 +254,8 @@ export interface Handoff {
   idempotencyKey: string;
   report: CapabilityReport;
   camera: CameraSync | null;
+  terrainCamera: TerrainCamera | null;
+  terrain: TerrainHandoff | null;
   assets: ForgeAsset[];
   sun: SunAngles | null;
 }
@@ -283,6 +329,8 @@ export function objectKindLabel(kind: ObjectKind): string {
       return kind.source.type === "primitive"
         ? kind.source.primitive.type
         : "imported";
+    case "terrain":
+      return "terrain";
     case "camera":
       return "camera";
     case "light":

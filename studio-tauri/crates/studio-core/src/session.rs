@@ -14,7 +14,7 @@ use crate::editor::{Applied, Editor, SessionState};
 use crate::error::StudioError;
 use crate::ids::ObjectId;
 use crate::persist::{load, save_atomic};
-use crate::project::{Project, UNTITLED};
+use crate::project::{Project, TerrainSeed, UNTITLED};
 
 /// How often the desktop shell considers writing a recovery snapshot.
 pub const AUTOSAVE_INTERVAL_SECONDS: u64 = 30;
@@ -67,7 +67,16 @@ impl Session {
 
     /// Start a new unsaved project, discarding the current session.
     pub fn new_project(&mut self, name: Option<String>) -> SessionState {
-        let project = Project::new(name.unwrap_or_else(|| UNTITLED.to_owned()));
+        self.new_project_seeded(name, None)
+    }
+
+    /// Start a new project with a terrain starter when a DEM was resolved.
+    pub fn new_project_seeded(
+        &mut self,
+        name: Option<String>,
+        terrain: Option<TerrainSeed>,
+    ) -> SessionState {
+        let project = Project::starter(name.unwrap_or_else(|| UNTITLED.to_owned()), terrain);
         self.begin(Editor::new(project))
     }
 

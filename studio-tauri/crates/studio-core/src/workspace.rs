@@ -98,6 +98,39 @@ pub struct CameraSync {
     pub fov_deg: f32,
 }
 
+/// Orbit camera for a terrain scene.
+///
+/// The viewer frames terrain with `set_terrain_camera(phi, theta, radius)` whose
+/// radius is in the viewer's own terrain world units. Studio therefore transfers
+/// only the *direction* (`phi`/`theta`) and the field of view; the viewer keeps
+/// its radius and centre, which is what makes a 4 km DEM open framed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainCamera {
+    /// Azimuth around +Y (degrees).
+    pub phi_deg: f32,
+    /// Polar angle down from +Y (0 = straight above, 90 = horizon).
+    pub theta_deg: f32,
+    pub fov_deg: f32,
+    /// Distance in the viewer's terrain world units (metres for georeferenced
+    /// DEMs, pixels for local ones).
+    pub radius: Option<f64>,
+    /// Orbit centre in viewer world coordinates.
+    pub target: Option<[f64; 3]>,
+}
+
+/// A DEM handed to the viewer's terrain pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainHandoff {
+    pub asset_id: AssetId,
+    pub name: String,
+    pub path: String,
+    pub z_scale: f32,
+    /// DEM pixel size, when known (diagnostics only).
+    pub dimensions: Option<[u32; 2]>,
+}
+
 /// Sun direction in the viewer's terms (`lit_sun`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,7 +163,12 @@ pub struct Handoff {
     /// handoff is a no-op rather than a second viewer window.
     pub idempotency_key: String,
     pub report: CapabilityReport,
+    /// Look-at camera for mesh scenes (`cam_lookat`).
     pub camera: Option<CameraSync>,
+    /// Orbit camera for terrain scenes (`set_terrain_camera`).
+    pub terrain_camera: Option<TerrainCamera>,
+    /// The DEM the viewer should load, when the scene has terrain.
+    pub terrain: Option<TerrainHandoff>,
     pub assets: Vec<ForgeAsset>,
     pub sun: Option<SunAngles>,
 }
@@ -173,6 +211,22 @@ pub fn capability_report(project: &Project, target: Workspace) -> CapabilityRepo
                     )
                 }
             },
+
+            (ObjectKind::Terrain(terrain), Workspace::Forge3d) => {
+                if project.asset(terrain.asset).is_some() {
+                    (
+                        CapabilityLevel::Full,
+                        "The viewer loads this GeoTIFF DEM natively and renders it with its \
+                         terrain pipeline."
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        CapabilityLevel::Unsupported,
+                        "The DEM asset is missing from the project.".to_owned(),
+                    )
+                }
+            }
 
             (ObjectKind::Camera(camera), Workspace::Forge3d) => (
                 CapabilityLevel::Full,
@@ -222,6 +276,18 @@ pub fn capability_report(project: &Project, target: Workspace) -> CapabilityRepo
             degradations.push(format!(
                 "{point_lights} point light{} cannot be transferred.",
                 if point_lights == 1 { "" } else { "s" }
+            ));
+        }
+        let terrains = project
+            .scene
+            .objects
+            .iter()
+            .filter(|object| object.is_terrain())
+            .count();
+        if terrains > 1 {
+            degradations.push(format!(
+                "The viewer renders one terrain at a time; {terrains} are in this scene, so \
+                 only the first will be shown."
             ));
         }
         let gltf_assets = project
@@ -334,9 +400,61 @@ pub fn handoff(project: &Project, revision: u64, target: Workspace) -> Handoff {
         ),
         report,
         camera: camera_sync(project),
+        terrain_camera: terrain_camera(project),
+        terrain: terrain_handoff(project),
         assets,
         sun: sun_angles(project),
     }
+}
+
+/// The scene's DEM in viewer terms.
+pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
+    let object = project.terrain_object()?;
+    let terrain = object.terrain()?;
+    let asset = project.asset(terrain.asset)?;
+    Some(TerrainHandoff {
+        asset_id: asset.id,
+        name: asset.name.clone(),
+        path: asset.path.clone(),
+        z_scale: terrain.z_scale,
+        dimensions: terrain.dimensions,
+    })
+}
+
+/// Studio's camera expressed as the viewer's terrain orbit.
+pub fn terrain_camera(project: &Project) -> Option<TerrainCamera> {
+    let terrain = project.terrain_object()?;
+    let camera = project.scene.camera()?;
+    let ObjectKind::Camera(camera_object) = &camera.kind else {
+        return None;
+    };
+
+    // The viewer places the eye at target + r * (sinθcosφ, cosθ, sinθsinφ).
+    let offset = Vec3::new(
+        camera.transform.translation.x - terrain.transform.translation.x,
+        camera.transform.translation.y - terrain.transform.translation.y,
+        camera.transform.translation.z - terrain.transform.translation.z,
+    );
+    let length = (offset.x * offset.x + offset.y * offset.y + offset.z * offset.z).sqrt();
+    if length < 1e-3 {
+        return None;
+    }
+    let up = offset.y / length;
+    let theta_deg = up.clamp(-1.0, 1.0).acos().to_degrees();
+    let mut phi_deg = offset.z.atan2(offset.x).to_degrees();
+    if phi_deg < 0.0 {
+        phi_deg += 360.0;
+    }
+    let framing = terrain
+        .terrain()
+        .and_then(|terrain| terrain.viewer_framing());
+    Some(TerrainCamera {
+        phi_deg,
+        theta_deg,
+        fov_deg: camera_object.fov_deg,
+        radius: framing.map(|(radius, _)| radius),
+        target: framing.map(|(_, target)| target),
+    })
 }
 
 fn used_assets(project: &Project) -> Vec<ForgeAsset> {

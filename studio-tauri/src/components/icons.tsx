@@ -146,6 +146,13 @@ export const RestoreIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const MountainIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M3 19h18L14.5 7l-3.2 5.2L9 9.5 3 19z" />
+    <path d="M12.6 9.6l1.9-2.6 1.6 3" />
+  </Icon>
+);
+
 export const CursorIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M5 3l6.5 16 2.2-6.1L20 10.5 5 3z" />
@@ -197,10 +204,12 @@ export const ImportIcon = (props: IconProps) => (
   </Icon>
 );
 
-export const objectIcon = (type: "mesh" | "camera" | "light") => {
+export const objectIcon = (type: "mesh" | "terrain" | "camera" | "light") => {
   switch (type) {
     case "mesh":
       return CubeIcon;
+    case "terrain":
+      return MountainIcon;
     case "camera":
       return CameraIcon;
     case "light":

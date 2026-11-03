@@ -14,7 +14,7 @@ use crate::math::{Transform, Vec3};
 use crate::now_unix_ms;
 use crate::scene::{
     validate_name, CameraObject, LightKind, LightObject, MeshObject, ObjectKind, Primitive, Scene,
-    SceneObject,
+    SceneObject, TerrainObject,
 };
 
 /// Format tag written into every project file.
@@ -23,9 +23,9 @@ pub const FORMAT: &str = "studio3d";
 /// Schema version written by this build.
 ///
 /// v1 carried `kind.primitive` on meshes; v2 adds imported glTF/GLB meshes
-/// (`kind.source`) and the project asset registry. v1 files are migrated on
-/// load — see [`crate::persist::migrate`].
-pub const SCHEMA_VERSION: u32 = 2;
+/// (`kind.source`) and the project asset registry; v3 adds DEM-backed terrain
+/// objects. Earlier files are migrated on load — see [`crate::persist::migrate`].
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Default project name for `File → New`.
 pub const UNTITLED: &str = "Untitled";
@@ -129,10 +129,66 @@ impl Project {
         }
     }
 
+    /// A starter scene for a real project: a terrain from `seed` when one is
+    /// available, otherwise the primitive starter.
+    ///
+    /// The shell resolves the DEM (a bundled Bryce Canyon sample by default) and
+    /// hands it in, so this crate stays free of file-system discovery.
+    pub fn starter(name: impl Into<String>, seed: Option<TerrainSeed>) -> Self {
+        let mut project = Self::new(name);
+        let Some(seed) = seed else {
+            return project;
+        };
+        let asset = Asset {
+            id: new_id(),
+            name: seed.name,
+            path: seed.path,
+            kind: AssetKind::Dem,
+            byte_size: seed.byte_size,
+        };
+        project.assets.push(asset.clone());
+        let mut terrain = TerrainObject::new(asset.id);
+        if let (Some(dimensions), Some(range)) = (seed.dimensions, seed.elevation_range) {
+            terrain =
+                terrain.with_dem_info(dimensions, range, seed.world_origin_xz, seed.world_span_xz);
+        }
+        project.scene.objects.retain(|object| !object.is_mesh());
+        project.scene.objects.insert(
+            0,
+            SceneObject {
+                id: new_id(),
+                name: "Bryce Canyon".to_owned(),
+                parent: None,
+                transform: Transform::default(),
+                visible: true,
+                locked: false,
+                kind: ObjectKind::Terrain(terrain),
+            },
+        );
+        // Frame the terrain: the default camera sits close to a 2-unit cube,
+        // which would be inside a kilometre-scale DEM.
+        if let Some(camera) = project
+            .scene
+            .objects
+            .iter_mut()
+            .find(|object| object.is_camera())
+        {
+            camera.transform.translation = Vec3::new(11.0, 7.5, 13.0);
+            camera.transform.rotation_deg = Vec3::new(-24.0, 40.0, 0.0);
+        }
+        project.touch();
+        project
+    }
+
     /// Bump the modification timestamp. Called by the editor after every
     /// applied command, so "modified" is meaningful in a saved file.
     pub fn touch(&mut self) {
         self.updated_unix_ms = now_unix_ms();
+    }
+
+    /// The scene's terrain, if any (the viewer renders one).
+    pub fn terrain_object(&self) -> Option<&SceneObject> {
+        self.scene.objects.iter().find(|object| object.is_terrain())
     }
 
     /// Assets referenced by at least one object, in registry order.
@@ -142,6 +198,16 @@ impl Project {
             if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
                 if !used.contains(&asset) {
                     used.push(asset);
+                }
+            }
+            if let Some(terrain) = object.terrain() {
+                if !used.contains(&terrain.asset) {
+                    used.push(terrain.asset);
+                }
+                if let Some(albedo) = terrain.albedo {
+                    if !used.contains(&albedo) {
+                        used.push(albedo);
+                    }
                 }
             }
         }
@@ -178,7 +244,7 @@ impl Project {
             }
             asset_ids.push(asset.id);
         }
-        // A mesh may only reference an asset the project actually carries;
+        // A mesh or terrain may only reference an asset the project carries;
         // dangling references are what "missing asset" panics are made of.
         for object in &self.scene.objects {
             if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
@@ -187,6 +253,28 @@ impl Project {
                         "object {:?} references missing asset {asset}",
                         object.name
                     ));
+                }
+            }
+            if let Some(terrain) = object.terrain() {
+                let Some(asset) = self.asset(terrain.asset) else {
+                    return Err(format!(
+                        "object {:?} references missing terrain asset {}",
+                        object.name, terrain.asset
+                    ));
+                };
+                if asset.kind != AssetKind::Dem {
+                    return Err(format!(
+                        "object {:?} uses asset {:?} as terrain, but it is {:?}",
+                        object.name, asset.name, asset.kind
+                    ));
+                }
+                if let Some(albedo) = terrain.albedo {
+                    if !asset_ids.contains(&albedo) {
+                        return Err(format!(
+                            "object {:?} references missing albedo asset {albedo}",
+                            object.name
+                        ));
+                    }
                 }
             }
         }
@@ -247,6 +335,26 @@ impl ViewportMode {
             ViewportMode::Rendered => "Rendered",
         }
     }
+}
+
+/// A DEM the shell resolved on disk, used to seed a new project.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainSeed {
+    pub name: String,
+    pub path: String,
+    pub byte_size: u64,
+    /// Measured DEM size, when the shell sampled it.
+    #[serde(default)]
+    pub dimensions: Option<[u32; 2]>,
+    #[serde(default)]
+    pub elevation_range: Option<[f32; 2]>,
+    /// Viewer-basis `[map X, -map Y]` origin in metres.
+    #[serde(default)]
+    pub world_origin_xz: Option<[f64; 2]>,
+    /// Viewer-basis span in metres.
+    #[serde(default)]
+    pub world_span_xz: Option<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -323,6 +431,10 @@ impl Asset {
 pub enum AssetKind {
     Gltf,
     Glb,
+    /// A GeoTIFF elevation model (single band, float or integer).
+    Dem,
+    /// An orthophoto / albedo raster draped over terrain.
+    Orthophoto,
 }
 
 impl AssetKind {
@@ -335,6 +447,7 @@ impl AssetKind {
         {
             Some("gltf") => Some(AssetKind::Gltf),
             Some("glb") => Some(AssetKind::Glb),
+            Some("tif" | "tiff") => Some(AssetKind::Dem),
             _ => None,
         }
     }
@@ -343,7 +456,13 @@ impl AssetKind {
         match self {
             AssetKind::Gltf => "gltf",
             AssetKind::Glb => "glb",
+            AssetKind::Dem => "tif",
+            AssetKind::Orthophoto => "tif",
         }
+    }
+
+    pub fn is_raster(self) -> bool {
+        matches!(self, AssetKind::Dem | AssetKind::Orthophoto)
     }
 }
 

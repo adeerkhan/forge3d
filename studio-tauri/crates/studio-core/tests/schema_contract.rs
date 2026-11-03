@@ -46,7 +46,7 @@ fn project_document_key_shape_is_stable() {
         ],
     );
     assert_eq!(value["format"], "studio3d");
-    assert_eq!(value["schemaVersion"], 2);
+    assert_eq!(value["schemaVersion"], studio_core::SCHEMA_VERSION);
     assert_eq!(value["workspace"], "studio");
 
     expect_keys(&value["viewport"], &["mode", "gridVisible"]);

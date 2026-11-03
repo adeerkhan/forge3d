@@ -14,6 +14,7 @@ import type {
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
+import type { TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
 
 const DEG = Math.PI / 180;
@@ -138,10 +139,63 @@ function buildLightGizmo(light: LightObject): THREE.Group {
   return group;
 }
 
+const TERRAIN_VIEW_SIZE = 12;
+
+/**
+ * A displaced grid from a sampled DEM.
+ *
+ * The Studio viewport is a preview: this is real elevation data at reduced
+ * resolution, scaled so the scene fits the viewport. Forge3D still receives the
+ * original GeoTIFF and renders the full-resolution surface.
+ */
+function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
+  const resolution = preview.resolution;
+  const geometry = new THREE.PlaneGeometry(1, 1, resolution - 1, resolution - 1);
+  geometry.rotateX(-Math.PI / 2);
+
+  const [spanX, spanZ] = preview.spanXz;
+  const horizontal = TERRAIN_VIEW_SIZE / Math.max(spanX, spanZ);
+  const [minElevation, maxElevation] = [preview.minElevation, preview.maxElevation];
+  const relief = Math.max(1e-3, maxElevation - minElevation);
+
+  const position = geometry.attributes.position as THREE.BufferAttribute;
+  const colours = new Float32Array(position.count * 3);
+  const low = new THREE.Color(0x4a5545);
+  const high = new THREE.Color(0xc4cbd2);
+
+  for (let index = 0; index < position.count; index += 1) {
+    const row = Math.floor(index / resolution);
+    const column = index % resolution;
+    const elevation = preview.heights[row * resolution + column] ?? minElevation;
+    const normalized = (elevation - minElevation) / relief;
+    position.setY(index, (elevation - minElevation) * zScale * horizontal);
+    const colour = low.clone().lerp(high, Math.min(1, Math.max(0, normalized)));
+    colours[index * 3] = colour.r;
+    colours[index * 3 + 1] = colour.g;
+    colours[index * 3 + 2] = colour.b;
+  }
+
+  geometry.setAttribute("color", new THREE.BufferAttribute(colours, 3));
+  geometry.computeVertexNormals();
+  const material = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.95,
+    metalness: 0.0,
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geometry, material);
+  // The grid is built in unit space; the footprint is what gives it metres.
+  mesh.scale.set(spanX * horizontal, 1, spanZ * horizontal);
+  mesh.userData.owned = true;
+  return mesh;
+}
+
 function contentSignature(object: SceneObject): string {
   switch (object.kind.type) {
     case "mesh":
       return `mesh:${JSON.stringify(object.kind.source)}`;
+    case "terrain":
+      return `terrain:${object.kind.asset}:${object.kind.zScale}`;
     case "camera":
       return `camera:${object.kind.fovDeg}`;
     case "light":
@@ -217,6 +271,18 @@ export function Viewport3D() {
     fov: number;
   } | null>(null);
   const inCameraView = useRef(false);
+
+  const terrainCache = useRef(new Map<string, Promise<TerrainPreview>>());
+  const readTerrain = useCallback((path: string): Promise<TerrainPreview> => {
+    const cache = terrainCache.current;
+    let pending = cache.get(path);
+    if (!pending) {
+      pending = bridge.terrainPreview(path, 96);
+      cache.set(path, pending);
+      pending.catch(() => cache.delete(path));
+    }
+    return pending;
+  }, []);
 
   const readMesh = useCallback(
     async (path: string): Promise<ArrayBuffer> => {
@@ -494,6 +560,30 @@ export function Viewport3D() {
               );
             });
         }
+      } else if (object.kind.type === "terrain") {
+        const terrainKind = object.kind;
+        const asset = project.assets.find((entry) => entry.id === terrainKind.asset);
+        if (!asset) {
+          setProblem(
+            `Object "${object.name}" references a missing DEM. Relinking arrives in Phase 5.`,
+          );
+          continue;
+        }
+        group.add(buildLoadingPlaceholder());
+        const expected = signature;
+        const zScale = terrainKind.zScale;
+        readTerrain(asset.path)
+          .then((preview) => {
+            if (group.userData.signature !== expected) return;
+            disposeChildren(group);
+            group.add(buildTerrainMesh(preview, zScale));
+            setProblem(null);
+          })
+          .catch((cause) => {
+            setProblem(
+              `Could not sample ${asset.name}: ${cause instanceof Error ? cause.message : cause}`,
+            );
+          });
       } else if (object.kind.type === "camera") {
         group.add(buildCameraGizmo(object.kind));
       } else {
@@ -588,7 +678,7 @@ export function Viewport3D() {
       runtime.gizmo.setSpace(space);
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
-  }, [cameraView, readMesh, space, state, tool]);
+  }, [cameraView, readMesh, readTerrain, space, state, tool]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;

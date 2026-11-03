@@ -25,6 +25,65 @@ use studio_core::AssetKind;
 const HELPER_SCRIPT: &str = include_str!("studio_bridge.py");
 
 const MAX_DIAGNOSTICS: usize = 300;
+
+/// Bundled DEM used as the default scene while Studio's own terrain preview is
+/// a sample. Overridable with `FORGE3D_STUDIO_DEM`.
+const DEFAULT_DEM_RELATIVE: &str = "assets/tif/Bryce_Canyon_1024.tif";
+
+/// Sampling script for the Studio heightfield preview (rasterio is already a
+/// dependency of the engine's terrain workflow).
+const PREVIEW_SCRIPT: &str = r#"
+import json, sys
+import numpy as np
+
+path = sys.argv[1]
+resolution = max(8, min(256, int(sys.argv[2])))
+try:
+    import rasterio
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": "rasterio is unavailable: %s" % (exc,)}))
+    raise SystemExit(0)
+
+try:
+    with rasterio.open(path) as src:
+        data = src.read(1).astype("float64")
+        height, width = data.shape
+        ys = np.linspace(0, height, resolution + 1).astype(int)
+        xs = np.linspace(0, width, resolution + 1).astype(int)
+        out = np.empty((resolution, resolution), dtype="float64")
+        for j in range(resolution):
+            for i in range(resolution):
+                block = data[ys[j]:max(ys[j] + 1, ys[j + 1]), xs[i]:max(xs[i] + 1, xs[i + 1])]
+                out[j, i] = float(np.nanmean(block)) if block.size else 0.0
+        bounds = src.bounds
+        transform = src.transform
+        a, b, c, d, e, f = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
+        # Mirror the viewer's footprint: origin (c, -f), span (|a|·w, |e|·h).
+        # Without a usable transform it falls back to DEM pixels at the origin.
+        if all(isinstance(v, (int, float)) and v == v for v in (a, b, c, d, e, f)):
+            origin_xz = [float(c), float(-f)]
+            span_xz = [abs(float(a)) * width, abs(float(e)) * height]
+        else:
+            origin_xz = [0.0, 0.0]
+            span_xz = [float(width), float(height)]
+        payload = {
+            "ok": True,
+            "width": int(width),
+            "height": int(height),
+            "minElevation": float(np.nanmin(data)),
+            "maxElevation": float(np.nanmax(data)),
+            "extentMeters": [float(bounds.right - bounds.left), float(bounds.top - bounds.bottom)],
+            "originXz": origin_xz,
+            "spanXz": span_xz,
+            "resolution": resolution,
+            "heights": [round(float(value), 2) for value in out.ravel()],
+        }
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": str(exc)}))
+    raise SystemExit(0)
+
+print(json.dumps(payload))
+"#;
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -96,6 +155,8 @@ pub struct Forge3dState {
     engine: Mutex<Option<EngineStatus>>,
     inner: Arc<Mutex<Inner>>,
     log: Arc<Mutex<VecDeque<String>>>,
+    /// Resolved default DEM plus its measured metadata (sampling is not free).
+    terrain_cache: Mutex<Option<(String, studio_core::TerrainSeed)>>,
 }
 
 impl Default for Forge3dState {
@@ -110,6 +171,7 @@ impl Forge3dState {
             engine: Mutex::new(None),
             inner: Arc::new(Mutex::new(Inner::default())),
             log: Arc::new(Mutex::new(VecDeque::new())),
+            terrain_cache: Mutex::new(None),
         }
     }
 
@@ -121,13 +183,10 @@ impl Forge3dState {
             }
         }
 
-        let mut last = EngineStatus {
-            available: false,
-            python: "python3".to_owned(),
-            package_version: None,
-            viewer_binary: None,
-            detail: "no Python interpreter was found".to_owned(),
-        };
+        // Keep the *most informative* failure, not the last one: an interpreter
+        // that imports forge3d but lacks the viewer binary is far more useful
+        // than "python3: no module named forge3d".
+        let mut best: Option<EngineStatus> = None;
 
         for python in interpreter_candidates() {
             match probe_interpreter(&python) {
@@ -137,22 +196,109 @@ impl Forge3dState {
                     }
                     return status;
                 }
-                Ok(status) => last = status,
+                Ok(status) => {
+                    let status_score = status.package_version.is_some();
+                    let best_score = best
+                        .as_ref()
+                        .map(|current| current.package_version.is_some())
+                        .unwrap_or(false);
+                    if best.is_none() || (status_score && !best_score) {
+                        best = Some(status);
+                    }
+                }
                 Err(detail) => {
-                    last = EngineStatus {
-                        python: python.clone(),
-                        detail,
-                        ..last
+                    if best.is_none() {
+                        best = Some(EngineStatus {
+                            available: false,
+                            python: python.clone(),
+                            package_version: None,
+                            viewer_binary: None,
+                            detail,
+                        });
                     }
                 }
             }
         }
+
+        let last = best.unwrap_or(EngineStatus {
+            available: false,
+            python: "python3".to_owned(),
+            package_version: None,
+            viewer_binary: None,
+            detail: "no Python interpreter was found".to_owned(),
+        });
 
         push_log(&self.log, format!("engine probe: {}", last.detail));
         if let Ok(mut guard) = self.engine.lock() {
             *guard = Some(last.clone());
         }
         last
+    }
+
+    /// The default scene's DEM, with its measured dimensions and elevation
+    /// range so the project can reproduce the viewer's framing without Python.
+    ///
+    /// Sampling costs a Python start-up; the result is cached per path.
+    pub fn default_terrain_seed(&self) -> Option<studio_core::TerrainSeed> {
+        let path = resolve_default_dem()?;
+        let path_text = path.to_string_lossy().into_owned();
+
+        if let Ok(cache) = self.terrain_cache.lock() {
+            if let Some((cached_path, seed)) = cache.as_ref() {
+                if cached_path == &path_text {
+                    return Some(seed.clone());
+                }
+            }
+        }
+
+        let metadata = std::fs::metadata(&path).ok()?;
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "terrain.tif".to_owned());
+        let mut seed = studio_core::TerrainSeed {
+            name,
+            path: path_text.clone(),
+            byte_size: metadata.len(),
+            dimensions: None,
+            elevation_range: None,
+            world_origin_xz: None,
+            world_span_xz: None,
+        };
+
+        let python = self.probe(false).python;
+        match sample_terrain(&python, &path_text, 48) {
+            Ok(value) => {
+                let width = value.get("width").and_then(|v| v.as_u64());
+                let height = value.get("height").and_then(|v| v.as_u64());
+                if let (Some(width), Some(height)) = (width, height) {
+                    seed.dimensions = Some([width as u32, height as u32]);
+                }
+                let low = value.get("minElevation").and_then(|v| v.as_f64());
+                let high = value.get("maxElevation").and_then(|v| v.as_f64());
+                if let (Some(low), Some(high)) = (low, high) {
+                    seed.elevation_range = Some([low as f32, high as f32]);
+                }
+                let origin = value.get("originXz").and_then(|v| v.as_array());
+                let span = value.get("spanXz").and_then(|v| v.as_array());
+                if let (Some(origin), Some(span)) = (origin, span) {
+                    let pair = |values: &Vec<serde_json::Value>| -> Option<[f64; 2]> {
+                        Some([values.first()?.as_f64()?, values.get(1)?.as_f64()?])
+                    };
+                    seed.world_origin_xz = pair(origin);
+                    seed.world_span_xz = pair(span);
+                }
+            }
+            Err(error) => push_log(
+                &self.log,
+                format!("DEM metadata unavailable ({error}); the viewer will keep its own framing"),
+            ),
+        }
+
+        if let Ok(mut cache) = self.terrain_cache.lock() {
+            *cache = Some((path_text, seed.clone()));
+        }
+        Some(seed)
     }
 
     pub fn status(&self) -> Forge3dStatus {
@@ -270,7 +416,9 @@ impl Forge3dState {
             "height": height,
             "fovDeg": handoff.camera.map(|camera| camera.fov_deg).unwrap_or(60.0),
             "gltfPath": gltf,
-            "timeout": 30,
+            "terrainPath": handoff.terrain.as_ref().map(|terrain| terrain.path.clone()),
+            "zScale": handoff.terrain.as_ref().map(|terrain| terrain.z_scale),
+            "timeout": 45,
         });
         writeln!(stdin, "{config}")
             .map_err(|error| format!("could not configure the bridge: {error}"))?;
@@ -324,7 +472,51 @@ impl Forge3dState {
     }
 
     /// Send camera/field-of-view/sun state to the running viewer.
+    ///
+    /// Terrain scenes orbit rather than look at: the viewer keeps its own radius
+    /// and centre (that is what frames a 4 km DEM), and Studio transfers the
+    /// direction. Non-terrain scenes use `cam_lookat`.
     pub fn sync_camera(&self, handoff: &Handoff) -> Result<(), String> {
+        if handoff.terrain.is_some() {
+            if let Some(orbit) = handoff.terrain_camera {
+                match (orbit.radius, orbit.target) {
+                    (Some(radius), Some(target)) => {
+                        self.send_payload(json!({
+                            "cmd": "set_terrain_camera",
+                            "phi_deg": orbit.phi_deg,
+                            "theta_deg": orbit.theta_deg,
+                            "radius": radius,
+                            "fov_deg": orbit.fov_deg,
+                            "target": target,
+                        }))?;
+                    }
+                    _ => push_log(
+                        &self.log,
+                        "DEM dimensions unknown; the viewer keeps its own terrain framing"
+                            .to_owned(),
+                    ),
+                }
+            }
+            if let Some(sun) = handoff.sun {
+                self.send_payload(json!({
+                    "cmd": "set_terrain_sun",
+                    "azimuth_deg": sun.azimuth_deg,
+                    "elevation_deg": sun.elevation_deg,
+                    "intensity": sun.intensity,
+                    "source": "manual_angles",
+                }))?;
+            }
+            if let Some(terrain) = handoff.terrain.as_ref() {
+                if (terrain.z_scale - 1.0).abs() > f32::EPSILON {
+                    self.send_payload(json!({
+                        "cmd": "set_terrain",
+                        "z_scale": terrain.z_scale,
+                    }))?;
+                }
+            }
+            return Ok(());
+        }
+
         if let Some(camera) = handoff.camera {
             self.send_payload(json!({
                 "cmd": "cam_lookat",
@@ -445,21 +637,97 @@ fn spawn_stderr_reader(stderr: impl Read + Send + 'static, log: Arc<Mutex<VecDeq
     });
 }
 
+/// Resolve the bundled/default DEM: `FORGE3D_STUDIO_DEM`, else the checkout's
+/// Bryce Canyon sample, searched from the executable and the working directory.
+fn resolve_default_dem() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(path) = std::env::var_os("FORGE3D_STUDIO_DEM") {
+        candidates.push(PathBuf::from(path));
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().take(6).map(Path::to_path_buf));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        roots.extend(current.ancestors().take(6).map(Path::to_path_buf));
+    }
+    for root in roots {
+        candidates.push(root.join(DEFAULT_DEM_RELATIVE));
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+/// Sample a DEM into a heightfield for the Studio viewport.
+pub fn sample_terrain(
+    python: &str,
+    path: &str,
+    resolution: u32,
+) -> Result<serde_json::Value, String> {
+    let mut command = Command::new(python);
+    command
+        .arg("-c")
+        .arg(PREVIEW_SCRIPT)
+        .arg(path)
+        .arg(resolution.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(extra) = python_path_entries() {
+        command.env("PYTHONPATH", extra);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not run {python}: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| {
+            format!(
+                "the DEM sampler produced no output: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("the DEM sampler returned invalid JSON: {error}"))?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return Err(value
+            .get("detail")
+            .and_then(|detail| detail.as_str())
+            .unwrap_or("the DEM could not be sampled")
+            .to_owned());
+    }
+    Ok(value)
+}
+
 /// Interpreter candidates, most specific first.
+///
+/// The app is launched by `tauri dev` (cwd = the crate or the project) or as a
+/// bundle (cwd = wherever the launcher put it), so both the executable's and the
+/// working directory's ancestors are searched for the repo's `.venv`.
 fn interpreter_candidates() -> Vec<String> {
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<String> = Vec::new();
 
     if let Some(python) = std::env::var_os("FORGE3D_STUDIO_PYTHON") {
         candidates.push(python.to_string_lossy().into_owned());
     }
 
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().take(6).map(Path::to_path_buf));
+    }
     if let Ok(current) = std::env::current_dir() {
-        for ancestor in current.ancestors().take(6) {
-            let venv = ancestor.join(".venv").join("bin").join("python");
-            if venv.is_file() {
-                candidates.push(venv.to_string_lossy().into_owned());
-                break;
+        roots.extend(current.ancestors().take(6).map(Path::to_path_buf));
+    }
+    for root in roots {
+        let venv = root.join(".venv").join("bin").join("python");
+        if venv.is_file() {
+            let candidate = venv.to_string_lossy().into_owned();
+            if !candidates.contains(&candidate) {
+                candidates.push(candidate);
             }
+            break;
         }
     }
 
@@ -468,10 +736,32 @@ fn interpreter_candidates() -> Vec<String> {
     candidates
 }
 
+/// Directories to add to `PYTHONPATH` so a bare interpreter can import the
+/// checkout's package without an editable install.
+fn python_path_entries() -> Option<String> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        roots.extend(exe.ancestors().take(6).map(Path::to_path_buf));
+    }
+    if let Ok(current) = std::env::current_dir() {
+        roots.extend(current.ancestors().take(6).map(Path::to_path_buf));
+    }
+    for root in roots {
+        let package = root.join("python").join("forge3d").join("__init__.py");
+        if package.is_file() {
+            return Some(root.join("python").to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
 fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
-    let mut child = Command::new(python)
-        .arg("-c")
-        .arg(PROBE_SCRIPT)
+    let mut command = Command::new(python);
+    command.arg("-c").arg(PROBE_SCRIPT);
+    if let Some(path) = python_path_entries() {
+        command.env("PYTHONPATH", path);
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

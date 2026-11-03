@@ -175,10 +175,22 @@ impl SceneObject {
         matches!(self.kind, ObjectKind::Mesh(_))
     }
 
+    pub fn is_terrain(&self) -> bool {
+        matches!(self.kind, ObjectKind::Terrain(_))
+    }
+
+    pub fn terrain(&self) -> Option<&TerrainObject> {
+        match &self.kind {
+            ObjectKind::Terrain(terrain) => Some(terrain),
+            _ => None,
+        }
+    }
+
     /// Short label used by the outliner type column.
     pub fn kind_label(&self) -> &'static str {
         match self.kind {
             ObjectKind::Mesh(_) => "mesh",
+            ObjectKind::Terrain(_) => "terrain",
             ObjectKind::Camera(_) => "camera",
             ObjectKind::Light(_) => "light",
         }
@@ -200,6 +212,9 @@ impl SceneObject {
             ObjectKind::Mesh(mesh) => mesh
                 .validate()
                 .map_err(|reason| format!("object {:?}: {reason}", self.name)),
+            ObjectKind::Terrain(terrain) => terrain
+                .validate()
+                .map_err(|reason| format!("object {:?}: {reason}", self.name)),
             ObjectKind::Camera(camera) => camera
                 .validate()
                 .map_err(|reason| format!("object {:?}: {reason}", self.name)),
@@ -214,6 +229,9 @@ impl SceneObject {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ObjectKind {
     Mesh(MeshObject),
+    /// A DEM-backed terrain surface. Forge3D renders it natively; Studio shows
+    /// a sampled heightfield preview.
+    Terrain(TerrainObject),
     Camera(CameraObject),
     Light(LightObject),
 }
@@ -266,6 +284,106 @@ impl MeshObject {
                 Ok(())
             }
         }
+    }
+}
+
+/// A DEM-backed terrain object.
+///
+/// The DEM itself lives in the asset registry; this holds the render-time knobs
+/// the viewer understands. One terrain per scene until the viewer can load more
+/// than one (see the capability report's degradations).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainObject {
+    pub asset: AssetId,
+    /// Vertical exaggeration. 1.0 renders the DEM at its true scale.
+    #[serde(default = "default_z_scale")]
+    pub z_scale: f32,
+    /// Optional orthophoto/albedo raster.
+    #[serde(default)]
+    pub albedo: Option<AssetId>,
+    /// DEM pixel dimensions (display + diagnostics).
+    #[serde(default)]
+    pub dimensions: Option<[u32; 2]>,
+    /// Viewer-basis world origin, `[map X, -map Y]`, metres. Georeferenced DEMs
+    /// live far from the origin, so this is not optional in practice.
+    #[serde(default)]
+    pub world_origin_xz: Option<[f64; 2]>,
+    /// Viewer-basis world span, metres (the viewer's terrain world units).
+    #[serde(default)]
+    pub world_span_xz: Option<[f64; 2]>,
+    /// Elevation range in metres, `[min, max]`.
+    #[serde(default)]
+    pub elevation_range: Option<[f32; 2]>,
+}
+
+fn default_z_scale() -> f32 {
+    1.0
+}
+
+impl TerrainObject {
+    pub fn new(asset: AssetId) -> Self {
+        Self {
+            asset,
+            z_scale: 1.0,
+            albedo: None,
+            dimensions: None,
+            world_origin_xz: None,
+            world_span_xz: None,
+            elevation_range: None,
+        }
+    }
+
+    /// Attach the DEM's measured size, footprint, and elevation range.
+    pub fn with_dem_info(
+        mut self,
+        dimensions: [u32; 2],
+        elevation_range: [f32; 2],
+        world_origin_xz: Option<[f64; 2]>,
+        world_span_xz: Option<[f64; 2]>,
+    ) -> Self {
+        self.dimensions = Some(dimensions);
+        self.elevation_range = Some(elevation_range);
+        self.world_origin_xz = world_origin_xz;
+        self.world_span_xz = world_span_xz;
+        self
+    }
+
+    /// The viewer frames terrain as `radius = 1.5 * |(w, 0, h)|` around
+    /// `(w/2, elevation_range * z_scale / 2, h/2)` — see
+    /// `src/viewer/terrain/scene/terrain_load.rs`. Reproducing it here keeps the
+    /// two workspaces looking at the same thing.
+    pub fn viewer_framing(&self) -> Option<(f64, [f64; 3])> {
+        // Georeferenced: origin + span in metres. Local fallback: the viewer uses
+        // DEM pixels as world units, origin at zero.
+        let (origin, span) = match (self.world_origin_xz, self.world_span_xz) {
+            (Some(origin), Some(span)) => (origin, span),
+            _ => {
+                let [width, height] = self.dimensions?;
+                ([0.0, 0.0], [f64::from(width), f64::from(height)])
+            }
+        };
+        if !span[0].is_finite() || !span[1].is_finite() || span[0] <= 0.0 || span[1] <= 0.0 {
+            return None;
+        }
+        let [min_elevation, max_elevation] = self.elevation_range.unwrap_or([0.0, 0.0]);
+        let radius = span[0].max(span[1]) * 1.5;
+        let target = [
+            origin[0] + span[0] * 0.5,
+            f64::from(max_elevation - min_elevation) * f64::from(self.z_scale) * 0.5,
+            origin[1] + span[1] * 0.5,
+        ];
+        Some((radius, target))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.asset.is_nil() {
+            return Err("terrain has no DEM asset".to_owned());
+        }
+        if !self.z_scale.is_finite() || self.z_scale <= 0.0 {
+            return Err("terrain vertical scale must be a positive number".to_owned());
+        }
+        Ok(())
     }
 }
 

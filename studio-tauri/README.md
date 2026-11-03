@@ -38,6 +38,10 @@ sync, diagnostics).
 | Viewer process + IPC bridge | `forge3d.rs`, `studio_bridge.py` | written, unbuilt here |
 | Camera + sun sync | `forge3d_sync_camera`, `SunAngles` | written, unbuilt here |
 | Diagnostics + idempotent handoff | `forge3d.rs`, `workspace.rs` | done |
+| **Phase 4 (in progress)** — terrain-first default scene | `Project::starter`, `TerrainSeed` | done |
+| DEM heightfield preview in Studio | `terrain_preview`, `buildTerrainMesh` | done |
+| Viewer launch verified end-to-end | bridge smoke + PNG snapshot | done |
+| Render still from Studio, render settings UI | — | next |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -141,7 +145,7 @@ npm run build        # typecheck + production bundle of the UI
 ### Tests
 
 ```bash
-cargo test -p studio-core      # 85 tests: model, commands, migration, workspace
+cargo test -p studio-core      # 93 tests: model, commands, migration, workspace
 npx tsc --noEmit               # UI types
 ```
 
@@ -162,6 +166,28 @@ npx tsc --noEmit               # UI types
 
 The tool strip also holds **Global/Local** axis orientation and the **Add** menu
 (cube, sphere, plane, import glTF/GLB).
+
+## The default scene is a DEM (Phase 4)
+
+`File → New project` opens a Bryce Canyon scene, not a cube: the shell resolves
+`assets/tif/Bryce_Canyon_1024.tif` (or `FORGE3D_STUDIO_DEM`), samples it for the
+viewport, and stores its pixel size, georeferenced footprint, and elevation range
+on the terrain object. Studio draws a 96×96 heightfield preview; Forge3D receives
+the original GeoTIFF.
+
+Two things were needed to make the viewer agree with Studio, both of which look
+like "nothing happened" if you get them wrong:
+
+1. **The viewer needs the interpreter's `libpython`.** uv/pyenv interpreters keep
+   it outside the virtualenv, so the bridge adds `sysconfig` `LIBDIR` to
+   `LD_LIBRARY_PATH` before spawning the viewer. Without it the viewer exits
+   immediately with "cannot open shared object file".
+2. **Georeferenced DEMs live in metres, far from the origin.** The viewer's world
+   is `origin = (mapX, -mapY)` with `span = (|a|·w, |e|·h)` and it frames terrain
+   at `radius = 1.5·max(span)` around `(span.x/2, relief/2, span.z/2)`. Bryce
+   Canyon is 4000 × 3800 m at ≈ 4 165 774 m north, so a pixel-space guess aims at
+   empty space and the render is blank. `TerrainObject::viewer_framing` reproduces
+   that formula exactly and is pinned by a test.
 
 ## The Forge3D workspace (Phase 3)
 
@@ -209,6 +235,12 @@ is written to `<app-data>/forge3d/handoff.json` so it can be inspected.
   report, camera/sun handoff, idempotency) is fully tested.
 - **One asset per viewer window** — the viewer loads a single glTF/terrain, so a
   scene referencing several assets opens the first and says so in the report.
+- **Primitives still do not reach Forge3D.** The Phase 4 default scene is terrain
+  precisely because that path is complete; exporting primitive meshes as glTF is
+  the remaining piece of Rendered mode.
+- **Rendering from Studio is not implemented yet.** The viewer can snapshot (that
+  is how the render below was produced), but there is no "Render" button that
+  writes a still into the project's `renders/` directory.
 
 ## Browser preview harness
 

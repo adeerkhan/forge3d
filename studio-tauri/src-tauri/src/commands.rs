@@ -53,10 +53,14 @@ pub fn project_state(state: State<'_, AppState>) -> Result<Option<SessionState>,
 
 #[tauri::command]
 pub fn new_project(
+    forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
     name: Option<String>,
 ) -> Result<SessionState, String> {
-    Ok(lock(&state)?.new_project(name))
+    // A new project starts from the bundled DEM when one can be found; the core
+    // falls back to the primitive starter when it cannot.
+    let seed = forge.default_terrain_seed();
+    Ok(lock(&state)?.new_project_seeded(name, seed))
 }
 
 #[tauri::command]
@@ -239,6 +243,21 @@ pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
         byte_size: bytes.len() as u64,
         base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
     })
+}
+
+/// Sample a DEM into a heightfield for the Studio viewport.
+///
+/// The sample is a preview, not the render: Forge3D still receives the original
+/// GeoTIFF. Returns the sampler's JSON so the UI reads exactly what was measured
+/// (dimensions, elevation range, extent, heights).
+#[tauri::command]
+pub fn terrain_preview(
+    forge: State<'_, Forge3dState>,
+    path: String,
+    resolution: Option<u32>,
+) -> Result<serde_json::Value, String> {
+    let python = forge.probe(false).python;
+    crate::forge3d::sample_terrain(&python, &path, resolution.unwrap_or(96))
 }
 
 /// Cheap health check used by the UI on boot; also proves the bridge works.

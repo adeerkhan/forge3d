@@ -68,6 +68,7 @@ pub fn run() {
             commands::restore_recovery,
             commands::discard_recovery,
             commands::read_mesh_file,
+            commands::terrain_preview,
             commands::forge3d_probe,
             commands::forge3d_status,
             commands::forge3d_handoff,

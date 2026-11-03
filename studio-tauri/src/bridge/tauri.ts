@@ -11,6 +11,7 @@ import type {
   RecoveryEntry,
   SessionState,
   ShellInfo,
+  TerrainPreview,
 } from "./types";
 
 /** The real bridge: Tauri IPC. Argument names match the Rust command params. */
@@ -53,6 +54,9 @@ export const tauriBridge: StudioBridge = {
   discardRecovery: (id) => invoke<void>("discard_recovery", { id }),
 
   readMeshFile: (path) => invoke<MeshFilePayload>("read_mesh_file", { path }),
+
+  terrainPreview: (path, resolution) =>
+    invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
   forge3dProbe: (force) => invoke<EngineStatus>("forge3d_probe", { force: force ?? false }),
 

@@ -224,6 +224,47 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
+function TerrainEditor({
+  terrain,
+  asset,
+}: {
+  object: SceneObject;
+  terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
+  asset: Asset | undefined;
+}) {
+  const elevation =
+    terrain.elevationRange === null
+      ? "—"
+      : `${terrain.elevationRange[0].toFixed(0)}–${terrain.elevationRange[1].toFixed(0)} m`;
+  const footprint =
+    terrain.worldSpanXz === null
+      ? "—"
+      : terrain.worldSpanXz.map((value) => `${(value / 1000).toFixed(2)} km`).join(" × ");
+  const pixels =
+    terrain.dimensions === null ? "—" : `${terrain.dimensions[0]} × ${terrain.dimensions[1]} px`;
+
+  return (
+    <Section title="Terrain">
+      <div className="readout">
+        <dt>DEM</dt>
+        <dd>{asset?.name ?? "missing asset"}</dd>
+        <dt>Grid</dt>
+        <dd className="mono">{pixels}</dd>
+        <dt>Footprint</dt>
+        <dd className="mono">{footprint}</dd>
+        <dt>Elevation</dt>
+        <dd className="mono">{elevation}</dd>
+        <dt>Z scale</dt>
+        <dd className="mono">{terrain.zScale.toFixed(2)}</dd>
+      </div>
+      <p className="hint">
+        Studio draws a sampled heightfield. Forge3D receives the original
+        GeoTIFF and renders it at full resolution with its terrain pipeline.
+      </p>
+    </Section>
+  );
+}
+
 function ImportedMesh({ asset }: { object: SceneObject; asset: Asset | undefined }) {
   return (
     <Section title="Mesh">
@@ -287,6 +328,8 @@ export function Inspector() {
               <dd>{project.scene.objects.length}</dd>
               <dt>Meshes</dt>
               <dd>{project.scene.objects.filter((o) => o.kind.type === "mesh").length}</dd>
+              <dt>Terrains</dt>
+              <dd>{project.scene.objects.filter((o) => o.kind.type === "terrain").length}</dd>
               <dt>Cameras</dt>
               <dd>{project.scene.objects.filter((o) => o.kind.type === "camera").length}</dd>
               <dt>Lights</dt>
@@ -337,6 +380,10 @@ export function Inspector() {
 
   const object = selectedObjects[0];
   const locked = object.locked;
+  const terrainKind = object.kind.type === "terrain" ? object.kind : null;
+  const terrainAsset = terrainKind
+    ? project.assets.find((asset) => asset.id === terrainKind.asset)
+    : undefined;
   const meshSource = object.kind.type === "mesh" ? object.kind.source : null;
   const meshAsset =
     meshSource?.type === "gltf"
@@ -378,6 +425,9 @@ export function Inspector() {
         )}
         {meshSource?.type === "gltf" && (
           <ImportedMesh object={object} asset={meshAsset} />
+        )}
+        {object.kind.type === "terrain" && (
+          <TerrainEditor object={object} terrain={object.kind} asset={terrainAsset} />
         )}
         {object.kind.type === "camera" && (
           <CameraEditor

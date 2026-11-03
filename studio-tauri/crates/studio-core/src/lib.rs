@@ -50,12 +50,12 @@ pub use error::StudioError;
 pub use math::{Transform, Vec3};
 pub use persist::{load, save_atomic, to_json_pretty};
 pub use project::{
-    Asset, AssetKind, Project, RenderSettings, ViewportMode, ViewportState, Workspace, FORMAT,
-    SCHEMA_VERSION,
+    Asset, AssetKind, Project, RenderSettings, TerrainSeed, ViewportMode, ViewportState, Workspace,
+    FORMAT, SCHEMA_VERSION,
 };
 pub use scene::{
     CameraObject, LightKind, LightObject, MeshObject, MeshSource, ObjectKind, Primitive, Scene,
-    SceneObject,
+    SceneObject, TerrainObject,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 pub use workspace::{

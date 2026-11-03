@@ -20,7 +20,9 @@ Protocol (newline-delimited JSON):
 from __future__ import annotations
 
 import json
+import os
 import sys
+import sysconfig
 import traceback
 from typing import Any, Dict, Optional
 
@@ -33,7 +35,26 @@ def fail(message: str) -> None:
     emit({"event": "error", "message": message})
 
 
+def ensure_native_runtime() -> None:
+    """Make the interpreter's libpython loadable by the viewer binary.
+
+    The viewer is linked against the Python that built it. uv/pyenv-style
+    interpreters keep `libpython3.x.so` outside the virtualenv, so the dynamic
+    loader needs `LIBDIR` on `LD_LIBRARY_PATH` — without this the viewer exits
+    immediately with "cannot open shared object file".
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    libdir = sysconfig.get_config_var("LIBDIR")
+    if not libdir or not os.path.isdir(libdir):
+        return
+    existing = [part for part in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if part]
+    if libdir not in existing:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([libdir, *existing])
+
+
 def main() -> int:
+    ensure_native_runtime()
     try:
         config_line = sys.stdin.readline()
         if not config_line.strip():
@@ -55,19 +76,29 @@ def main() -> int:
         return 3
 
     gltf_path: Optional[str] = config.get("gltfPath") or None
+    terrain_path: Optional[str] = config.get("terrainPath") or None
     try:
-        handle = open_viewer_async(
-            width=int(config.get("width", 1280)),
-            height=int(config.get("height", 720)),
-            fov_deg=float(config.get("fovDeg", 60.0)),
-            gltf_path=gltf_path,
-            timeout=float(config.get("timeout", 30.0)),
-        )
+        if terrain_path:
+            handle = open_viewer_async(
+                width=int(config.get("width", 1280)),
+                height=int(config.get("height", 720)),
+                fov_deg=float(config.get("fovDeg", 60.0)),
+                terrain_path=terrain_path,
+                timeout=float(config.get("timeout", 45.0)),
+            )
+        else:
+            handle = open_viewer_async(
+                width=int(config.get("width", 1280)),
+                height=int(config.get("height", 720)),
+                fov_deg=float(config.get("fovDeg", 60.0)),
+                gltf_path=gltf_path,
+                timeout=float(config.get("timeout", 45.0)),
+            )
     except Exception as exc:  # noqa: BLE001
         fail(f"the Forge3D viewer did not start: {exc}")
         return 4
 
-    emit({"event": "ready", "gltf": gltf_path})
+    emit({"event": "ready", "gltf": gltf_path, "terrain": terrain_path})
 
     for line in sys.stdin:
         line = line.strip()

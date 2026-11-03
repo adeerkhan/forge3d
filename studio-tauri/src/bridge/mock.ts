@@ -24,6 +24,7 @@ import type {
   Project,
   SceneObject,
   SessionState,
+  TerrainPreview,
   Transform,
 } from "./types";
 
@@ -53,7 +54,32 @@ function primitiveObject(
 
 function starterProject(name: string): Project {
   const now = Date.now();
-  const cube = primitiveObject("Cube", { type: "cube", size: 2 });
+  // The preview harness mirrors the desktop starter: a DEM, not a cube.
+  const demAsset = {
+    id: newId(),
+    name: "Bryce_Canyon_1024.tif",
+    path: "/preview/Bryce_Canyon_1024.tif",
+    kind: "dem" as const,
+    byteSize: 3_321_356,
+  };
+  const terrain: SceneObject = {
+    id: newId(),
+    name: "Bryce Canyon",
+    parent: null,
+    transform: identity(),
+    visible: true,
+    locked: false,
+    kind: {
+      type: "terrain",
+      asset: demAsset.id,
+      zScale: 1,
+      albedo: null,
+      dimensions: [1024, 1024],
+      worldOriginXz: [395_998.5, -4_165_574.5],
+      worldSpanXz: [4000, 3800],
+      elevationRange: [2099.23, 2553.58],
+    },
+  };
   const camera: SceneObject = {
     id: newId(),
     name: "Camera",
@@ -87,7 +113,7 @@ function starterProject(name: string): Project {
   };
   return {
     format: "studio3d",
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: newId(),
     name,
     createdUnixMs: now,
@@ -95,10 +121,10 @@ function starterProject(name: string): Project {
     scene: {
       id: newId(),
       name: "Scene",
-      objects: [cube, camera, light],
+      objects: [terrain, camera, light],
       activeCamera: camera.id,
     },
-    assets: [],
+    assets: [demAsset],
     selection: [],
     workspace: "studio",
     viewport: { mode: "solid", gridVisible: true },
@@ -485,6 +511,35 @@ export function createMockBridge(): StudioBridge {
 
     // The preview harness has no engine. It reports that honestly and still
     // produces a handoff so the panel's layout can be reviewed.
+    terrainPreview: async (_path, resolution = 96): Promise<TerrainPreview> => {
+      // A synthetic ridge line: enough relief to review the viewport without a
+      // DEM file. The desktop shell samples the real GeoTIFF.
+      const size = Math.max(8, Math.min(128, resolution));
+      const heights: number[] = [];
+      for (let row = 0; row < size; row += 1) {
+        for (let column = 0; column < size; column += 1) {
+          const u = column / (size - 1);
+          const v = row / (size - 1);
+          const ridge =
+            Math.sin(u * Math.PI * 3.1) * Math.cos(v * Math.PI * 2.3) * 0.45 +
+            Math.sin((u + v) * Math.PI * 5.0) * 0.2;
+          heights.push(2100 + Math.min(1, Math.max(0, ridge + 0.5)) * 450);
+        }
+      }
+      return {
+        ok: true,
+        width: 1024,
+        height: 1024,
+        minElevation: 2100,
+        maxElevation: 2550,
+        extentMeters: [4000, 3800],
+        originXz: [395_998.5, -4_165_574.5],
+        spanXz: [4000, 3800],
+        resolution: size,
+        heights,
+      } satisfies TerrainPreview;
+    },
+
     forge3dProbe: async () => ({
       available: false,
       python: "python3",
@@ -528,6 +583,8 @@ export function createMockBridge(): StudioBridge {
           hasRenderableContent: true,
         },
         camera: null,
+        terrainCamera: null,
+        terrain: null,
         assets: [],
         sun: null,
       };

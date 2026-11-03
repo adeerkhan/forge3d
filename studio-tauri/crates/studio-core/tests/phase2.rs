@@ -81,7 +81,7 @@ fn v1_projects_are_migrated_on_load() {
 }
 
 #[test]
-fn migrated_projects_are_written_back_as_v2() {
+fn migrated_projects_are_written_back_at_the_current_version() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("migrated.studio3d");
     let project = from_json(&v1_document().to_string(), "legacy").unwrap();

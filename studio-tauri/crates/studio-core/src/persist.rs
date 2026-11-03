@@ -82,6 +82,9 @@ fn migrate(mut value: Value, from_version: u32, context: &str) -> Result<Value, 
     while version < SCHEMA_VERSION {
         value = match version {
             1 => migrate_v1_to_v2(value),
+            // v3 adds DEM-backed terrain objects. v2 documents remain valid
+            // as-is: no field changed, only new object kinds became possible.
+            2 => migrate_v2_to_v3(value),
             other => {
                 return Err(StudioError::UnsupportedSchema {
                     context: context.to_owned(),
@@ -123,6 +126,15 @@ fn migrate_v1_to_v2(mut value: Value) -> Value {
         object
             .entry("assets")
             .or_insert_with(|| Value::Array(Vec::new()));
+        object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
+    }
+    value
+}
+
+/// v2 → v3: adds the terrain object kind. Nothing to rewrite; the version tag
+/// is what stops an older build from opening a file it cannot render.
+fn migrate_v2_to_v3(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
         object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
     }
     value
