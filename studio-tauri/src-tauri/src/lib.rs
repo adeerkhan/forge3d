@@ -74,6 +74,7 @@ pub fn run() {
             commands::terrain_preview,
             commands::forge3d_probe,
             commands::render_frame,
+            commands::render_still,
             commands::render_status,
             commands::render_stop,
             commands::shell_info,

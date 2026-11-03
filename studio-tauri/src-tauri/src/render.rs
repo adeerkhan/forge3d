@@ -334,7 +334,8 @@ pub struct RenderRequest {
 }
 
 impl RenderRequest {
-    pub fn to_payload(&self) -> serde_json::Value {
+    pub fn to_payload(&self, quality: &str, output: Option<&str>) -> serde_json::Value {
+        let final_quality = quality == "final";
         json!({
             "width": self.width,
             "height": self.height,
@@ -351,7 +352,15 @@ impl RenderRequest {
                 "elevationDeg": self.sun_elevation_deg,
                 "intensity": self.sun_intensity,
             },
-            "quality": {"samples": 1, "shadows": true, "pom": true, "sky": true},
+            "quality": {
+                "samples": 1,
+                "shadows": true,
+                // Preview frames keep shadows and sky but skip POM; final frames
+                // add full parallax occlusion mapping.
+                "pom": final_quality,
+                "sky": true,
+            },
+            "output": output,
         })
     }
 

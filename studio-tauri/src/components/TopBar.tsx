@@ -154,21 +154,21 @@ export function TopBar() {
         </button>
         <button
           type="button"
+          className="button button--render"
+          disabled={!state || busy}
+          title="Render a full-resolution still with the Forge3D pipeline"
+          onClick={() => void actions.renderStill()}
+        >
+          Render
+        </button>
+        <button
+          type="button"
           className="button button--primary"
           disabled={!state || busy}
           title="Save (Ctrl+S)"
           onClick={() => void actions.saveProject(false)}
         >
           <SaveIcon size={14} /> Save
-        </button>
-        <button
-          type="button"
-          className="button"
-          disabled={!state}
-          title="Switch the viewport to Rendered mode (Forge3D pipeline)"
-          onClick={() => void actions.setViewportMode("rendered")}
-        >
-          Render
         </button>
       </div>
     </header>

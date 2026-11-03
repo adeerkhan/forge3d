@@ -58,6 +58,9 @@ interface SessionApi {
   setCameraView(enabled: boolean): void;
   /** Forge3D engine discovery (renderer + probe). */
   engine: EngineStatus | null;
+  /** Heightfield resolution used by the Solid terrain preview. */
+  terrainResolution: number;
+  setTerrainResolution(resolution: number): void;
   /** Last embedded-renderer frame (Rendered viewport mode). */
   render: {
     frame: RenderFrame | null;
@@ -79,7 +82,13 @@ interface SessionApi {
     importMesh(): Promise<void>;
     refreshEngine(force?: boolean): Promise<void>;
     setViewportMode(mode: ViewportMode): Promise<void>;
-    renderViewport(width: number, height: number): Promise<void>;
+    renderViewport(
+      width: number,
+      height: number,
+      quality?: "preview" | "final",
+    ): Promise<void>;
+    /** Render a full-resolution still and save it (dialog). */
+    renderStill(): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;
@@ -100,6 +109,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [space, setSpace] = useState<ToolSpace>("world");
   const [cameraView, setCameraView] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
+  const [terrainResolution, setTerrainResolution] = useState(96);
   const [render, setRender] = useState<{ frame: RenderFrame | null; busy: boolean; error: string | null }>({
     frame: null,
     busy: false,
@@ -303,22 +313,59 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const renderViewport = useCallback(
-    async (width: number, height: number) => {
-      setRender((current) => ({ ...current, busy: true, error: null }));
-      try {
-        const frame = await bridge.renderFrame(width, height);
-        setRender({ frame, busy: false, error: null });
-      } catch (cause) {
-        setRender({
-          frame: null,
-          busy: false,
-          error: cause instanceof Error ? cause.message : String(cause),
-        });
-      }
-    },
-    [],
+  // The renderer costs seconds per frame, so requests are serialised and only
+  // the newest queued view matters: dragging the camera must not build a queue.
+  const pendingRender = useRef<{ width: number; height: number; quality: "preview" | "final" } | null>(
+    null,
   );
+  const renderInFlight = useRef(false);
+
+  const pumpRender = useCallback(async () => {
+    if (renderInFlight.current) return;
+    renderInFlight.current = true;
+    try {
+      while (pendingRender.current) {
+        const request = pendingRender.current;
+        pendingRender.current = null;
+        setRender((current) => ({ ...current, busy: true, error: null }));
+        try {
+          const frame = await bridge.renderFrame(request.width, request.height, request.quality);
+          setRender({ frame, busy: false, error: null });
+        } catch (cause) {
+          setRender({
+            frame: null,
+            busy: false,
+            error: cause instanceof Error ? cause.message : String(cause),
+          });
+        }
+      }
+    } finally {
+      renderInFlight.current = false;
+    }
+  }, []);
+
+  const renderViewport = useCallback(
+    async (width: number, height: number, quality: "preview" | "final" = "final") => {
+      pendingRender.current = { width, height, quality };
+      await pumpRender();
+    },
+    [pumpRender],
+  );
+
+  const renderStillTo = useCallback(async (path: string) => {
+    setRender((current) => ({ ...current, busy: true, error: null }));
+    try {
+      const frame = await bridge.renderStill(path);
+      setRender({ frame, busy: false, error: null });
+      flash(`Saved ${path}`);
+    } catch (cause) {
+      setRender({
+        frame: null,
+        busy: false,
+        error: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
+  }, [flash]);
 
   const setViewportMode = useCallback(
     async (mode: ViewportMode) => {
@@ -370,6 +417,26 @@ export function SessionProvider({ children }: { children: ReactNode }) {
           fail(cause);
         } finally {
           setBusy(false);
+        }
+      },
+
+      async renderStill() {
+        if (!state) return;
+        try {
+          let path: string | null = null;
+          if (bridge.kind === "tauri") {
+            const picked = await saveDialog({
+              defaultPath: `${state.project.name || "render"}.png`,
+              filters: [{ name: "PNG image", extensions: ["png"] }],
+            });
+            path = picked ?? null;
+          } else {
+            path = "/preview/render.png";
+          }
+          if (!path) return;
+          await renderStillTo(path);
+        } catch (cause) {
+          fail(cause);
         }
       },
 
@@ -480,6 +547,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importMesh,
       refreshEngine,
       refreshRecovery,
+      renderStillTo,
       renderViewport,
       select,
       setViewportMode,
@@ -504,6 +572,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setCameraView,
     engine,
     render,
+    terrainResolution,
+    setTerrainResolution,
     actions,
   };
 

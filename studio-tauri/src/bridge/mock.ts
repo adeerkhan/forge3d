@@ -214,6 +214,8 @@ export function createMockBridge(): StudioBridge {
           return `Edit light ${find(command.id).name}`;
         case "setPrimitive":
           return `Reshape ${find(command.id).name}`;
+        case "setTerrainZScale":
+          return `Terrain scale ${find(command.id).name}`;
         case "createObject":
           return `Create ${command.object.name}`;
         case "createPrimitive":
@@ -366,6 +368,14 @@ export function createMockBridge(): StudioBridge {
 
       case "importGltf":
         throw new Error("glTF import needs the desktop shell");
+
+      case "setTerrainZScale": {
+        if (!(command.zScale > 0)) throw new Error("terrain vertical scale must be positive");
+        const object = find(command.id);
+        if (object.kind.type !== "terrain") throw new Error("object is not a terrain");
+        object.kind.zScale = command.zScale;
+        return { label, affected: [command.id] };
+      }
 
       case "setActiveCamera": {
         if (command.id) {
@@ -555,6 +565,10 @@ export function createMockBridge(): StudioBridge {
       throw new Error(
         "Rendered mode runs the Forge3D pipeline, which needs the desktop shell",
       );
+    },
+
+    renderStill: async (): Promise<RenderFrame> => {
+      throw new Error("Rendered mode needs the desktop shell");
     },
 
     renderStatus: async (): Promise<RenderStatus> => ({

@@ -388,6 +388,15 @@ kbd {
   background: linear-gradient(180deg, #ffbf74, #eda548);
 }
 
+.button--render {
+  border-color: rgba(240, 169, 74, 0.5);
+  color: var(--accent);
+}
+
+.button--render:hover:not(:disabled) {
+  background: var(--accent-quiet);
+}
+
 .button--small {
   padding: 4px 10px;
   font-size: 12px;
@@ -866,6 +875,19 @@ kbd {
   max-width: 100%;
   max-height: 100%;
   display: block;
+}
+
+.viewport-rendered__notice {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 10px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  color: #ffe0b8;
+  background: rgba(240, 169, 74, 0.14);
+  border: 1px solid rgba(240, 169, 74, 0.4);
 }
 
 .viewport-rendered__bar {

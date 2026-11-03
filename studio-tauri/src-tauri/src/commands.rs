@@ -310,6 +310,7 @@ pub fn render_frame(
     state: State<'_, AppState>,
     width: Option<u32>,
     height: Option<u32>,
+    quality: Option<String>,
 ) -> Result<RenderFrame, String> {
     let handoff = current_handoff(&state)?;
     let request = RenderRequest::from_handoff(
@@ -318,7 +319,43 @@ pub fn render_frame(
         height.unwrap_or(600).clamp(64, 4096),
     )?;
     let python = forge.probe(false).python;
-    render.render(&python, &request.dem, request.to_payload())
+    let quality = quality.unwrap_or_else(|| "final".to_owned());
+    render.render(&python, &request.dem, request.to_payload(&quality, None))
+}
+
+/// Render a final still at the project's configured resolution and write it to
+/// `path` (the shell picks the path with a save dialog).
+#[tauri::command]
+pub fn render_still(
+    render: State<'_, RenderState>,
+    forge: State<'_, Forge3dState>,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<RenderFrame, String> {
+    let (handoff, width, height) = {
+        let session = lock(&state)?;
+        let snapshot = session
+            .state()
+            .ok_or_else(|| "no project is open".to_owned())?;
+        let plan = studio_core::workspace::handoff(
+            &snapshot.project,
+            snapshot.revision,
+            Workspace::Forge3d,
+        );
+        (
+            plan,
+            snapshot.project.render.width,
+            snapshot.project.render.height,
+        )
+    };
+    let request = RenderRequest::from_handoff(&handoff, width, height)?;
+    let python = forge.probe(false).python;
+    let frame = render.render(
+        &python,
+        &request.dem,
+        request.to_payload("final", Some(&path)),
+    )?;
+    Ok(frame)
 }
 
 #[tauri::command]

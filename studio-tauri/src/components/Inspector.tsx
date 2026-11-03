@@ -225,6 +225,7 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
 }
 
 function TerrainEditor({
+  object,
   terrain,
   asset,
 }: {
@@ -232,6 +233,7 @@ function TerrainEditor({
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
+  const { actions, terrainResolution, setTerrainResolution } = useSession();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -254,12 +256,35 @@ function TerrainEditor({
         <dd className="mono">{footprint}</dd>
         <dt>Elevation</dt>
         <dd className="mono">{elevation}</dd>
-        <dt>Z scale</dt>
-        <dd className="mono">{terrain.zScale.toFixed(2)}</dd>
       </div>
+
+      <NumberField
+        label="Vertical scale"
+        value={terrain.zScale}
+        step={0.1}
+        min={0.05}
+        max={20}
+        onCommit={(zScale) =>
+          void actions.apply({ type: "setTerrainZScale", id: object.id, zScale })
+        }
+      />
+      <label className="field">
+        <span className="field-label">Preview resolution</span>
+        <select
+          className="input input--select"
+          value={terrainResolution}
+          onChange={(event) => setTerrainResolution(Number(event.target.value))}
+        >
+          <option value={64}>64 × 64 — fastest</option>
+          <option value={96}>96 × 96</option>
+          <option value={160}>160 × 160</option>
+          <option value={256}>256 × 256 — closest to the DEM</option>
+        </select>
+      </label>
+
       <p className="hint">
-        Studio draws a sampled heightfield. Forge3D receives the original
-        GeoTIFF and renders it at full resolution with its terrain pipeline.
+        Solid draws this DEM as a sampled heightfield; the renderer always reads
+        the original GeoTIFF at full resolution, whatever the preview setting.
       </p>
     </Section>
   );

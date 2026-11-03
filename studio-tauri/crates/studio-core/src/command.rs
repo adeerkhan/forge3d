@@ -131,6 +131,12 @@ pub enum Command {
         name: Option<String>,
     },
 
+    /// Set a terrain's vertical exaggeration (the DEM itself is unchanged).
+    SetTerrainZScale {
+        id: ObjectId,
+        z_scale: f32,
+    },
+
     /// Duplicate an object in place. Children are not duplicated in Phase 2.
     DuplicateObject {
         id: ObjectId,
@@ -470,6 +476,35 @@ impl Command {
                 })
             }
 
+            Command::SetTerrainZScale { id, z_scale } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let previous = match &object.kind {
+                    crate::scene::ObjectKind::Terrain(terrain) => terrain.z_scale,
+                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
+                };
+                if !z_scale.is_finite() || *z_scale <= 0.0 {
+                    return Err(CommandError::invalid(
+                        "terrain vertical scale",
+                        "must be a positive number",
+                    ));
+                }
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.z_scale = *z_scale;
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetTerrainZScale {
+                        id: *id,
+                        z_scale: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
             Command::DuplicateObject { id, name } => {
                 let index = project
                     .scene
@@ -646,7 +681,8 @@ impl Command {
             | Command::SetLocked { id, .. }
             | Command::SetCamera { id, .. }
             | Command::SetLight { id, .. }
-            | Command::SetPrimitive { id, .. } => vec![*id],
+            | Command::SetPrimitive { id, .. }
+            | Command::SetTerrainZScale { id, .. } => vec![*id],
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -695,6 +731,9 @@ impl Command {
             Command::SetCamera { id, .. } => format!("Edit camera {}", name_of(id)),
             Command::SetLight { id, .. } => format!("Edit light {}", name_of(id)),
             Command::SetPrimitive { id, .. } => format!("Reshape {}", name_of(id)),
+            Command::SetTerrainZScale { id, .. } => {
+                format!("Terrain scale {}", name_of(id))
+            }
             Command::SetActiveCamera { id } => match id {
                 Some(id) => format!("Set active camera {}", name_of(id)),
                 None => "Clear active camera".to_owned(),

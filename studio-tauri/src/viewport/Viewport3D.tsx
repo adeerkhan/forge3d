@@ -255,7 +255,7 @@ function disposeChildren(group: THREE.Group): void {
 }
 
 export function Viewport3D() {
-  const { state, actions, tool, space, cameraView, render } = useSession();
+  const { state, actions, tool, space, cameraView, render, terrainResolution } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<Runtime | null>(null);
@@ -274,16 +274,20 @@ export function Viewport3D() {
   const inCameraView = useRef(false);
 
   const terrainCache = useRef(new Map<string, Promise<TerrainPreview>>());
-  const readTerrain = useCallback((path: string): Promise<TerrainPreview> => {
-    const cache = terrainCache.current;
-    let pending = cache.get(path);
-    if (!pending) {
-      pending = bridge.terrainPreview(path, 96);
-      cache.set(path, pending);
-      pending.catch(() => cache.delete(path));
-    }
-    return pending;
-  }, []);
+  const readTerrain = useCallback(
+    (path: string): Promise<TerrainPreview> => {
+      const cache = terrainCache.current;
+      const key = `${path}:${terrainResolution}`;
+      let pending = cache.get(key);
+      if (!pending) {
+        pending = bridge.terrainPreview(path, terrainResolution);
+        cache.set(key, pending);
+        pending.catch(() => cache.delete(key));
+      }
+      return pending;
+    },
+    [terrainResolution],
+  );
 
   const readMesh = useCallback(
     async (path: string): Promise<ArrayBuffer> => {
@@ -386,6 +390,19 @@ export function Viewport3D() {
     gizmo.addEventListener("objectChange", () => {
       for (const helper of runtime.helpers) helper.update();
     });
+    // Rendered mode follows the camera the only way this pipeline allows: one
+    // frame after the user stops moving (a frame costs seconds regardless of
+    // resolution, so continuous rendering is not possible).
+    orbit.addEventListener("end", () => {
+      if (!modeRef.current) return;
+      const { width, height } = sizeRef.current;
+      void actionsRef.current.renderViewport(
+        Math.max(320, Math.round(width)),
+        Math.max(240, Math.round(height)),
+        "final",
+      );
+    });
+
     gizmo.addEventListener("mouseUp", () => {
       const target = gizmo.object;
       const id = target?.userData.studioId as string | undefined;
@@ -737,6 +754,10 @@ export function Viewport3D() {
 
   const mode = state?.project.viewport.mode ?? "solid";
   const renderedMode = mode === "rendered";
+  const modeRef = useRef(renderedMode);
+  modeRef.current = renderedMode;
+  const sizeRef = useRef(size);
+  sizeRef.current = size;
 
   // Entering Rendered mode renders once at the current viewport size; orbiting
   // in this mode does not re-render (each frame costs seconds), so the toolbar
@@ -757,6 +778,14 @@ export function Viewport3D() {
 
   const scene = state?.project.scene;
   const camera = scene?.objects.find((object) => object.id === scene.activeCamera);
+  // The renderer is a terrain pipeline: say which objects it cannot draw.
+  const unrendered = (scene?.objects ?? [])
+    .filter((object) => object.kind.type === "terrain")
+    .length === 0
+    ? ["everything"]
+    : (scene?.objects ?? [])
+        .filter((object) => object.kind.type === "mesh" && object.visible)
+        .map((object) => object.name);
 
   return (
     <div className="viewport" ref={containerRef}>
@@ -769,12 +798,19 @@ export function Viewport3D() {
               alt="Forge3D render of the current scene"
             />
           )}
+          {unrendered.length > 0 && (
+            <div className="viewport-rendered__notice">
+              Rendered mode draws the terrain only — {unrendered.join(", ")}{" "}
+              {unrendered.length === 1 ? "is" : "are"} not in this frame yet
+              (geometry export is pending).
+            </div>
+          )}
           <div className="viewport-rendered__bar">
             <span>
               {render.busy
                 ? "Rendering with the Forge3D terrain pipeline…"
                 : render.frame
-                  ? `${render.frame.width} × ${render.frame.height} · ${Math.round(render.frame.ms)} ms`
+                  ? `${render.frame.width} × ${render.frame.height} · ${(render.frame.ms / 1000).toFixed(1)} s`
                   : "No frame rendered yet"}
             </span>
             <button

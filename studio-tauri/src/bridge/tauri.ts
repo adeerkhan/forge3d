@@ -60,8 +60,10 @@ export const tauriBridge: StudioBridge = {
 
   forge3dProbe: (force) => invoke<EngineStatus>("forge3d_probe", { force: force ?? false }),
 
-  renderFrame: (width, height) =>
-    invoke<RenderFrame>("render_frame", { width, height }),
+  renderFrame: (width, height, quality) =>
+    invoke<RenderFrame>("render_frame", { width, height, quality: quality ?? "final" }),
+
+  renderStill: (path: string) => invoke<RenderFrame>("render_still", { path }),
 
   renderStatus: () => invoke<RenderStatus>("render_status"),
 

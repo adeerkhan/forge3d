@@ -315,6 +315,7 @@ export type Command =
   | { type: "setCamera"; id: string; camera: CameraObject }
   | { type: "setLight"; id: string; light: LightObject }
   | { type: "setPrimitive"; id: string; primitive: Primitive }
+  | { type: "setTerrainZScale"; id: string; zScale: number }
   | { type: "setActiveCamera"; id: string | null }
   | { type: "setViewport"; viewport: ViewportState }
   | { type: "setWorkspace"; workspace: Workspace }
