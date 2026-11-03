@@ -190,6 +190,14 @@ export function ViewportToolbar() {
         </button>
         <button
           type="button"
+          className={`segment-button ${mode === "material" ? "is-active" : ""}`}
+          title="Material preview — lit terrain and overlay, no shadows or POM"
+          onClick={() => void actions.setViewportMode("material")}
+        >
+          Material
+        </button>
+        <button
+          type="button"
           className={`segment-button ${mode === "rendered" ? "is-active" : ""}`}
           title="Rendered mode — Forge3D PBR terrain pipeline"
           onClick={() => void actions.setViewportMode("rendered")}
@@ -198,7 +206,7 @@ export function ViewportToolbar() {
         </button>
       </div>
 
-      {mode === "rendered" && (
+      {mode !== "solid" && (
         <button
           type="button"
           className="tool-button tool-button--wide"

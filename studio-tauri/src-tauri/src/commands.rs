@@ -343,6 +343,139 @@ fn current_handoff(state: &State<'_, AppState>) -> Result<Handoff, String> {
 
 /// Render the current scene at `width` × `height` through the embedded
 /// Forge3D pipeline (the same one the golden tests certify).
+/// Replace the scene terrain's DEM with a raster the user picked.
+#[tauri::command]
+pub fn import_terrain_dem(
+    forge: State<'_, Forge3dState>,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<SessionState, String> {
+    let python = forge.probe(false).python;
+    let info = crate::forge3d::sample_terrain(&python, &path, 48)?;
+    let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+
+    let mut session = lock(&state)?;
+    let snapshot = session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())?;
+    let terrain = snapshot
+        .project
+        .terrain_object()
+        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
+
+    let pair_f64 = |key: &str| -> Option<[f64; 2]> {
+        let values = info.get(key)?.as_array()?;
+        Some([values.first()?.as_f64()?, values.get(1)?.as_f64()?])
+    };
+    let asset = studio_core::Asset {
+        id: studio_core::ids::new_id(),
+        name: std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "terrain.tif".to_owned()),
+        path: path.clone(),
+        kind: studio_core::AssetKind::Dem,
+        byte_size: metadata.len(),
+    };
+
+    session
+        .apply(Command::Batch {
+            commands: vec![
+                Command::AddAsset {
+                    asset: asset.clone(),
+                },
+                Command::SetTerrainDem {
+                    id: terrain.id,
+                    asset: asset.id,
+                    dimensions: info
+                        .get("width")
+                        .and_then(|value| value.as_u64())
+                        .zip(info.get("height").and_then(|value| value.as_u64()))
+                        .map(|(width, height)| [width as u32, height as u32]),
+                    elevation_range: info
+                        .get("minElevation")
+                        .and_then(|value| value.as_f64())
+                        .zip(info.get("maxElevation").and_then(|value| value.as_f64()))
+                        .map(|(low, high)| [low as f32, high as f32]),
+                    world_origin_xz: pair_f64("originXz"),
+                    world_span_xz: pair_f64("spanXz"),
+                },
+            ],
+        })
+        .map_err(|error| error.to_string())?;
+    session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())
+}
+
+/// Attach (or clear) a raster overlay on the scene terrain.
+#[tauri::command]
+pub fn set_terrain_overlay(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    opacity: Option<f32>,
+) -> Result<SessionState, String> {
+    let mut session = lock(&state)?;
+    let snapshot = session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())?;
+    let terrain = snapshot
+        .project
+        .terrain_object()
+        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
+    let opacity = opacity.unwrap_or(0.82).clamp(0.0, 1.0);
+
+    let mut commands = Vec::new();
+    let overlay = match path {
+        None => None,
+        Some(path) => {
+            let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+            let existing = snapshot
+                .project
+                .assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .cloned();
+            let asset = existing.unwrap_or_else(|| studio_core::Asset {
+                id: studio_core::ids::new_id(),
+                name: std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "overlay.tif".to_owned()),
+                path: path.clone(),
+                kind: studio_core::AssetKind::Orthophoto,
+                byte_size: metadata.len(),
+            });
+            if !snapshot
+                .project
+                .assets
+                .iter()
+                .any(|entry| entry.id == asset.id)
+            {
+                commands.push(Command::AddAsset {
+                    asset: asset.clone(),
+                });
+            }
+            Some(studio_core::scene::TerrainOverlay {
+                asset: asset.id,
+                opacity,
+                preserve_colors: true,
+            })
+        }
+    };
+    commands.push(Command::SetTerrainOverlay {
+        id: terrain.id,
+        overlay,
+    });
+
+    session
+        .apply(Command::Batch { commands })
+        .map_err(|error| error.to_string())?;
+    session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())
+}
+
 #[tauri::command]
 pub fn render_frame(
     render: State<'_, RenderState>,

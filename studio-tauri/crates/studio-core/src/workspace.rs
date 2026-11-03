@@ -133,6 +133,17 @@ pub struct TerrainHandoff {
     pub world_span_xz: Option<[f64; 2]>,
     /// Elevation range in metres, `[min, max]`.
     pub elevation_range: Option<[f32; 2]>,
+    /// Draped raster overlay, if any.
+    pub overlay: Option<TerrainOverlayHandoff>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainOverlayHandoff {
+    pub path: String,
+    pub name: String,
+    pub opacity: f32,
+    pub preserve_colors: bool,
 }
 
 /// Sun direction in the viewer's terms (`lit_sun`).
@@ -424,6 +435,16 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
         dimensions: terrain.dimensions,
         world_span_xz: terrain.world_span_xz,
         elevation_range: terrain.elevation_range,
+        overlay: terrain.overlay.and_then(|overlay| {
+            project
+                .asset(overlay.asset)
+                .map(|asset| TerrainOverlayHandoff {
+                    path: asset.path.clone(),
+                    name: asset.name.clone(),
+                    opacity: overlay.opacity,
+                    preserve_colors: overlay.preserve_colors,
+                })
+        }),
     })
 }
 

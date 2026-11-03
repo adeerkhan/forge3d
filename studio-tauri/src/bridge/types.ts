@@ -66,6 +66,13 @@ export interface TerrainObject {
   /** Viewer-basis world span, metres (the viewer's terrain world units). */
   worldSpanXz: [number, number] | null;
   elevationRange: [number, number] | null;
+  overlay: TerrainOverlay | null;
+}
+
+export interface TerrainOverlay {
+  asset: string;
+  opacity: number;
+  preserveColors: boolean;
 }
 
 /** Internally tagged enum: the payload is flattened next to `type`. */
@@ -93,7 +100,10 @@ export interface Scene {
 }
 
 export type Workspace = "studio" | "forge3d";
-export type ViewportMode = "solid" | "rendered";
+export type ViewportMode = "solid" | "rendered" | "material";
+
+/** Renderer quality preset: preview/material are interactive, final is a still. */
+export type RenderQuality = "preview" | "material" | "final";
 
 export interface ViewportState {
   mode: ViewportMode;
@@ -336,6 +346,16 @@ export type Command =
   | { type: "setLight"; id: string; light: LightObject }
   | { type: "setPrimitive"; id: string; primitive: Primitive }
   | { type: "setTerrainZScale"; id: string; zScale: number }
+  | {
+      type: "setTerrainDem";
+      id: string;
+      asset: string;
+      dimensions?: [number, number] | null;
+      elevationRange?: [number, number] | null;
+      worldOriginXz?: [number, number] | null;
+      worldSpanXz?: [number, number] | null;
+    }
+  | { type: "setTerrainOverlay"; id: string; overlay: TerrainOverlay | null }
   | { type: "setActiveCamera"; id: string | null }
   | { type: "setViewport"; viewport: ViewportState }
   | { type: "setWorkspace"; workspace: Workspace }

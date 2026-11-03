@@ -272,7 +272,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const pendingRender = useRef<{
     width: number;
     height: number;
-    quality: "preview" | "final";
+    quality: "preview" | "material" | "final";
   } | null>(null);
   const renderInFlight = useRef(false);
 
@@ -301,12 +301,83 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const renderViewport = useCallback(
-    async (width: number, height: number, quality: "preview" | "final" = "preview") => {
+    async (width: number, height: number, quality: "preview" | "material" | "final" = "preview") => {
       pendingRender.current = { width, height, quality };
       await pumpRender();
     },
     [pumpRender],
   );
+
+  const importTerrainDem = useCallback(async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "GeoTIFF DEM", extensions: ["tif", "tiff"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+      setBusy(true);
+      setState(await bridge.importTerrainDem(path));
+      flash(`DEM replaced with ${path.split(/[\\/]/).pop()}`);
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail, flash]);
+
+  const importTerrainOverlay = useCallback(async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Raster overlay", extensions: ["tif", "tiff", "png"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+      setBusy(true);
+      setState(await bridge.setTerrainOverlay(path, 0.82));
+      flash("Overlay attached");
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail, flash]);
+
+  const setTerrainOverlayOpacity = useCallback(
+    async (opacity: number) => {
+      const project = state?.project;
+      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
+      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.overlay) {
+        return;
+      }
+      const overlayAsset = project.assets.find(
+        (entry) => entry.id === (terrain.kind.type === "terrain" ? terrain.kind.overlay?.asset : null),
+      );
+      if (!overlayAsset) return;
+      try {
+        setBusy(true);
+        setState(await bridge.setTerrainOverlay(overlayAsset.path, opacity));
+      } catch (cause) {
+        fail(cause);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [bridge, fail, state],
+  );
+
+  const clearTerrainOverlay = useCallback(async () => {
+    try {
+      setBusy(true);
+      setState(await bridge.setTerrainOverlay(null));
+      flash("Overlay removed");
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail, flash]);
 
   const renderStillTo = useCallback(async (path: string) => {
     setRender((current) => ({ ...current, busy: true, error: null }));
@@ -483,6 +554,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importMesh,
 
       refreshEngine,
+      importTerrainDem,
+      importTerrainOverlay,
+      setTerrainOverlayOpacity,
+      clearTerrainOverlay,
       setViewportMode,
       renderViewport,
 
@@ -522,11 +597,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       flash,
       guardUnsaved,
       importMesh,
+      importTerrainDem,
+      importTerrainOverlay,
+      clearTerrainOverlay,
       refreshEngine,
       refreshRecovery,
       renderStillTo,
       renderViewport,
       select,
+      setTerrainOverlayOpacity,
       setViewportMode,
       state,
     ],

@@ -61,10 +61,13 @@ function starterProject(name: string, preset: string = "bryce"): Project {
   // The preview harness mirrors the desktop starter: a DEM, not a cube.
   const demAsset = {
     id: newId(),
-    name: "Bryce_Canyon_1024.tif",
-    path: "/preview/Bryce_Canyon_1024.tif",
+    name: preset === "swiss" ? "switzerland_dem.tif" : "Bryce_Canyon_1024.tif",
+    path:
+      preset === "swiss"
+        ? "/preview/switzerland_dem.tif"
+        : "/preview/Bryce_Canyon_1024.tif",
     kind: "dem" as const,
-    byteSize: 3_321_356,
+    byteSize: preset === "swiss" ? 50_000_000 : 3_321_356,
   };
   const cube = primitiveObject("Cube", { type: "cube", size: 2 });
   const terrain: SceneObject = {
@@ -79,10 +82,11 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       asset: demAsset.id,
       zScale: 1,
       albedo: null,
-      dimensions: [1024, 1024],
-      worldOriginXz: [395_998.5, -4_165_574.5],
-      worldSpanXz: [4000, 3800],
-      elevationRange: [2099.23, 2553.58],
+      dimensions: preset === "swiss" ? [7294, 3200] : [1024, 1024],
+      worldOriginXz: preset === "swiss" ? [0, 0] : [395_998.5, -4_165_574.5],
+      worldSpanXz: preset === "swiss" ? [352_427, 225_653] : [4000, 3800],
+      elevationRange: preset === "swiss" ? [189, 4220] : [2099.23, 2553.58],
+      overlay: null,
     },
   };
   const camera: SceneObject = {
@@ -219,6 +223,10 @@ export function createMockBridge(): StudioBridge {
           return `Reshape ${find(command.id).name}`;
         case "setTerrainZScale":
           return `Terrain scale ${find(command.id).name}`;
+        case "setTerrainDem":
+          return `Change DEM of ${find(command.id).name}`;
+        case "setTerrainOverlay":
+          return "Terrain overlay";
         case "createObject":
           return `Create ${command.object.name}`;
         case "createPrimitive":
@@ -377,6 +385,20 @@ export function createMockBridge(): StudioBridge {
         const object = find(command.id);
         if (object.kind.type !== "terrain") throw new Error("object is not a terrain");
         object.kind.zScale = command.zScale;
+        return { label, affected: [command.id] };
+      }
+
+      case "setTerrainDem": {
+        const object = find(command.id);
+        if (object.kind.type !== "terrain") throw new Error("object is not a terrain");
+        object.kind.asset = command.asset;
+        return { label, affected: [command.id] };
+      }
+
+      case "setTerrainOverlay": {
+        const object = find(command.id);
+        if (object.kind.type !== "terrain") throw new Error("object is not a terrain");
+        object.kind.overlay = command.overlay;
         return { label, affected: [command.id] };
       }
 
@@ -578,6 +600,14 @@ export function createMockBridge(): StudioBridge {
       } satisfies TerrainPreview;
     },
 
+    importTerrainDem: async () => {
+      throw new Error("DEM import needs the desktop shell");
+    },
+
+    setTerrainOverlay: async () => {
+      throw new Error("overlays need the desktop shell");
+    },
+
     forge3dProbe: async () => ({
       available: false,
       python: "python3",
@@ -587,7 +617,7 @@ export function createMockBridge(): StudioBridge {
         "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),
 
-    renderFrame: async (_width: number, _height: number, _quality?: "preview" | "final", _view?: RenderView): Promise<RenderFrame> => {
+    renderFrame: async (_width: number, _height: number, _quality?: "preview" | "material" | "final", _view?: RenderView): Promise<RenderFrame> => {
       throw new Error(
         "Rendered mode runs the Forge3D pipeline, which needs the desktop shell",
       );

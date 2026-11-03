@@ -233,7 +233,7 @@ function TerrainEditor({
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
-  const { actions, terrainResolution, setTerrainResolution } = useSession();
+  const { actions, terrainResolution, setTerrainResolution, state } = useSession();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -244,6 +244,11 @@ function TerrainEditor({
       : terrain.worldSpanXz.map((value) => `${(value / 1000).toFixed(2)} km`).join(" × ");
   const pixels =
     terrain.dimensions === null ? "—" : `${terrain.dimensions[0]} × ${terrain.dimensions[1]} px`;
+
+  const overlayAsset =
+    terrain.overlay
+      ? state?.project.assets.find((entry) => entry.id === terrain.overlay?.asset)
+      : undefined;
 
   return (
     <Section title="Terrain">
@@ -282,6 +287,63 @@ function TerrainEditor({
           onChange={(event) => setTerrainResolution(Number(event.target.value))}
         />
       </label>
+
+      <div className="inline-actions">
+        <button
+          type="button"
+          className="button button--small"
+          onClick={() => void actions.importTerrainDem()}
+        >
+          Change DEM…
+        </button>
+      </div>
+
+      <Section title="Overlay">
+        <div className="readout readout--compact">
+          <dt>Raster</dt>
+          <dd>{overlayAsset?.name ?? "none"}</dd>
+        </div>
+        {terrain.overlay && (
+          <label className="field">
+            <span className="field-label">
+              Opacity · {Math.round(terrain.overlay.opacity * 100)}%
+            </span>
+            <input
+              className="slider"
+              type="range"
+              min={0}
+              max={100}
+              step={5}
+              value={Math.round(terrain.overlay.opacity * 100)}
+              onChange={(event) =>
+                void actions.setTerrainOverlayOpacity(Number(event.target.value) / 100)
+              }
+            />
+          </label>
+        )}
+        <div className="inline-actions">
+          <button
+            type="button"
+            className="button button--small"
+            onClick={() => void actions.importTerrainOverlay()}
+          >
+            {terrain.overlay ? "Replace overlay…" : "Add overlay…"}
+          </button>
+          {terrain.overlay && (
+            <button
+              type="button"
+              className="button button--small"
+              onClick={() => void actions.clearTerrainOverlay()}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <p className="hint">
+          Land cover or orthophoto draped on the DEM. Colours are composited after
+          lighting, so categorical palettes survive.
+        </p>
+      </Section>
 
       <p className="hint">
         The slider is the heightfield detail the Solid view builds from this DEM

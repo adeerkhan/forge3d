@@ -61,6 +61,11 @@ export const tauriBridge: StudioBridge = {
   terrainPreview: (path, resolution) =>
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
+  importTerrainDem: (path) => invoke<SessionState>("import_terrain_dem", { path }),
+
+  setTerrainOverlay: (path, opacity) =>
+    invoke<SessionState>("set_terrain_overlay", { path, opacity: opacity ?? null }),
+
   forge3dProbe: (force) => invoke<EngineStatus>("forge3d_probe", { force: force ?? false }),
 
   renderFrame: (width, height, quality, view) =>

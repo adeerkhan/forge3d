@@ -73,6 +73,8 @@ pub fn run() {
             commands::discard_recovery,
             commands::read_mesh_file,
             commands::terrain_preview,
+            commands::import_terrain_dem,
+            commands::set_terrain_overlay,
             commands::forge3d_probe,
             commands::render_frame,
             commands::render_still,

@@ -74,40 +74,72 @@ path = sys.argv[1]
 resolution = max(8, min(256, int(sys.argv[2])))
 try:
     import rasterio
+    from rasterio.warp import transform_bounds
 except Exception as exc:
     print(json.dumps({"ok": False, "detail": "rasterio is unavailable: %s" % (exc,)}))
     raise SystemExit(0)
 
 try:
     with rasterio.open(path) as src:
-        data = src.read(1).astype("float64")
-        height, width = data.shape
+        # Masked read honours the file's nodata value. A sentinel such as
+        # -3.4e38 would otherwise become the elevation range and turn the mesh
+        # into spikes.
+        masked = src.read(1, masked=True)
+        raw = np.asarray(masked.filled(np.nan), dtype="float64")
+        valid = np.isfinite(raw)
+        if not valid.any():
+            print(json.dumps({"ok": False, "detail": "the DEM contains no valid elevation samples"}))
+            raise SystemExit(0)
+        # A robust range: single corrupted samples (one 11 km pixel in the Swiss
+        # DEM) would otherwise define the display range and flatten everything.
+        valid_values = raw[valid]
+        low, high = np.percentile(valid_values, [0.01, 99.99])
+        min_elevation = float(low)
+        max_elevation = float(high)
+        outliers = int(np.count_nonzero((valid_values < low) | (valid_values > high)))
+
+        height, width = raw.shape
         ys = np.linspace(0, height, resolution + 1).astype(int)
         xs = np.linspace(0, width, resolution + 1).astype(int)
         out = np.empty((resolution, resolution), dtype="float64")
         for j in range(resolution):
             for i in range(resolution):
-                block = data[ys[j]:max(ys[j] + 1, ys[j + 1]), xs[i]:max(xs[i] + 1, xs[i + 1])]
-                out[j, i] = float(np.nanmean(block)) if block.size else 0.0
+                block = raw[ys[j]:max(ys[j] + 1, ys[j + 1]), xs[i]:max(xs[i] + 1, xs[i + 1])]
+                good = block[np.isfinite(block)]
+                if good.size:
+                    out[j, i] = float(np.clip(good.mean(), min_elevation, max_elevation))
+                else:
+                    out[j, i] = min_elevation
+
+        # World footprint. Geographic rasters (degrees) are converted to metres;
+        # treating degrees as metres is what made a 353 km DEM report 0.00 km.
+        crs = src.crs
         bounds = src.bounds
-        transform = src.transform
-        a, b, c, d, e, f = transform.a, transform.b, transform.c, transform.d, transform.e, transform.f
-        # Mirror the viewer's footprint: origin (c, -f), span (|a|·w, |e|·h).
-        if all(isinstance(v, (int, float)) and v == v for v in (a, b, c, d, e, f)):
-            origin_xz = [float(c), float(-f)]
-            span_xz = [abs(float(a)) * width, abs(float(e)) * height]
-        else:
-            origin_xz = [0.0, 0.0]
+        origin_xz = [0.0, 0.0]
+        if crs is None:
             span_xz = [float(width), float(height)]
+        elif crs.is_geographic:
+            lon = (bounds.left + bounds.right) * 0.5
+            lat = (bounds.top + bounds.bottom) * 0.5
+            zone = int((lon + 180.0) // 6.0) + 1
+            epsg = (32600 if lat >= 0 else 32700) + zone
+            left, bottom, right, top = transform_bounds(crs, "EPSG:%d" % epsg, *bounds)
+            span_xz = [abs(right - left), abs(top - bottom)]
+        else:
+            span_xz = [abs(float(src.transform.a)) * width, abs(float(src.transform.e)) * height]
+            origin_xz = [float(src.transform.c), float(-src.transform.f)]
+
         payload = {
             "ok": True,
             "width": int(width),
             "height": int(height),
-            "minElevation": float(np.nanmin(data)),
-            "maxElevation": float(np.nanmax(data)),
-            "extentMeters": [float(bounds.right - bounds.left), float(bounds.top - bounds.bottom)],
+            "minElevation": min_elevation,
+            "maxElevation": max_elevation,
+            "extentMeters": span_xz,
             "originXz": origin_xz,
             "spanXz": span_xz,
+            "geographic": bool(crs is not None and crs.is_geographic),
+            "outliers": outliers,
             "resolution": resolution,
             "heights": [round(float(value), 2) for value in out.ravel()],
         }

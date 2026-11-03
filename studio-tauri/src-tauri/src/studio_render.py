@@ -84,18 +84,39 @@ def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
     path.write_bytes(header + rgbe.tobytes())
 
 
-def load_dem(path: str) -> tuple[np.ndarray, float, float]:
+def load_dem(path: str) -> tuple[np.ndarray, float, float, tuple[float, float]]:
+    """Read a DEM, honour nodata, and compute a metric footprint.
+
+    Returns heights (nodata filled), span in metres, and a robust elevation range.
+    """
     import rasterio
+    from rasterio.warp import transform_bounds
 
     with rasterio.open(path) as source:
-        heights = source.read(1).astype(np.float32)
-        transform = source.transform
-        span_x = abs(float(transform.a)) * heights.shape[1]
-        span_y = abs(float(transform.e)) * heights.shape[0]
+        raw = np.asarray(source.read(1, masked=True).filled(np.nan), dtype="float64")
+        valid = np.isfinite(raw)
+        if not valid.any():
+            raise RuntimeError("the DEM contains no valid elevation samples")
+        values = raw[valid]
+        low, high = np.percentile(values, [0.01, 99.99])
+        heights = np.where(valid, np.clip(np.nan_to_num(raw, nan=low), low, high), low)
+
+        crs = source.crs
+        bounds = source.bounds
+        if crs is not None and crs.is_geographic:
+            lon = (bounds.left + bounds.right) * 0.5
+            lat = (bounds.top + bounds.bottom) * 0.5
+            zone = int((lon + 180.0) // 6.0) + 1
+            epsg = (32600 if lat >= 0 else 32700) + zone
+            left, bottom, right, top = transform_bounds(crs, "EPSG:%d" % epsg, *bounds)
+            span_x, span_y = abs(right - left), abs(top - bottom)
+        else:
+            span_x = abs(float(source.transform.a)) * raw.shape[1]
+            span_y = abs(float(source.transform.e)) * raw.shape[0]
+
     if span_x <= 0.0 or span_y <= 0.0:
-        span_x = float(heights.shape[1])
-        span_y = float(heights.shape[0])
-    return heights, span_x, span_y
+        span_x, span_y = float(raw.shape[1]), float(raw.shape[0])
+    return heights.astype(np.float32), span_x, span_y, (float(low), float(high))
 
 
 class StudioRenderer:
@@ -103,9 +124,12 @@ class StudioRenderer:
         import forge3d as f3d
 
         self.f3d = f3d
-        self.heights, self.span_x, self.span_y = load_dem(dem_path)
+        self.heights, self.span_x, self.span_y, self.range = load_dem(dem_path)
         self.dem_path = dem_path
-        self.range = (float(self.heights.min()), float(self.heights.max()))
+        # The renderer rejects view coordinates beyond +/-65,536 units, so a
+        # country-scale DEM is scaled into that budget (proportions preserved).
+        self.scale = min(1.0, 60_000.0 / max(self.span_x, self.span_y))
+        self.heights = self.heights * self.scale
 
         env_path = Path(tempfile.gettempdir()) / "forge3d-studio-sky.hdr"
         write_sky_hdr(env_path)
@@ -115,6 +139,51 @@ class StudioRenderer:
         self.ibl = f3d.IBL.from_hdr(str(env_path), intensity=1.0)
         self.materials = f3d.MaterialSet.terrain_default()
         self.size: Optional[tuple[int, int]] = None
+
+    def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
+        """Read a raster overlay and resample it to the render size.
+
+        Categorical rasters (land cover) keep their source colours; continuous
+        ones are stretched to 0-255.
+        """
+        import rasterio
+        from rasterio.enums import Resampling as RasterioResampling
+        from rasterio.warp import reproject
+
+        with rasterio.open(overlay["path"]) as src:
+            bands = min(3, src.count)
+            rgb = np.zeros((height, width, 3), dtype=np.float32)
+            for band in range(bands):
+                plane = np.zeros((height, width), dtype=np.float32)
+                reproject(
+                    source=rasterio.band(src, band + 1),
+                    destination=plane,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=rasterio.transform.from_bounds(
+                        0, 0, width, height, width, height
+                    ),
+                    dst_crs=src.crs,
+                    resampling=RasterioResampling.bilinear,
+                )
+                rgb[:, :, band] = plane
+            if bands == 1:
+                rgb[:, :, 1] = rgb[:, :, 0]
+                rgb[:, :, 2] = rgb[:, :, 0]
+
+        flat = rgb.reshape(-1, 3)
+        finite = np.isfinite(flat).all(axis=1)
+        low, high = np.percentile(flat[finite], [1, 99]) if finite.any() else (0.0, 255.0)
+        if high - low < 1e-6:
+            low, high = 0.0, 255.0
+        scaled = np.clip((rgb - low) / (high - low), 0.0, 1.0)
+        rgba = np.concatenate(
+            [ (scaled * 255.0).astype(np.uint8), np.full((height, width, 1), 255, np.uint8) ],
+            axis=2,
+        )
+        return self.f3d.OverlayLayer.from_raster_rgba(
+            rgba, strength=float(overlay.get("opacity", 0.82))
+        )
 
     def render(self, request: Dict[str, Any]) -> Dict[str, Any]:
         f3d = self.f3d
@@ -132,13 +201,25 @@ class StudioRenderer:
         width = max(64, min(4096, width))
         height = max(64, min(4096, height))
 
+        # Work in the scaled world the heights were prepared for.
+        span_x = self.span_x * self.scale
+        span_y = self.span_y * self.scale
+
         camera = request.get("camera") or {}
         sun = request.get("sun") or {}
         quality = request.get("quality") or {}
+        overlay = request.get("overlay") or None
+        overlays = []
+        if overlay:
+            try:
+                overlays = [self.build_overlay(overlay, width, height)]
+            except Exception as exc:  # noqa: BLE001
+                print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
 
-        span = self.span_x
-        radius = float(camera.get("radius") or 1.5 * max(self.span_x, self.span_y))
-        target = camera.get("target") or [self.span_x / 2, self.span_y / 2, float(self.heights.mean())]
+        span = span_x
+        radius = float(camera.get("radius") or 1.5 * max(span_x, span_y)) * self.scale
+        target = camera.get("target") or [span_x / 2, span_y / 2, float(self.heights.mean())]
+        target = [float(target[0]) * self.scale, float(target[1]) * self.scale, float(target[2]) * self.scale]
 
         settings = make_terrain_params_config(
             size_px=(width, height),
@@ -154,7 +235,7 @@ class StudioRenderer:
             fov_y_deg=float(camera.get("fovDeg", 45.0)),
             clip=(10.0, 400000.0),
             domain=self.range,
-            overlays=[],
+            overlays=overlays,
             albedo_mode="colormap",
             hue_variation_strength=0.0,
             colormap_strength=1.0,

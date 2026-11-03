@@ -341,6 +341,15 @@ pub struct RenderRequest {
     pub sun_elevation_deg: f64,
     pub sun_intensity: f64,
     pub z_scale: f64,
+    pub overlay: Option<OverlayRequest>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverlayRequest {
+    pub path: String,
+    pub opacity: f32,
+    pub preserve_colors: bool,
 }
 
 impl RenderRequest {
@@ -357,6 +366,7 @@ impl RenderRequest {
 
     pub fn to_payload(&self, quality: &str, output: Option<&str>) -> serde_json::Value {
         let final_quality = quality == "final";
+        let material = quality == "material";
         json!({
             "width": self.width,
             "height": self.height,
@@ -375,14 +385,14 @@ impl RenderRequest {
             },
             "quality": {
                 "samples": 1,
-                "shadows": true,
-                // Interactive frames: full PBR + POM + sky + shadows (~150 ms).
-                // Final stills add ambient occlusion, which alone costs ~4.8 s.
-                "pom": true,
+                // Material preview: lit terrain + overlay, no shadows or POM.
+                "shadows": !material,
+                "pom": !material,
                 "sky": true,
                 "ambientOcclusion": final_quality,
                 "heightAo": final_quality,
             },
+            "overlay": self.overlay,
             "output": output,
         })
     }
@@ -413,13 +423,15 @@ impl RenderRequest {
             dem: terrain.path.clone(),
             phi_deg: f64::from(camera.phi_deg),
             theta_deg: f64::from(camera.theta_deg),
-            // The renderer frames the DEM itself; its radius is in metres.
-            radius: (span[0].max(span[1])) * 1.5,
-            target: [
+            // Use the radius the camera's distance implies, so the frame matches
+            // the viewport; fall back to the viewer's framing only when the
+            // project cannot say (no camera distance available).
+            radius: camera.radius.unwrap_or_else(|| span[0].max(span[1]) * 1.5),
+            target: camera.target.unwrap_or([
                 span[0] * 0.5,
                 span[1] * 0.5,
                 f64::from(elevation[0] + elevation[1]) * 0.5,
-            ],
+            ]),
             fov_deg: f64::from(camera.fov_deg),
             sun_azimuth_deg: handoff
                 .sun
@@ -434,6 +446,11 @@ impl RenderRequest {
                 .map(|sun| f64::from(sun.intensity))
                 .unwrap_or(3.0),
             z_scale: f64::from(terrain.z_scale),
+            overlay: terrain.overlay.as_ref().map(|overlay| OverlayRequest {
+                path: overlay.path.clone(),
+                opacity: overlay.opacity,
+                preserve_colors: overlay.preserve_colors,
+            }),
         })
     }
 }

@@ -673,6 +673,12 @@ kbd {
   cursor: pointer;
 }
 
+.inline-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .slider {
   width: 100%;
   accent-color: var(--accent);

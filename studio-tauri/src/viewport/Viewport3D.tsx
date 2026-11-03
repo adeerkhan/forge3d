@@ -418,7 +418,7 @@ export function Viewport3D() {
       void actionsRef.current.renderViewport(
         Math.max(320, Math.round(width)),
         Math.max(240, Math.round(height)),
-        "preview",
+        renderQuality,
       );
     });
 
@@ -428,7 +428,7 @@ export function Viewport3D() {
       void actionsRef.current.renderViewport(
         Math.max(320, Math.round(width)),
         Math.max(240, Math.round(height)),
-        "preview",
+        renderQuality,
       );
     });
 
@@ -784,7 +784,10 @@ export function Viewport3D() {
   }, []);
 
   const mode = state?.project.viewport.mode ?? "solid";
-  const renderedMode = mode === "rendered";
+  // Material preview and Rendered both show rendered frames; only the quality
+  // preset differs.
+  const renderedMode = mode === "rendered" || mode === "material";
+  const renderQuality = mode === "material" ? "material" : "preview";
   const modeRef = useRef(renderedMode);
   modeRef.current = renderedMode;
   const sizeRef = useRef(size);

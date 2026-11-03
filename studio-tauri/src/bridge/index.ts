@@ -47,6 +47,10 @@ export interface StudioBridge {
   readMeshFile(path: string): Promise<MeshFilePayload>;
   /** Sample a DEM into a heightfield for the Studio viewport. */
   terrainPreview(path: string, resolution?: number): Promise<TerrainPreview>;
+  /** Replace the scene terrain's DEM with a raster the user picked. */
+  importTerrainDem(path: string): Promise<SessionState>;
+  /** Attach (`path`) or clear (`null`) a raster overlay on the terrain. */
+  setTerrainOverlay(path: string | null, opacity?: number): Promise<SessionState>;
 
   // Forge3D workspace adapter
   forge3dProbe(force?: boolean): Promise<EngineStatus>;
@@ -55,7 +59,7 @@ export interface StudioBridge {
   renderFrame(
     width: number,
     height: number,
-    quality?: "preview" | "final",
+    quality?: "preview" | "material" | "final",
     view?: RenderView,
   ): Promise<RenderFrame>;
   /** Render a full-resolution still and write it to `path`. */

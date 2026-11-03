@@ -211,6 +211,11 @@ impl Project {
                 if !used.contains(&terrain.asset) {
                     used.push(terrain.asset);
                 }
+                if let Some(overlay) = terrain.overlay {
+                    if !used.contains(&overlay.asset) {
+                        used.push(overlay.asset);
+                    }
+                }
                 if let Some(albedo) = terrain.albedo {
                     if !used.contains(&albedo) {
                         used.push(albedo);
@@ -275,6 +280,34 @@ impl Project {
                         object.name, asset.name, asset.kind
                     ));
                 }
+                if let Some(overlay) = terrain.overlay {
+                    let Some(asset) = self.asset(overlay.asset) else {
+                        return Err(format!(
+                            "object {:?} references missing overlay asset {}",
+                            object.name, overlay.asset
+                        ));
+                    };
+                    if !asset.kind.is_raster() {
+                        return Err(format!(
+                            "object {:?} uses asset {:?} as an overlay, but it is {:?}",
+                            object.name, asset.name, asset.kind
+                        ));
+                    }
+                }
+                if let Some(overlay) = terrain.overlay {
+                    let Some(asset) = self.asset(overlay.asset) else {
+                        return Err(format!(
+                            "object {:?} references missing overlay asset {}",
+                            object.name, overlay.asset
+                        ));
+                    };
+                    if !asset.kind.is_raster() {
+                        return Err(format!(
+                            "object {:?} uses asset {:?} as an overlay, but it is {:?}",
+                            object.name, asset.name, asset.kind
+                        ));
+                    }
+                }
                 if let Some(albedo) = terrain.albedo {
                     if !asset_ids.contains(&albedo) {
                         return Err(format!(
@@ -331,8 +364,10 @@ pub enum ViewportMode {
     /// Fast editing mode: grid, outlines, no production shading.
     #[default]
     Solid,
-    /// Forge3D-backed rendering (Phase 4).
+    /// Forge3D-backed rendering.
     Rendered,
+    /// Intermediate: lit terrain with the overlay, no shadows or POM.
+    Material,
 }
 
 impl ViewportMode {
@@ -340,6 +375,7 @@ impl ViewportMode {
         match self {
             ViewportMode::Solid => "Solid",
             ViewportMode::Rendered => "Rendered",
+            ViewportMode::Material => "Material",
         }
     }
 }

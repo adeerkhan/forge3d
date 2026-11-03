@@ -315,6 +315,38 @@ pub struct TerrainObject {
     /// Elevation range in metres, `[min, max]`.
     #[serde(default)]
     pub elevation_range: Option<[f32; 2]>,
+    /// Draped raster overlay (land cover, orthophoto) — the cartographic layer.
+    #[serde(default)]
+    pub overlay: Option<TerrainOverlay>,
+}
+
+/// A raster draped over the terrain, e.g. land cover or an orthophoto.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainOverlay {
+    pub asset: AssetId,
+    /// 0..1; the gallery's land-cover example uses 0.82.
+    #[serde(default = "default_opacity")]
+    pub opacity: f32,
+    /// Composite source colours after lighting (categorical palettes survive).
+    #[serde(default = "default_true")]
+    pub preserve_colors: bool,
+}
+
+fn default_opacity() -> f32 {
+    0.82
+}
+
+impl TerrainOverlay {
+    fn validate(&self) -> Result<(), String> {
+        if self.asset.is_nil() {
+            return Err("overlay has no asset".to_owned());
+        }
+        if !self.opacity.is_finite() || !(0.0..=1.0).contains(&self.opacity) {
+            return Err("overlay opacity must be between 0 and 1".to_owned());
+        }
+        Ok(())
+    }
 }
 
 fn default_z_scale() -> f32 {
@@ -327,6 +359,7 @@ impl TerrainObject {
             asset,
             z_scale: 1.0,
             albedo: None,
+            overlay: None,
             dimensions: None,
             world_origin_xz: None,
             world_span_xz: None,
@@ -379,6 +412,9 @@ impl TerrainObject {
     fn validate(&self) -> Result<(), String> {
         if self.asset.is_nil() {
             return Err("terrain has no DEM asset".to_owned());
+        }
+        if let Some(overlay) = &self.overlay {
+            overlay.validate()?;
         }
         if !self.z_scale.is_finite() || self.z_scale <= 0.0 {
             return Err("terrain vertical scale must be a positive number".to_owned());

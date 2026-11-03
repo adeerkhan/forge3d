@@ -69,8 +69,15 @@ export interface SessionApi {
     renderViewport(
       width: number,
       height: number,
-      quality?: "preview" | "final",
+      quality?: "preview" | "material" | "final",
     ): Promise<void>;
+    /** Pick and import a DEM, replacing the terrain's source. */
+    importTerrainDem(): Promise<void>;
+    /** Pick a raster overlay for the terrain. */
+    importTerrainOverlay(): Promise<void>;
+    /** Change or clear the overlay's opacity (0..1). */
+    setTerrainOverlayOpacity(opacity: number): Promise<void>;
+    clearTerrainOverlay(): Promise<void>;
     /** Render a full-resolution still and save it (dialog). */
     renderStill(): Promise<void>;
     restoreRecovery(id: string): Promise<void>;

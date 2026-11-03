@@ -137,6 +137,26 @@ pub enum Command {
         z_scale: f32,
     },
 
+    /// Replace a terrain's DEM (import/re-point), carrying its measured metadata.
+    SetTerrainDem {
+        id: ObjectId,
+        asset: crate::ids::AssetId,
+        #[serde(default)]
+        dimensions: Option<[u32; 2]>,
+        #[serde(default)]
+        elevation_range: Option<[f32; 2]>,
+        #[serde(default)]
+        world_origin_xz: Option<[f64; 2]>,
+        #[serde(default)]
+        world_span_xz: Option<[f64; 2]>,
+    },
+
+    /// Attach, change, or remove a terrain's draped overlay.
+    SetTerrainOverlay {
+        id: ObjectId,
+        overlay: Option<crate::scene::TerrainOverlay>,
+    },
+
     /// Duplicate an object in place. Children are not duplicated in Phase 2.
     DuplicateObject {
         id: ObjectId,
@@ -505,6 +525,96 @@ impl Command {
                 })
             }
 
+            Command::SetTerrainDem {
+                id,
+                asset,
+                dimensions,
+                elevation_range,
+                world_origin_xz,
+                world_span_xz,
+            } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let Some(dem) = project.asset(*asset) else {
+                    return Err(CommandError::AssetNotFound { id: *asset });
+                };
+                if dem.kind != crate::project::AssetKind::Dem {
+                    return Err(CommandError::invalid(
+                        "DEM",
+                        "asset is not an elevation model",
+                    ));
+                }
+                let previous = match &object.kind {
+                    crate::scene::ObjectKind::Terrain(terrain) => (
+                        terrain.asset,
+                        terrain.dimensions,
+                        terrain.elevation_range,
+                        terrain.world_origin_xz,
+                        terrain.world_span_xz,
+                    ),
+                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
+                };
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.asset = *asset;
+                        terrain.dimensions = *dimensions;
+                        terrain.elevation_range = *elevation_range;
+                        terrain.world_origin_xz = *world_origin_xz;
+                        terrain.world_span_xz = *world_span_xz;
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetTerrainDem {
+                        id: *id,
+                        asset: previous.0,
+                        dimensions: previous.1,
+                        elevation_range: previous.2,
+                        world_origin_xz: previous.3,
+                        world_span_xz: previous.4,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
+            Command::SetTerrainOverlay { id, overlay } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let previous = match &object.kind {
+                    crate::scene::ObjectKind::Terrain(terrain) => terrain.overlay,
+                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
+                };
+                if let Some(layer) = overlay {
+                    if project.asset(layer.asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: layer.asset });
+                    }
+                    if let Some(object) = project.scene.object_mut(*id) {
+                        if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                            terrain.overlay = Some(*layer);
+                        }
+                    }
+                } else if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.overlay = None;
+                    }
+                }
+                if let Some(object) = project.scene.object(*id) {
+                    object
+                        .validate()
+                        .map_err(|reason| CommandError::invalid("terrain", reason))?;
+                }
+                Ok(Outcome {
+                    inverse: Command::SetTerrainOverlay {
+                        id: *id,
+                        overlay: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
             Command::DuplicateObject { id, name } => {
                 let index = project
                     .scene
@@ -682,7 +792,9 @@ impl Command {
             | Command::SetCamera { id, .. }
             | Command::SetLight { id, .. }
             | Command::SetPrimitive { id, .. }
-            | Command::SetTerrainZScale { id, .. } => vec![*id],
+            | Command::SetTerrainZScale { id, .. }
+            | Command::SetTerrainOverlay { id, .. }
+            | Command::SetTerrainDem { id, .. } => vec![*id],
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -733,6 +845,14 @@ impl Command {
             Command::SetPrimitive { id, .. } => format!("Reshape {}", name_of(id)),
             Command::SetTerrainZScale { id, .. } => {
                 format!("Terrain scale {}", name_of(id))
+            }
+            Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
+            Command::SetTerrainOverlay { id, overlay } => {
+                if overlay.is_some() {
+                    format!("Overlay on {}", name_of(id))
+                } else {
+                    format!("Remove overlay from {}", name_of(id))
+                }
             }
             Command::SetActiveCamera { id } => match id {
                 Some(id) => format!("Set active camera {}", name_of(id)),
