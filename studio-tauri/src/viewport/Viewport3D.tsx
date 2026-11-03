@@ -14,7 +14,7 @@ import type {
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session-context";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
-import type { TerrainPreview } from "../bridge/types";
+import type { Material, TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
 
 const DEG = Math.PI / 180;
@@ -38,7 +38,7 @@ interface Runtime {
   selection: string[];
 }
 
-function buildPrimitive(primitive: Primitive): THREE.Object3D {
+function buildPrimitive(primitive: Primitive, material?: Material): THREE.Object3D {
   let geometry: THREE.BufferGeometry;
   switch (primitive.type) {
     case "cube":
@@ -51,13 +51,15 @@ function buildPrimitive(primitive: Primitive): THREE.Object3D {
       geometry = new THREE.PlaneGeometry(primitive.size, primitive.size);
       break;
   }
-  const material = new THREE.MeshStandardMaterial({
-    color: MESH_COLOUR,
-    roughness: 0.62,
-    metalness: 0.04,
+  const standard = new THREE.MeshStandardMaterial({
+    color: material
+      ? new THREE.Color(material.baseColor[0], material.baseColor[1], material.baseColor[2])
+      : MESH_COLOUR,
+    roughness: material?.roughness ?? 0.62,
+    metalness: material?.metallic ?? 0.04,
     side: primitive.type === "plane" ? THREE.DoubleSide : THREE.FrontSide,
   });
-  const mesh = new THREE.Mesh(geometry, material);
+  const mesh = new THREE.Mesh(geometry, standard);
   if (primitive.type === "plane") mesh.rotation.x = -Math.PI / 2;
   mesh.userData.owned = true;
   return mesh;
@@ -193,7 +195,7 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
 function contentSignature(object: SceneObject, terrainResolution: number): string {
   switch (object.kind.type) {
     case "mesh":
-      return `mesh:${JSON.stringify(object.kind.source)}`;
+      return `mesh:${JSON.stringify(object.kind.source)}:${JSON.stringify(object.kind.material)}`;
     case "terrain":
       // The preview resolution is part of the identity: changing it must rebuild
       // the mesh, which is exactly what used to be ignored.
@@ -585,7 +587,7 @@ export function Viewport3D() {
       if (object.kind.type === "mesh") {
         const source = object.kind.source;
         if (source.type === "primitive") {
-          group.add(buildPrimitive(source.primitive));
+          group.add(buildPrimitive(source.primitive, object.kind.material));
         } else {
           const asset = project.assets.find((entry) => entry.id === source.asset);
           if (!asset) {

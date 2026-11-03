@@ -240,18 +240,77 @@ pub enum ObjectKind {
 #[serde(rename_all = "camelCase")]
 pub struct MeshObject {
     pub source: MeshSource,
+    /// Studio-side material. The terrain renderer does not consume it, which the
+    /// capability report states explicitly rather than pretending otherwise.
+    #[serde(default)]
+    pub material: Material,
+}
+
+/// A simple, capability-taggable material. No node graph: Studio is not a
+/// universal shader editor, and Forge3D's terrain path has no material override.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Material {
+    /// Linear RGB, 0..=1.
+    #[serde(default = "default_base_color")]
+    pub base_color: [f32; 3],
+    #[serde(default = "default_roughness")]
+    pub roughness: f32,
+    #[serde(default = "default_metallic")]
+    pub metallic: f32,
+}
+
+fn default_base_color() -> [f32; 3] {
+    [0.62, 0.66, 0.72]
+}
+
+fn default_roughness() -> f32 {
+    0.6
+}
+
+fn default_metallic() -> f32 {
+    0.04
+}
+
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            base_color: default_base_color(),
+            roughness: default_roughness(),
+            metallic: default_metallic(),
+        }
+    }
+}
+
+impl Material {
+    pub fn validate(&self) -> Result<(), String> {
+        for channel in self.base_color {
+            if !channel.is_finite() || !(0.0..=1.0).contains(&channel) {
+                return Err("material colour channels must be between 0 and 1".to_owned());
+            }
+        }
+        if !self.roughness.is_finite() || !(0.0..=1.0).contains(&self.roughness) {
+            return Err("material roughness must be between 0 and 1".to_owned());
+        }
+        if !self.metallic.is_finite() || !(0.0..=1.0).contains(&self.metallic) {
+            return Err("material metallic must be between 0 and 1".to_owned());
+        }
+        Ok(())
+    }
 }
 
 impl MeshObject {
     pub fn primitive(primitive: Primitive) -> Self {
         Self {
             source: MeshSource::Primitive { primitive },
+            material: Material::default(),
         }
     }
 
     pub fn gltf(asset: AssetId, node: Option<String>) -> Self {
         Self {
             source: MeshSource::Gltf { asset, node },
+            material: Material::default(),
         }
     }
 
@@ -270,6 +329,7 @@ impl MeshObject {
     }
 
     fn validate(&self) -> Result<(), String> {
+        self.material.validate()?;
         match &self.source {
             MeshSource::Primitive { primitive } => primitive.validate(),
             MeshSource::Gltf { asset, node } => {

@@ -379,12 +379,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
-  const renderStillTo = useCallback(async (path: string) => {
+  const renderStillTo = useCallback(async (path: string | null) => {
     setRender((current) => ({ ...current, busy: true, error: null }));
     try {
       const frame = await bridge.renderStill(path);
       setRender({ frame, busy: false, error: null });
-      flash(`Saved ${path}`);
+      flash(frame.path ? `Saved ${frame.path}` : "Rendered");
     } catch (cause) {
       setRender({
         frame: null,
@@ -469,23 +469,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
 
       async renderStill() {
-        if (!state) return;
-        try {
-          let path: string | null = null;
-          if (bridge.kind === "tauri") {
-            const picked = await saveDialog({
-              defaultPath: `${state.project.name || "render"}.png`,
-              filters: [{ name: "PNG image", extensions: ["png"] }],
-            });
-            path = picked ?? null;
-          } else {
-            path = "/preview/render.png";
-          }
-          if (!path) return;
-          await renderStillTo(path);
-        } catch (cause) {
-          fail(cause);
-        }
+        // Default destination: <project>/renders/<name>-<timestamp>.png with a
+        // JSON sidecar, so a render can always be traced to its settings.
+        await renderStillTo(null);
       },
 
       async saveProject(saveAs = false) {

@@ -15,7 +15,6 @@ use studio_core::ids::ObjectId;
 use studio_core::project::AssetKind;
 use tauri::State;
 
-use studio_core::workspace::Handoff;
 use studio_core::{AutosaveReport, Session, Workspace, AUTOSAVE_INTERVAL_SECONDS};
 
 use crate::forge3d::{EngineStatus, Forge3dState};
@@ -327,18 +326,6 @@ pub fn forge3d_probe(forge: State<'_, Forge3dState>, force: Option<bool>) -> Eng
     forge.probe(force.unwrap_or(false))
 }
 
-fn current_handoff(state: &State<'_, AppState>) -> Result<Handoff, String> {
-    let session = lock(state)?;
-    let snapshot = session
-        .state()
-        .ok_or_else(|| "no project is open".to_owned())?;
-    Ok(studio_core::workspace::handoff(
-        &snapshot.project,
-        snapshot.revision,
-        Workspace::Forge3d,
-    ))
-}
-
 // ---------------------------------------------------------------------- render
 
 /// Render the current scene at `width` × `height` through the embedded
@@ -486,13 +473,27 @@ pub fn render_frame(
     quality: Option<String>,
     view: Option<RenderView>,
 ) -> Result<RenderFrame, String> {
-    let handoff = current_handoff(&state)?;
+    let (handoff, settings) = {
+        let session = lock(&state)?;
+        let snapshot = session
+            .state()
+            .ok_or_else(|| "no project is open".to_owned())?;
+        (
+            studio_core::workspace::handoff(
+                &snapshot.project,
+                snapshot.revision,
+                Workspace::Forge3d,
+            ),
+            snapshot.project.render,
+        )
+    };
     let request = RenderRequest::from_handoff(
         &handoff,
         width.unwrap_or(960).clamp(64, 4096),
         height.unwrap_or(600).clamp(64, 4096),
     )?
-    .with_view(view.as_ref());
+    .with_view(view.as_ref())
+    .with_settings(&settings);
     let python = forge.probe(false).python;
     let quality = quality.unwrap_or_else(|| "final".to_owned());
     render.render(&python, &request.dem, request.to_payload(&quality, None))
@@ -505,31 +506,101 @@ pub fn render_still(
     render: State<'_, RenderState>,
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
-    path: String,
+    path: Option<String>,
 ) -> Result<RenderFrame, String> {
-    let (handoff, width, height) = {
+    let (handoff, settings, project_name, project_path) = {
         let session = lock(&state)?;
         let snapshot = session
             .state()
             .ok_or_else(|| "no project is open".to_owned())?;
-        let plan = studio_core::workspace::handoff(
-            &snapshot.project,
-            snapshot.revision,
-            Workspace::Forge3d,
-        );
         (
-            plan,
-            snapshot.project.render.width,
-            snapshot.project.render.height,
+            studio_core::workspace::handoff(
+                &snapshot.project,
+                snapshot.revision,
+                Workspace::Forge3d,
+            ),
+            snapshot.project.render,
+            snapshot.project.name.clone(),
+            snapshot.path.clone(),
         )
     };
-    let request = RenderRequest::from_handoff(&handoff, width, height)?;
+
+    // Default output lives with the project, under renders/, and carries a
+    // sidecar describing exactly what produced it.
+    let target = match path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let base = project_path
+                .as_deref()
+                .map(std::path::Path::new)
+                .and_then(|path| path.parent())
+                .map(|dir| dir.join("renders"))
+                .unwrap_or_else(|| std::env::temp_dir().join("forge3d-studio/renders"));
+            let stamp = studio_core::now_unix_ms();
+            let safe: String = project_name
+                .chars()
+                .map(|ch| {
+                    if ch.is_alphanumeric() || ch == '-' || ch == '_' {
+                        ch
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            base.join(format!("{safe}-{stamp}.png"))
+        }
+    };
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+
+    let request = RenderRequest::from_handoff(&handoff, settings.width, settings.height)?
+        .with_settings(&settings);
     let python = forge.probe(false).python;
-    let frame = render.render(
+    let mut frame = render.render(
         &python,
         &request.dem,
-        request.to_payload("final", Some(&path)),
+        request.to_payload("final", Some(&target.to_string_lossy())),
     )?;
+    frame.path = Some(target.display().to_string());
+
+    let sidecar = target.with_extension("json");
+    let description = serde_json::json!({
+        "renderer": "forge3d.render_terrain_pbr_pom",
+        "width": request.width,
+        "height": request.height,
+        "exposure": request.exposure,
+        "shadows": request.shadows,
+        "ambientOcclusion": request.ambient_occlusion,
+        "camera": {
+            "phiDeg": request.phi_deg,
+            "thetaDeg": request.theta_deg,
+            "radius": request.radius,
+            "target": request.target,
+            "fovDeg": request.fov_deg,
+        },
+        "sun": {
+            "azimuthDeg": request.sun_azimuth_deg,
+            "elevationDeg": request.sun_elevation_deg,
+            "intensity": request.sun_intensity,
+        },
+        "terrain": {
+            "dem": request.dem,
+            "zScale": request.z_scale,
+            "overlay": request.overlay.as_ref().map(|overlay| overlay.path.clone()),
+        },
+        "frameMs": frame.ms,
+        "revision": handoff.revision,
+        "handoffKey": handoff.idempotency_key,
+    });
+    if let Err(error) = std::fs::write(
+        &sidecar,
+        serde_json::to_vec_pretty(&description).unwrap_or_default(),
+    ) {
+        log::warn!("could not write {}: {error}", sidecar.display());
+    }
+
     Ok(frame)
 }
 

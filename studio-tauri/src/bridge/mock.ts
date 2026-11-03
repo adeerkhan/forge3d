@@ -52,7 +52,11 @@ function primitiveObject(
     transform,
     visible: true,
     locked: false,
-    kind: { type: "mesh", source: { type: "primitive", primitive } },
+    kind: {
+      type: "mesh",
+      source: { type: "primitive", primitive },
+      material: { baseColor: [0.62, 0.66, 0.72], roughness: 0.6, metallic: 0.04 },
+    },
   };
 }
 
@@ -137,7 +141,13 @@ function starterProject(name: string, preset: string = "bryce"): Project {
     selection: [],
     workspace: "studio",
     viewport: { mode: "solid", gridVisible: true },
-    render: { width: 1920, height: 1080 },
+    render: {
+      width: 1920,
+      height: 1080,
+      exposure: 1.35,
+      shadows: true,
+      ambientOcclusion: false,
+    },
   };
 }
 
@@ -227,6 +237,10 @@ export function createMockBridge(): StudioBridge {
           return `Change DEM of ${find(command.id).name}`;
         case "setTerrainOverlay":
           return "Terrain overlay";
+        case "setMeshMaterial":
+          return `Material of ${find(command.id).name}`;
+        case "setRenderSettings":
+          return "Render settings";
         case "createObject":
           return `Create ${command.object.name}`;
         case "createPrimitive":
@@ -303,7 +317,11 @@ export function createMockBridge(): StudioBridge {
         if (object.kind.type !== "mesh") throw new Error("object is not a mesh");
         if (object.kind.source.type !== "primitive")
           throw new Error("object is an imported mesh, not a primitive");
-        object.kind = { type: "mesh", source: { type: "primitive", primitive } };
+        object.kind = {
+          type: "mesh",
+          source: { type: "primitive", primitive },
+          material: object.kind.material,
+        };
         return { label, affected: [command.id] };
       }
 
@@ -387,6 +405,17 @@ export function createMockBridge(): StudioBridge {
         object.kind.zScale = command.zScale;
         return { label, affected: [command.id] };
       }
+
+      case "setMeshMaterial": {
+        const object = find(command.id);
+        if (object.kind.type !== "mesh") throw new Error("object is not a mesh");
+        object.kind.material = structuredClone(command.material);
+        return { label, affected: [command.id] };
+      }
+
+      case "setRenderSettings":
+        requireProject().render = { ...command.render };
+        return { label, affected: [] };
 
       case "setTerrainDem": {
         const object = find(command.id);
@@ -623,7 +652,7 @@ export function createMockBridge(): StudioBridge {
       );
     },
 
-    renderStill: async (): Promise<RenderFrame> => {
+    renderStill: async (_path?: string | null): Promise<RenderFrame> => {
       throw new Error("Rendered mode needs the desktop shell");
     },
 

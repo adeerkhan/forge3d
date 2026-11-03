@@ -31,6 +31,8 @@ pub struct RenderFrame {
     pub ms: f64,
     /// PNG bytes, base64: the viewport shows it directly.
     pub png: String,
+    /// Where a still was written, when it was written to disk.
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +136,7 @@ impl RenderState {
                             .and_then(|png| png.as_str())
                             .unwrap_or_default()
                             .to_owned(),
+                        path: None,
                     });
                 }
             }
@@ -342,6 +345,9 @@ pub struct RenderRequest {
     pub sun_intensity: f64,
     pub z_scale: f64,
     pub overlay: Option<OverlayRequest>,
+    pub exposure: f64,
+    pub shadows: bool,
+    pub ambient_occlusion: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -353,6 +359,13 @@ pub struct OverlayRequest {
 }
 
 impl RenderRequest {
+    pub fn with_settings(mut self, settings: &studio_core::RenderSettings) -> Self {
+        self.exposure = f64::from(settings.exposure);
+        self.shadows = settings.shadows;
+        self.ambient_occlusion = settings.ambient_occlusion;
+        self
+    }
+
     pub fn with_view(mut self, view: Option<&RenderView>) -> Self {
         if let Some(view) = view {
             if view.radius.is_finite() && view.radius > 0.0 {
@@ -386,13 +399,17 @@ impl RenderRequest {
             "quality": {
                 "samples": 1,
                 // Material preview: lit terrain + overlay, no shadows or POM.
-                "shadows": !material,
+                // Quality presets; the project settings can only *add* cost.
+                "shadows": !material && self.shadows,
                 "pom": !material,
                 "sky": true,
-                "ambientOcclusion": final_quality,
-                "heightAo": final_quality,
+                "ambientOcclusion": final_quality && self.ambient_occlusion,
+                "heightAo": final_quality && self.ambient_occlusion,
             },
             "overlay": self.overlay,
+            "exposure": self.exposure,
+            "shadows": self.shadows,
+            "ambientOcclusion": self.ambient_occlusion,
             "output": output,
         })
     }
@@ -451,6 +468,9 @@ impl RenderRequest {
                 opacity: overlay.opacity,
                 preserve_colors: overlay.preserve_colors,
             }),
+            exposure: 1.35,
+            shadows: true,
+            ambient_occlusion: false,
         })
     }
 }

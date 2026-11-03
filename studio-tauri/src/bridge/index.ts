@@ -62,8 +62,8 @@ export interface StudioBridge {
     quality?: "preview" | "material" | "final",
     view?: RenderView,
   ): Promise<RenderFrame>;
-  /** Render a full-resolution still and write it to `path`. */
-  renderStill(path: string): Promise<RenderFrame>;
+  /** Render a full-resolution still; without a path it goes to renders/. */
+  renderStill(path?: string | null): Promise<RenderFrame>;
   renderStatus(): Promise<RenderStatus>;
   renderStop(): Promise<RenderStatus>;
 }

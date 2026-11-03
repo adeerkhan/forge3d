@@ -76,7 +76,7 @@ export const tauriBridge: StudioBridge = {
       view: view ?? null,
     }),
 
-  renderStill: (path: string) => invoke<RenderFrame>("render_still", { path }),
+  renderStill: (path) => invoke<RenderFrame>("render_still", { path: path ?? null }),
 
   renderStatus: () => invoke<RenderStatus>("render_status"),
 

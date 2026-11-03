@@ -336,6 +336,9 @@ impl Project {
         if self.render.width > 16_384 || self.render.height > 16_384 {
             return Err("render resolution must not exceed 16384 pixels".to_owned());
         }
+        if !self.render.exposure.is_finite() || !(0.05..=8.0).contains(&self.render.exposure) {
+            return Err("render exposure must be between 0.05 and 8".to_owned());
+        }
 
         Ok(())
     }
@@ -419,13 +422,30 @@ impl Default for ViewportState {
     }
 }
 
-/// Render output configuration. Phase 1 stores the resolution only; Phase 4
-/// adds the Forge3D-exposed controls.
+/// Render output configuration — the Forge3D controls the pipeline exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSettings {
     pub width: u32,
     pub height: u32,
+    /// Tone-mapping exposure. The pipeline uses ACES.
+    #[serde(default = "default_exposure")]
+    pub exposure: f32,
+    /// PCF sun shadows.
+    #[serde(default = "default_true")]
+    pub shadows: bool,
+    /// Screen-space ambient occlusion. Costs ~4.8 s per frame, so it is a
+    /// deliberate choice for finals rather than the interactive default.
+    #[serde(default)]
+    pub ambient_occlusion: bool,
+}
+
+fn default_exposure() -> f32 {
+    1.35
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for RenderSettings {
@@ -433,6 +453,9 @@ impl Default for RenderSettings {
         Self {
             width: 1920,
             height: 1080,
+            exposure: default_exposure(),
+            shadows: true,
+            ambient_occlusion: false,
         }
     }
 }

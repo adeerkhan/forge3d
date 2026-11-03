@@ -151,6 +151,17 @@ pub enum Command {
         world_span_xz: Option<[f64; 2]>,
     },
 
+    /// Replace render output settings.
+    SetRenderSettings {
+        render: crate::project::RenderSettings,
+    },
+
+    /// Replace a mesh's Studio material.
+    SetMeshMaterial {
+        id: ObjectId,
+        material: crate::scene::Material,
+    },
+
     /// Attach, change, or remove a terrain's draped overlay.
     SetTerrainOverlay {
         id: ObjectId,
@@ -578,6 +589,46 @@ impl Command {
                 })
             }
 
+            Command::SetRenderSettings { render } => {
+                let previous = project.render;
+                let mut probe = project.clone();
+                probe.render = *render;
+                probe
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("render settings", reason))?;
+                project.render = *render;
+                Ok(Outcome {
+                    inverse: Command::SetRenderSettings { render: previous },
+                    affected: Vec::new(),
+                })
+            }
+
+            Command::SetMeshMaterial { id, material } => {
+                material
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("material", reason))?;
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let previous = match &object.kind {
+                    crate::scene::ObjectKind::Mesh(mesh) => mesh.material,
+                    _ => return Err(CommandError::NotAMesh { id: *id }),
+                };
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Mesh(mesh) = &mut object.kind {
+                        mesh.material = *material;
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetMeshMaterial {
+                        id: *id,
+                        material: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
             Command::SetTerrainOverlay { id, overlay } => {
                 let object = project
                     .scene
@@ -794,7 +845,9 @@ impl Command {
             | Command::SetPrimitive { id, .. }
             | Command::SetTerrainZScale { id, .. }
             | Command::SetTerrainOverlay { id, .. }
-            | Command::SetTerrainDem { id, .. } => vec![*id],
+            | Command::SetTerrainDem { id, .. }
+            | Command::SetMeshMaterial { id, .. } => vec![*id],
+            Command::SetRenderSettings { .. } => Vec::new(),
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -847,6 +900,8 @@ impl Command {
                 format!("Terrain scale {}", name_of(id))
             }
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
+            Command::SetRenderSettings { .. } => "Render settings".to_owned(),
+            Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),
             Command::SetTerrainOverlay { id, overlay } => {
                 if overlay.is_some() {
                     format!("Overlay on {}", name_of(id))

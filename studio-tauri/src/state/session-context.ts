@@ -78,7 +78,7 @@ export interface SessionApi {
     /** Change or clear the overlay's opacity (0..1). */
     setTerrainOverlayOpacity(opacity: number): Promise<void>;
     clearTerrainOverlay(): Promise<void>;
-    /** Render a full-resolution still and save it (dialog). */
+    /** Render a full-resolution still into the project's renders/ directory. */
     renderStill(): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;

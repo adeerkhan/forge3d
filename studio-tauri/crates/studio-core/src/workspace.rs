@@ -305,6 +305,20 @@ pub fn capability_report(project: &Project, target: Workspace) -> CapabilityRepo
                  only the first will be shown."
             ));
         }
+        // Meshes can be Studio-only for two reasons; both get one note.
+        let mesh_count = project
+            .scene
+            .objects
+            .iter()
+            .filter(|object| object.is_mesh())
+            .count();
+        if mesh_count > 0 {
+            degradations.push(format!(
+                "{mesh_count} mesh object{} carry Studio materials that Forge3D's terrain \
+                 pipeline does not consume; only geometry from imported assets is rendered.",
+                if mesh_count == 1 { "" } else { "s" }
+            ));
+        }
         let gltf_assets = project
             .assets
             .iter()
@@ -558,7 +572,15 @@ mod tests {
         assert!(mesh.detail.contains("Primitive geometry"));
         assert_eq!(report.count(CapabilityLevel::Partial), 2); // mesh + directional sun
         assert!(report.has_renderable_content);
-        assert_eq!(report.degradations.len(), 1);
+        // One note for the primitive geometry, one for Studio-only materials.
+        assert!(report
+            .degradations
+            .iter()
+            .any(|note| note.contains("primitive object")));
+        assert!(report
+            .degradations
+            .iter()
+            .any(|note| note.contains("Studio materials")));
     }
 
     #[test]

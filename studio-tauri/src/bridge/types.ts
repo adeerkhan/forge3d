@@ -77,7 +77,7 @@ export interface TerrainOverlay {
 
 /** Internally tagged enum: the payload is flattened next to `type`. */
 export type ObjectKind =
-  | { type: "mesh"; source: MeshSource }
+  | { type: "mesh"; source: MeshSource; material: Material }
   | ({ type: "terrain" } & TerrainObject)
   | ({ type: "camera" } & CameraObject)
   | ({ type: "light" } & LightObject);
@@ -113,6 +113,16 @@ export interface ViewportState {
 export interface RenderSettings {
   width: number;
   height: number;
+  exposure: number;
+  shadows: boolean;
+  ambientOcclusion: boolean;
+}
+
+/** Studio-side material. The terrain renderer does not consume it. */
+export interface Material {
+  baseColor: [number, number, number];
+  roughness: number;
+  metallic: number;
 }
 
 export interface Project {
@@ -305,6 +315,8 @@ export interface RenderFrame {
   ms: number;
   /** Base64 PNG. */
   png: string;
+  /** Where a still was written, when it went to disk. */
+  path: string | null;
 }
 
 export interface RenderStatus {
@@ -345,6 +357,8 @@ export type Command =
   | { type: "setCamera"; id: string; camera: CameraObject }
   | { type: "setLight"; id: string; light: LightObject }
   | { type: "setPrimitive"; id: string; primitive: Primitive }
+  | { type: "setMeshMaterial"; id: string; material: Material }
+  | { type: "setRenderSettings"; render: RenderSettings }
   | { type: "setTerrainZScale"; id: string; zScale: number }
   | {
       type: "setTerrainDem";

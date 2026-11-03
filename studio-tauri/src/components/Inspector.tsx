@@ -1,5 +1,6 @@
 import type {
   Asset,
+  Material,
   CameraObject,
   LightKind,
   LightObject,
@@ -224,6 +225,63 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
+function RenderSettingsEditor() {
+  const { state, actions } = useSession();
+  const render = state?.project.render;
+  if (!render) return null;
+  const commit = (patch: Partial<typeof render>) => {
+    void actions.apply({ type: "setRenderSettings", render: { ...render, ...patch } });
+  };
+  return (
+    <Section title="Render output">
+      <div className="pair">
+        <NumberField label="Width" value={render.width} step={16} min={64} max={16384} onCommit={(width) => commit({ width: Math.round(width) })} />
+        <NumberField label="Height" value={render.height} step={16} min={64} max={16384} onCommit={(height) => commit({ height: Math.round(height) })} />
+      </div>
+      <NumberField label="Exposure" value={render.exposure} step={0.05} min={0.05} max={8} onCommit={(exposure) => commit({ exposure })} />
+      <Toggle label="Shadows" checked={render.shadows} onChange={(shadows) => commit({ shadows })} />
+      <Toggle
+        label="Ambient occlusion (final, ~5 s)"
+        checked={render.ambientOcclusion}
+        onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
+      />
+      <p className="hint">
+        Settings are stored with the project and applied to both the Rendered
+        viewport and the Render button.
+      </p>
+    </Section>
+  );
+}
+
+function MaterialEditor({ object, material }: { object: SceneObject; material: Material }) {
+  const { actions } = useSession();
+  const commit = (next: Material) =>
+    void actions.apply({ type: "setMeshMaterial", id: object.id, material: next });
+  const channel = (index: 0 | 1 | 2) => (value: number) => {
+    const baseColor: [number, number, number] = [...material.baseColor] as [number, number, number];
+    baseColor[index] = value;
+    commit({ ...material, baseColor });
+  };
+  return (
+    <Section title="Material">
+      <div className="triple">
+        <NumberField label="R" value={material.baseColor[0]} step={0.02} min={0} max={1} onCommit={channel(0)} />
+        <NumberField label="G" value={material.baseColor[1]} step={0.02} min={0} max={1} onCommit={channel(1)} />
+        <NumberField label="B" value={material.baseColor[2]} step={0.02} min={0} max={1} onCommit={channel(2)} />
+      </div>
+      <span className="group-label">Base colour (linear RGB)</span>
+      <div className="pair">
+        <NumberField label="Roughness" value={material.roughness} step={0.05} min={0} max={1} onCommit={(roughness) => commit({ ...material, roughness })} />
+        <NumberField label="Metallic" value={material.metallic} step={0.05} min={0} max={1} onCommit={(metallic) => commit({ ...material, metallic })} />
+      </div>
+      <p className="hint">
+        Studio renders this material; the Forge3D terrain pipeline does not
+        consume it, and the capability report says so.
+      </p>
+    </Section>
+  );
+}
+
 function TerrainEditor({
   object,
   terrain,
@@ -426,18 +484,7 @@ export function Inspector() {
               <dd>{project.scene.objects.filter((o) => o.kind.type === "light").length}</dd>
             </div>
           </Section>
-          <Section title="Render output">
-            <div className="readout readout--compact">
-              <dt>Resolution</dt>
-              <dd className="mono">
-                {project.render.width} × {project.render.height}
-              </dd>
-            </div>
-            <p className="hint">
-              Stored with the project. Phase 4 exposes the Forge3D render
-              controls that consume it.
-            </p>
-          </Section>
+          <RenderSettingsEditor />
           <p className="hint">Select an object to edit its properties.</p>
         </div>
       </div>
@@ -512,6 +559,9 @@ export function Inspector() {
 
         {meshSource?.type === "primitive" && (
           <MeshEditor object={object} primitive={meshSource.primitive} />
+        )}
+        {object.kind.type === "mesh" && (
+          <MaterialEditor object={object} material={object.kind.material} />
         )}
         {meshSource?.type === "gltf" && (
           <ImportedMesh object={object} asset={meshAsset} />

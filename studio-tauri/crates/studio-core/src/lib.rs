@@ -54,8 +54,8 @@ pub use project::{
     FORMAT, SCHEMA_VERSION,
 };
 pub use scene::{
-    CameraObject, LightKind, LightObject, MeshObject, MeshSource, ObjectKind, Primitive, Scene,
-    SceneObject, TerrainObject,
+    CameraObject, LightKind, LightObject, Material, MeshObject, MeshSource, ObjectKind, Primitive,
+    Scene, SceneObject, TerrainObject,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 pub use workspace::{

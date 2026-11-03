@@ -247,7 +247,7 @@ class StudioRenderer:
             light_elevation_deg=float(sun.get("elevationDeg", 35.0)),
             sun_intensity=float(sun.get("intensity", 3.0)),
             ibl_enabled=True,
-            exposure=1.35,
+            exposure=float(request.get("exposure", 1.35)),
             # The SSAO pass costs ~4.8 s per frame by itself (measured); every
             # other feature combined is ~150 ms. Viewport frames therefore skip
             # it, and only a final still pays for it.
