@@ -174,9 +174,9 @@ fn deleting_a_parent_is_refused_until_children_are_gone() {
         transform: Transform::default(),
         visible: true,
         locked: false,
-        kind: studio_core::ObjectKind::Mesh(studio_core::MeshObject {
-            primitive: studio_core::Primitive::Cube { size: 1.0 },
-        }),
+        kind: studio_core::ObjectKind::Mesh(studio_core::MeshObject::primitive(
+            studio_core::Primitive::Cube { size: 1.0 },
+        )),
     };
     editor
         .apply(Command::CreateObject {
@@ -250,7 +250,13 @@ fn newer_projects_do_not_load_and_are_not_rewritten() {
     fs::write(&path, &text).unwrap();
 
     let error = load(&path).unwrap_err();
-    assert!(error.to_string().contains("schema version 2"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "schema version {}",
+            studio_core::SCHEMA_VERSION + 1
+        )),
+        "{error}"
+    );
     assert_eq!(fs::read_to_string(&path).unwrap(), text);
 }
 

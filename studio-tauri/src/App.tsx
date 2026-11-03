@@ -6,7 +6,7 @@ import { RecoveryBanner } from "./components/RecoveryBanner";
 import { SceneTree } from "./components/SceneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TopBar } from "./components/TopBar";
-import { Viewport } from "./components/Viewport";
+import { Viewport3D } from "./viewport/Viewport3D";
 import { CloseIcon } from "./components/icons";
 import { useSession } from "./state/session";
 
@@ -27,7 +27,7 @@ export default function App() {
             </aside>
             <section className="workspace__center">
               <RecoveryBanner />
-              <Viewport />
+              <Viewport3D />
             </section>
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />
@@ -64,7 +64,7 @@ export default function App() {
 }
 
 function useKeyboardShortcuts() {
-  const { actions } = useSession();
+  const { actions, setTool } = useSession();
 
   useEffect(() => {
     const isEditable = (target: EventTarget | null) => {
@@ -82,12 +82,44 @@ function useKeyboardShortcuts() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (isEditable(event.target)) return;
 
-      if (event.key === "Escape") {
-        void actions.select([]);
-        return;
-      }
+      const mod = event.ctrlKey || event.metaKey;
+      const key = event.key.toLowerCase();
 
-      if (!(event.ctrlKey || event.metaKey)) return;
+      if (!mod) {
+        if (event.key === "Escape") {
+          void actions.select([]);
+          return;
+        }
+        // Blender-style manipulation tools and object actions.
+        switch (key) {
+          case "v":
+            setTool("select");
+            return;
+          case "g":
+            setTool("move");
+            return;
+          case "r":
+            setTool("rotate");
+            return;
+          case "s":
+            setTool("scale");
+            return;
+          case "x":
+          case "delete":
+          case "backspace":
+            event.preventDefault();
+            void actions.deleteSelection();
+            return;
+          case "d":
+            if (event.shiftKey) {
+              event.preventDefault();
+              void actions.duplicateSelection();
+            }
+            return;
+          default:
+            return;
+        }
+      }
 
       switch (event.key.toLowerCase()) {
         case "z":

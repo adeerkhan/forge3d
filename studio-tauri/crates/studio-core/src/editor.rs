@@ -150,15 +150,24 @@ impl Editor {
     }
 
     /// Apply a command, push it onto the undo stack, and drop the redo stack.
+    ///
+    /// The command stored for redo is the *canonical* one, derived by applying
+    /// the inverse to a copy of the post-edit state. Without that step a
+    /// `DuplicateObject` would mint a fresh UUID every time it re-ran, so redo
+    /// would silently produce a different object than undo removed.
     pub fn apply(&mut self, command: Command) -> Result<Applied, StudioError> {
-        let affected = command.affected();
         let label = command.label(&self.project);
-        let inverse = command.apply(&mut self.project)?;
+        let (inverse, affected) = command.apply_with_effect(&mut self.project)?;
+
+        let mut scratch = self.project.clone();
+        let canonical = inverse.apply(&mut scratch)?;
+        drop(scratch);
+
         self.after_edit();
         self.redo.clear();
         self.push_undo(HistoryEntry {
             label: label.clone(),
-            command,
+            command: canonical,
             inverse,
         });
         Ok(Applied {
@@ -173,8 +182,7 @@ impl Editor {
     /// re-applies the original command rather than its inverse.
     pub fn undo(&mut self) -> Result<Applied, StudioError> {
         let entry = self.undo.pop().ok_or(StudioError::NothingToUndo)?;
-        let affected = entry.inverse.affected();
-        entry.inverse.apply(&mut self.project)?;
+        let (_, affected) = entry.inverse.apply_with_effect(&mut self.project)?;
         self.after_edit();
         self.redo.push(entry.clone());
         Ok(Applied {
@@ -187,8 +195,7 @@ impl Editor {
     /// Re-apply the last undone command.
     pub fn redo(&mut self) -> Result<Applied, StudioError> {
         let entry = self.redo.pop().ok_or(StudioError::NothingToRedo)?;
-        let affected = entry.command.affected();
-        entry.command.apply(&mut self.project)?;
+        let (_, affected) = entry.command.apply_with_effect(&mut self.project)?;
         self.after_edit();
         self.undo.push(entry.clone());
         Ok(Applied {

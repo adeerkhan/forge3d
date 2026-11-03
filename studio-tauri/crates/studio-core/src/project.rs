@@ -5,9 +5,11 @@
 //! GPU resources, process handles, or file-system absolute paths, so a project
 //! file is portable and diffable.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{new_id, ObjectId, ProjectId};
+use crate::ids::{new_id, AssetId, ObjectId, ProjectId};
 use crate::math::{Transform, Vec3};
 use crate::now_unix_ms;
 use crate::scene::{
@@ -20,9 +22,10 @@ pub const FORMAT: &str = "studio3d";
 
 /// Schema version written by this build.
 ///
-/// Bump this when the document shape changes, add the step to
-/// [`crate::persist::migrate`], and keep the previous version loadable.
-pub const SCHEMA_VERSION: u32 = 1;
+/// v1 carried `kind.primitive` on meshes; v2 adds imported glTF/GLB meshes
+/// (`kind.source`) and the project asset registry. v1 files are migrated on
+/// load — see [`crate::persist::migrate`].
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Default project name for `File → New`.
 pub const UNTITLED: &str = "Untitled";
@@ -39,6 +42,10 @@ pub struct Project {
     pub created_unix_ms: u64,
     pub updated_unix_ms: u64,
     pub scene: Scene,
+    /// Imported files referenced by mesh objects. Paths are stored relative to
+    /// the project file where possible (see [`crate::persist`]).
+    #[serde(default)]
+    pub assets: Vec<Asset>,
     /// Selected object IDs; view state, persisted so a reopened project looks
     /// the way the user left it.
     #[serde(default)]
@@ -62,9 +69,7 @@ impl Project {
             transform: Transform::default(),
             visible: true,
             locked: false,
-            kind: ObjectKind::Mesh(MeshObject {
-                primitive: Primitive::Cube { size: 2.0 },
-            }),
+            kind: ObjectKind::Mesh(MeshObject::primitive(Primitive::Cube { size: 2.0 })),
         };
 
         let camera = SceneObject {
@@ -116,6 +121,7 @@ impl Project {
             created_unix_ms: now,
             updated_unix_ms: now,
             scene,
+            assets: Vec::new(),
             selection: Vec::new(),
             workspace: Workspace::Studio,
             viewport: ViewportState::default(),
@@ -127,6 +133,23 @@ impl Project {
     /// applied command, so "modified" is meaningful in a saved file.
     pub fn touch(&mut self) {
         self.updated_unix_ms = now_unix_ms();
+    }
+
+    /// Assets referenced by at least one object, in registry order.
+    pub fn used_assets(&self) -> Vec<AssetId> {
+        let mut used: Vec<AssetId> = Vec::new();
+        for object in &self.scene.objects {
+            if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
+                if !used.contains(&asset) {
+                    used.push(asset);
+                }
+            }
+        }
+        used
+    }
+
+    pub fn asset(&self, id: AssetId) -> Option<&Asset> {
+        self.assets.iter().find(|asset| asset.id == id)
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -144,6 +167,29 @@ impl Project {
         }
         validate_name(&self.name, "project name")?;
         self.scene.validate()?;
+
+        let mut asset_ids: Vec<AssetId> = Vec::with_capacity(self.assets.len());
+        for asset in &self.assets {
+            asset
+                .validate()
+                .map_err(|reason| format!("asset {:?}: {reason}", asset.name))?;
+            if asset_ids.contains(&asset.id) {
+                return Err(format!("duplicate asset id {}", asset.id));
+            }
+            asset_ids.push(asset.id);
+        }
+        // A mesh may only reference an asset the project actually carries;
+        // dangling references are what "missing asset" panics are made of.
+        for object in &self.scene.objects {
+            if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
+                if !asset_ids.contains(&asset) {
+                    return Err(format!(
+                        "object {:?} references missing asset {asset}",
+                        object.name
+                    ));
+                }
+            }
+        }
 
         let mut seen: Vec<ObjectId> = Vec::with_capacity(self.selection.len());
         for id in &self.selection {
@@ -237,6 +283,70 @@ impl Default for RenderSettings {
     }
 }
 
+/// An imported source file. The project stores a reference, never the bytes:
+/// the viewport reads the file when it needs it, and Phase 5 adds relinking.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Asset {
+    pub id: AssetId,
+    /// Display name, normally the imported file name.
+    pub name: String,
+    /// Path to the source file. Relative paths resolve against the project
+    /// file's directory; absolute paths survive only when the file cannot be
+    /// expressed relatively.
+    pub path: String,
+    pub kind: AssetKind,
+    pub byte_size: u64,
+}
+
+impl Asset {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.id.is_nil() {
+            return Err("asset id must not be nil".to_owned());
+        }
+        validate_name(&self.name, "asset name")?;
+        if self.path.trim().is_empty() {
+            return Err("asset path must not be empty".to_owned());
+        }
+        if self.path.chars().any(|ch| ch.is_control()) {
+            return Err("asset path must not contain control characters".to_owned());
+        }
+        if self.byte_size == 0 {
+            return Err("asset file is empty".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssetKind {
+    Gltf,
+    Glb,
+}
+
+impl AssetKind {
+    pub fn from_path(path: &Path) -> Option<Self> {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("gltf") => Some(AssetKind::Gltf),
+            Some("glb") => Some(AssetKind::Glb),
+            _ => None,
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            AssetKind::Gltf => "gltf",
+            AssetKind::Glb => "glb",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +408,55 @@ mod tests {
             .validate()
             .unwrap_err()
             .contains("greater than zero"));
+    }
+
+    #[test]
+    fn assets_are_validated() {
+        let good = Asset {
+            id: new_id(),
+            name: "duck.glb".to_owned(),
+            path: "assets/duck.glb".to_owned(),
+            kind: AssetKind::Glb,
+            byte_size: 1024,
+        };
+        good.validate().unwrap();
+
+        let mut empty = good.clone();
+        empty.byte_size = 0;
+        assert!(empty.validate().is_err());
+
+        let mut nameless = good.clone();
+        nameless.name = "  ".to_owned();
+        assert!(nameless.validate().is_err());
+
+        let mut pathless = good.clone();
+        pathless.path = String::new();
+        assert!(pathless.validate().is_err());
+
+        let mut nil = good;
+        nil.id = uuid::Uuid::nil();
+        assert!(nil.validate().is_err());
+    }
+
+    #[test]
+    fn asset_kind_is_read_from_the_extension() {
+        assert_eq!(
+            AssetKind::from_path(Path::new("a.glb")),
+            Some(AssetKind::Glb)
+        );
+        assert_eq!(
+            AssetKind::from_path(Path::new("DIR/A.GLTF")),
+            Some(AssetKind::Gltf)
+        );
+        assert_eq!(AssetKind::from_path(Path::new("a.obj")), None);
+    }
+
+    #[test]
+    fn meshes_may_not_reference_assets_the_project_lacks() {
+        let mut project = Project::new(UNTITLED);
+        project.scene.objects[0].kind = ObjectKind::Mesh(MeshObject::gltf(new_id(), None));
+        let error = project.validate().unwrap_err();
+        assert!(error.contains("missing asset"), "{error}");
     }
 
     #[test]

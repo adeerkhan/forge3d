@@ -15,6 +15,7 @@ import type {
   Project,
   RecoveryEntry,
   SessionState,
+  MeshFilePayload,
   ShellInfo,
 } from "./types";
 
@@ -35,6 +36,8 @@ export interface StudioBridge {
   listRecovery(): Promise<RecoveryEntry[]>;
   restoreRecovery(id: string): Promise<SessionState>;
   discardRecovery(id: string): Promise<void>;
+  /** Read a `.gltf`/`.glb` file for import. Desktop shell only. */
+  readMeshFile(path: string): Promise<MeshFilePayload>;
 }
 
 export interface OpenResult {

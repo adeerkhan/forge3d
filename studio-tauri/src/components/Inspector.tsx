@@ -1,4 +1,12 @@
-import type { CameraObject, LightKind, LightObject, Primitive, SceneObject, Transform } from "../bridge/types";
+import type {
+  Asset,
+  CameraObject,
+  LightKind,
+  LightObject,
+  Primitive,
+  SceneObject,
+  Transform,
+} from "../bridge/types";
 import { objectKindLabel } from "../bridge/types";
 import { useSession } from "../state/session";
 import { NumberField, Section, TextField, Toggle } from "./fields";
@@ -216,6 +224,31 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
+function ImportedMesh({ asset }: { object: SceneObject; asset: Asset | undefined }) {
+  return (
+    <Section title="Mesh">
+      <div className="readout">
+        <dt>Source</dt>
+        <dd>glTF/GLB asset</dd>
+        <dt>Asset</dt>
+        <dd>{asset?.name ?? "missing asset"}</dd>
+        <dt>File</dt>
+        <dd className="mono" title={asset?.path}>
+          {asset?.path ?? "—"}
+        </dd>
+        <dt>Size</dt>
+        <dd className="mono">
+          {asset ? `${(asset.byteSize / 1024).toFixed(1)} KB` : "—"}
+        </dd>
+      </div>
+      <p className="hint">
+        Imported meshes are moved, rotated, and scaled like any other object.
+        Material overrides and asset relinking arrive in Phase 5.
+      </p>
+    </Section>
+  );
+}
+
 export function Inspector() {
   const { state, actions } = useSession();
   if (!state) return null;
@@ -304,6 +337,11 @@ export function Inspector() {
 
   const object = selectedObjects[0];
   const locked = object.locked;
+  const meshSource = object.kind.type === "mesh" ? object.kind.source : null;
+  const meshAsset =
+    meshSource?.type === "gltf"
+      ? project.assets.find((asset) => asset.id === meshSource.asset)
+      : undefined;
 
   return (
     <div className="panel">
@@ -335,8 +373,11 @@ export function Inspector() {
 
         <TransformEditor object={object} transform={object.transform} disabled={locked} />
 
-        {object.kind.type === "mesh" && (
-          <MeshEditor object={object} primitive={object.kind.primitive} />
+        {meshSource?.type === "primitive" && (
+          <MeshEditor object={object} primitive={meshSource.primitive} />
+        )}
+        {meshSource?.type === "gltf" && (
+          <ImportedMesh object={object} asset={meshAsset} />
         )}
         {object.kind.type === "camera" && (
           <CameraEditor

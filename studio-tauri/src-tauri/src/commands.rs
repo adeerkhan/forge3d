@@ -6,11 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
+use base64::Engine as _;
 use serde::Serialize;
 use studio_core::autosave::RecoveryEntry;
 use studio_core::command::Command;
 use studio_core::editor::{Applied, SessionState};
 use studio_core::ids::ObjectId;
+use studio_core::project::AssetKind;
 use tauri::State;
 
 use studio_core::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
@@ -171,6 +173,70 @@ pub fn discard_recovery(state: State<'_, AppState>, id: String) -> Result<(), St
         .autosave
         .discard(&id)
         .map_err(|error| error.to_string())
+}
+
+/// Imports are read whole into memory. Phase 5 streams large assets; until
+/// then the cap is what keeps a 2 GB GLB from freezing the window.
+const MAX_MESH_BYTES: u64 = 32 * 1024 * 1024;
+
+/// A mesh file the viewport can parse with GLTFLoader.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshFilePayload {
+    pub path: String,
+    pub name: String,
+    pub kind: AssetKind,
+    pub byte_size: u64,
+    /// Base64 of the file bytes. IPC carries JSON, and glTF must reach the
+    /// webview intact; the cap above bounds the cost.
+    pub base64: String,
+}
+
+/// Read a `.gltf`/`.glb` file for import.
+///
+/// The UI parses the bytes before registering anything, so a corrupt file
+/// never reaches the project model.
+#[tauri::command]
+pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
+    let path = PathBuf::from(path);
+    let kind = AssetKind::from_path(&path).ok_or_else(|| {
+        format!(
+            "{} is not a glTF file; import .gltf or .glb",
+            path.display()
+        )
+    })?;
+
+    let metadata = std::fs::metadata(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    if metadata.len() == 0 {
+        return Err(format!("{} is empty", path.display()));
+    }
+    if metadata.len() > MAX_MESH_BYTES {
+        return Err(format!(
+            "{} is {:.1} MB; imports are limited to {} MB for now",
+            path.display(),
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            MAX_MESH_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "imported".to_owned());
+
+    Ok(MeshFilePayload {
+        path: path.to_string_lossy().into_owned(),
+        name,
+        kind,
+        byte_size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
 }
 
 /// Cheap health check used by the UI on boot; also proves the bridge works.

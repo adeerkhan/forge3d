@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import type { SceneObject } from "../bridge/types";
+import { objectKindLabel } from "../bridge/types";
 import { useSession } from "../state/session";
 import { EyeIcon, EyeOffIcon, LockIcon, UnlockIcon, objectIcon } from "./icons";
 
@@ -81,7 +82,7 @@ export function SceneTree() {
               <span className={`tree-name ${object.visible ? "" : "is-hidden"}`}>
                 {object.name}
               </span>
-              <span className="tree-kind">{object.kind.type}</span>
+              <span className="tree-kind">{objectKindLabel(object.kind)}</span>
               <button
                 type="button"
                 className="tree-action"

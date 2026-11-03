@@ -36,7 +36,7 @@ export function EmptyState() {
         <dl className="empty__facts">
           <div>
             <dt>Phase</dt>
-            <dd>1 — desktop shell and project model</dd>
+            <dd>2 — solid viewport and editing tools</dd>
           </div>
           <div>
             <dt>Shell</dt>

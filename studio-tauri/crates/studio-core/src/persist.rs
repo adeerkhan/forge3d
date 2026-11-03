@@ -69,20 +69,94 @@ pub fn from_json(text: &str, context: &str) -> Result<Project, StudioError> {
 
 /// Upgrade a document written by `from_version` to [`SCHEMA_VERSION`].
 ///
-/// v1 is the first format, so today this only accepts v1 and names the two
-/// failure modes. When v2 lands, add an arm here that rewrites the `Value` in
-/// place and every older file keeps loading.
-fn migrate(value: Value, from_version: u32, context: &str) -> Result<Value, StudioError> {
-    match from_version {
-        SCHEMA_VERSION => Ok(value),
-        0 => Err(StudioError::invalid(format!(
+/// Steps are applied one version at a time, so a v1 file opened by a future v3
+/// build runs v1→v2 then v2→v3. Every step rewrites the `Value` in place and
+/// bumps `schemaVersion`.
+fn migrate(mut value: Value, from_version: u32, context: &str) -> Result<Value, StudioError> {
+    if from_version == 0 {
+        return Err(StudioError::invalid(format!(
             "{context} predates schema version 1 and cannot be upgraded"
-        ))),
-        other => Err(StudioError::UnsupportedSchema {
-            context: context.to_owned(),
-            found: other,
-            supported: SCHEMA_VERSION,
-        }),
+        )));
+    }
+    let mut version = from_version;
+    while version < SCHEMA_VERSION {
+        value = match version {
+            1 => migrate_v1_to_v2(value),
+            other => {
+                return Err(StudioError::UnsupportedSchema {
+                    context: context.to_owned(),
+                    found: other,
+                    supported: SCHEMA_VERSION,
+                })
+            }
+        };
+        version += 1;
+    }
+    Ok(value)
+}
+
+/// v1 → v2: meshes carried `kind.primitive`; v2 nests it under `kind.source`
+/// (which may also be an imported glTF asset) and adds the asset registry.
+fn migrate_v1_to_v2(mut value: Value) -> Value {
+    if let Some(objects) = value
+        .get_mut("scene")
+        .and_then(|scene| scene.get_mut("objects"))
+        .and_then(Value::as_array_mut)
+    {
+        for object in objects {
+            let Some(kind) = object.get_mut("kind").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            if kind.get("type").and_then(Value::as_str) != Some("mesh") {
+                continue;
+            }
+            if let Some(primitive) = kind.remove("primitive") {
+                let mut source = serde_json::Map::new();
+                source.insert("type".into(), Value::from("primitive"));
+                source.insert("primitive".into(), primitive);
+                kind.insert("source".into(), Value::Object(source));
+            }
+        }
+    }
+
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("assets")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
+    }
+    value
+}
+
+/// Rewrite absolute asset paths relative to the project file, so a project
+/// directory stays portable. Paths outside the project directory are kept
+/// absolute (and reported as such by the UI).
+fn relativize_assets(project: &Project, dir: &Path) -> Project {
+    let mut stored = project.clone();
+    for asset in &mut stored.assets {
+        let candidate = Path::new(&asset.path);
+        if !candidate.is_absolute() {
+            continue;
+        }
+        if let Ok(relative) = candidate.strip_prefix(dir) {
+            asset.path = relative
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+        }
+    }
+    stored
+}
+
+/// Resolve stored relative asset paths against the project file's directory.
+fn resolve_assets(project: &mut Project, dir: &Path) {
+    for asset in &mut project.assets {
+        let candidate = Path::new(&asset.path);
+        if candidate.is_absolute() {
+            continue;
+        }
+        asset.path = dir.join(candidate).to_string_lossy().into_owned();
     }
 }
 
@@ -92,7 +166,14 @@ pub fn load(path: &Path) -> Result<Project, StudioError> {
         path: path.to_path_buf(),
         source,
     })?;
-    from_json(&text, &format!("project file {}", path.display()))
+    let mut project = from_json(&text, &format!("project file {}", path.display()))?;
+    let dir = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    resolve_assets(&mut project, &dir);
+    Ok(project)
 }
 
 /// Write `project` to `path` atomically.
@@ -101,8 +182,6 @@ pub fn load(path: &Path) -> Result<Project, StudioError> {
 /// `rename` is atomic), removed on any failure, and never left behind on
 /// success.
 pub fn save_atomic(path: &Path, project: &Project) -> Result<(), StudioError> {
-    let json = to_json_pretty(project)?;
-
     if path.is_dir() {
         return Err(StudioError::invalid(format!(
             "{} is a directory, not a project file",
@@ -118,6 +197,8 @@ pub fn save_atomic(path: &Path, project: &Project) -> Result<(), StudioError> {
         path: parent.clone(),
         source,
     })?;
+
+    let json = to_json_pretty(&relativize_assets(project, &parent))?;
 
     let file_name = path
         .file_name()
@@ -183,8 +264,14 @@ mod tests {
         value["schemaVersion"] = Value::from(SCHEMA_VERSION + 1);
         let error = from_json(&value.to_string(), "future.studio3d").unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("schema version 2"), "{message}");
-        assert!(message.contains("supports 1"), "{message}");
+        assert!(
+            message.contains(&format!("schema version {}", SCHEMA_VERSION + 1)),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("supports {SCHEMA_VERSION}")),
+            "{message}"
+        );
     }
 
     #[test]

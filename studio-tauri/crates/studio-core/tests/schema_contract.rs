@@ -38,6 +38,7 @@ fn project_document_key_shape_is_stable() {
             "createdUnixMs",
             "updatedUnixMs",
             "scene",
+            "assets",
             "selection",
             "workspace",
             "viewport",
@@ -45,7 +46,7 @@ fn project_document_key_shape_is_stable() {
         ],
     );
     assert_eq!(value["format"], "studio3d");
-    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["schemaVersion"], 2);
     assert_eq!(value["workspace"], "studio");
 
     expect_keys(&value["viewport"], &["mode", "gridVisible"]);
@@ -85,9 +86,12 @@ fn scene_and_object_shapes_are_stable() {
         .iter()
         .find(|object| object["kind"]["type"] == "mesh")
         .expect("starter scene has a cube");
-    assert_eq!(cube["kind"]["primitive"]["type"], "cube");
-    expect_keys(&cube["kind"]["primitive"], &["type", "size"]);
-    assert_eq!(cube["kind"]["primitive"]["size"], 2.0);
+    expect_keys(&cube["kind"], &["type", "source"]);
+    expect_keys(&cube["kind"]["source"], &["type", "primitive"]);
+    assert_eq!(cube["kind"]["source"]["type"], "primitive");
+    assert_eq!(cube["kind"]["source"]["primitive"]["type"], "cube");
+    expect_keys(&cube["kind"]["source"]["primitive"], &["type", "size"]);
+    assert_eq!(cube["kind"]["source"]["primitive"]["size"], 2.0);
 
     let camera = objects
         .iter()
@@ -143,6 +147,14 @@ fn commands_use_camel_case_type_tags() {
 
     let batch = serde_json::to_value(Command::Batch { commands: vec![] }).unwrap();
     assert_eq!(batch, serde_json::json!({"type": "batch", "commands": []}));
+
+    let duplicate = serde_json::to_value(Command::DuplicateObject {
+        id: studio_core::ids::new_id(),
+        name: None,
+    })
+    .unwrap();
+    assert_eq!(duplicate["type"], "duplicateObject");
+    assert!(duplicate.get("name").is_some());
 }
 
 #[test]

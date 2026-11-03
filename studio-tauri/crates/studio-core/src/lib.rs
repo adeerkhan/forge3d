@@ -7,7 +7,7 @@
 //!
 //! Layout:
 //!
-//! * [`project`] — the versioned project document (`studio3d` JSON).
+//! * [`project`] — the versioned project document (`studio3d` JSON, schema v2).
 //! * [`scene`] — the scene graph: objects, transforms, cameras, lights.
 //! * [`command`] — every mutation as a reversible command.
 //! * [`editor`] — an editing session: revision counter, undo/redo, dirty state.
@@ -48,10 +48,12 @@ pub use error::StudioError;
 pub use math::{Transform, Vec3};
 pub use persist::{load, save_atomic, to_json_pretty};
 pub use project::{
-    Project, RenderSettings, ViewportMode, ViewportState, Workspace, FORMAT, SCHEMA_VERSION,
+    Asset, AssetKind, Project, RenderSettings, ViewportMode, ViewportState, Workspace, FORMAT,
+    SCHEMA_VERSION,
 };
 pub use scene::{
-    CameraObject, LightKind, LightObject, MeshObject, ObjectKind, Primitive, Scene, SceneObject,
+    CameraObject, LightKind, LightObject, MeshObject, MeshSource, ObjectKind, Primitive, Scene,
+    SceneObject,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 

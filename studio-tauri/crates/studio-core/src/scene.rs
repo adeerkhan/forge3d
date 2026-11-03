@@ -1,13 +1,13 @@
 //! The scene graph: objects, their transforms, and their typed payloads.
 //!
-//! Phase 1 intentionally supports exactly the object kinds the plan calls for
-//! — a mesh (primitive cube/sphere/plane), a camera, and a light. Materials,
-//! imported meshes, terrain layers, and animation tracks are additive schema
-//! versions, not placeholders here.
+//! Phase 2 extends meshes from primitives-only to primitives **or** an imported
+//! glTF/GLB asset. That is a schema version bump: v1 objects carried
+//! `kind.primitive`, v2 objects carry `kind.source` (`persist::migrate` rewrites
+//! v1 files on load).
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{new_id, ObjectId, SceneId};
+use crate::ids::{new_id, AssetId, ObjectId, SceneId};
 use crate::math::Transform;
 
 /// Maximum display-name length; long enough for real names, short enough that
@@ -65,6 +65,26 @@ impl Scene {
             .filter(|object| object.parent == Some(id))
             .map(|object| object.id)
             .collect()
+    }
+
+    /// A display name that is not already used, Blender-style (`Cube.001`).
+    pub fn unique_name(&self, base: &str) -> String {
+        let trimmed: String = base.chars().take(MAX_NAME_LEN.saturating_sub(4)).collect();
+        let taken = |candidate: &str| {
+            self.objects
+                .iter()
+                .any(|object| object.name.eq_ignore_ascii_case(candidate))
+        };
+        if !taken(&trimmed) {
+            return trimmed;
+        }
+        for suffix in 1..10_000 {
+            let candidate = format!("{trimmed}.{suffix:03}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+        }
+        format!("{trimmed}.copy")
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -164,6 +184,13 @@ impl SceneObject {
         }
     }
 
+    pub fn mesh(&self) -> Option<&MeshObject> {
+        match &self.kind {
+            ObjectKind::Mesh(mesh) => Some(mesh),
+            _ => None,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         validate_name(&self.name, "object name")?;
         self.transform
@@ -194,13 +221,68 @@ pub enum ObjectKind {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshObject {
-    pub primitive: Primitive,
+    pub source: MeshSource,
 }
 
 impl MeshObject {
-    fn validate(&self) -> Result<(), String> {
-        self.primitive.validate()
+    pub fn primitive(primitive: Primitive) -> Self {
+        Self {
+            source: MeshSource::Primitive { primitive },
+        }
     }
+
+    pub fn gltf(asset: AssetId, node: Option<String>) -> Self {
+        Self {
+            source: MeshSource::Gltf { asset, node },
+        }
+    }
+
+    pub fn primitive_source(&self) -> Option<&Primitive> {
+        match &self.source {
+            MeshSource::Primitive { primitive } => Some(primitive),
+            MeshSource::Gltf { .. } => None,
+        }
+    }
+
+    pub fn asset_id(&self) -> Option<AssetId> {
+        match self.source {
+            MeshSource::Gltf { asset, .. } => Some(asset),
+            MeshSource::Primitive { .. } => None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        match &self.source {
+            MeshSource::Primitive { primitive } => primitive.validate(),
+            MeshSource::Gltf { asset, node } => {
+                if asset.is_nil() {
+                    return Err("imported mesh has no asset id".to_owned());
+                }
+                if let Some(node) = node {
+                    if node.trim().is_empty() {
+                        return Err("imported mesh node must not be empty".to_owned());
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Where a mesh's geometry comes from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MeshSource {
+    Primitive {
+        primitive: Primitive,
+    },
+    /// A node inside an imported glTF/GLB asset. `node` is the glTF node name;
+    /// `None` means "everything the asset contains".
+    Gltf {
+        asset: AssetId,
+        #[serde(default)]
+        node: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -327,9 +409,7 @@ mod tests {
             transform: Transform::default(),
             visible: true,
             locked: false,
-            kind: ObjectKind::Mesh(MeshObject {
-                primitive: Primitive::Cube { size: 2.0 },
-            }),
+            kind: ObjectKind::Mesh(MeshObject::primitive(Primitive::Cube { size: 2.0 })),
         }
     }
 
@@ -398,5 +478,27 @@ mod tests {
         assert!(validate_name("  ", "name").is_err());
         assert!(validate_name("bad\u{7}", "name").is_err());
         assert!(validate_name(&"x".repeat(MAX_NAME_LEN + 1), "name").is_err());
+    }
+
+    #[test]
+    fn unique_names_follow_the_blender_suffix_pattern() {
+        let mut scene = Scene::new("Scene");
+        scene.objects.push(cube("Cube"));
+        assert_eq!(scene.unique_name("Cube"), "Cube.001");
+        let mut second = cube("Cube.001");
+        second.id = new_id();
+        scene.objects.push(second);
+        assert_eq!(scene.unique_name("Cube"), "Cube.002");
+        assert_eq!(scene.unique_name("Other"), "Other");
+    }
+
+    #[test]
+    fn gltf_meshes_need_a_non_nil_asset() {
+        let mesh = MeshObject::gltf(uuid::Uuid::nil(), None);
+        assert!(mesh.validate().is_err());
+        let mesh = MeshObject::gltf(new_id(), Some(" ".to_owned()));
+        assert!(mesh.validate().is_err());
+        let mesh = MeshObject::gltf(new_id(), Some("Sphere".to_owned()));
+        assert!(mesh.validate().is_ok());
     }
 }

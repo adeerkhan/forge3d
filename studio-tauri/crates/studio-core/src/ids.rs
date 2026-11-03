@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub type ProjectId = Uuid;
 pub type SceneId = Uuid;
 pub type ObjectId = Uuid;
+pub type AssetId = Uuid;
 
 /// A fresh random (v4) identifier.
 pub fn new_id() -> Uuid {

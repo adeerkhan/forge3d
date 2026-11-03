@@ -1,22 +1,24 @@
 /**
  * Browser-only preview harness.
  *
- * `npm run dev` without Tauri (no webkit runtime, no Rust side) gets an
- * in-memory session with the same command semantics as `studio-core`, so the UI
- * can be built and reviewed. It is deliberately not a second implementation of
- * the product: no file dialogs, no recovery, and no Forge3D.
+ * `npm run dev` without Tauri (no Rust side) gets an in-memory session with the
+ * same command semantics as `studio-core`, so the UI can be built and reviewed.
+ * It is deliberately not a second implementation of the product: no file I/O,
+ * no recovery, no glTF import, and no Forge3D.
  *
- * Any behaviour here that matters must be mirrored by a Rust test — this file
- * is the reason `schema_contract.rs` and `phase1.rs` exist.
+ * Any behaviour here that matters is mirrored by a Rust test — this file is
+ * part of why `schema_contract.rs` and `phase1.rs`/`phase2.rs` exist.
  */
 
 import type { StudioBridge } from "./index";
 import type {
+  Asset,
   AutosaveStatus,
   CameraObject,
   Command,
   EditResult,
   LightObject,
+  MeshFilePayload,
   ObjectKind,
   Primitive,
   Project,
@@ -33,17 +35,25 @@ const identity = (): Transform => ({
   scale: { x: 1, y: 1, z: 1 },
 });
 
-function starterProject(name: string): Project {
-  const now = Date.now();
-  const cube: SceneObject = {
+function primitiveObject(
+  name: string,
+  primitive: Primitive,
+  transform: Transform = identity(),
+): SceneObject {
+  return {
     id: newId(),
-    name: "Cube",
+    name,
     parent: null,
-    transform: identity(),
+    transform,
     visible: true,
     locked: false,
-    kind: { type: "mesh", primitive: { type: "cube", size: 2 } },
+    kind: { type: "mesh", source: { type: "primitive", primitive } },
   };
+}
+
+function starterProject(name: string): Project {
+  const now = Date.now();
+  const cube = primitiveObject("Cube", { type: "cube", size: 2 });
   const camera: SceneObject = {
     id: newId(),
     name: "Camera",
@@ -77,7 +87,7 @@ function starterProject(name: string): Project {
   };
   return {
     format: "studio3d",
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: newId(),
     name,
     createdUnixMs: now,
@@ -88,6 +98,7 @@ function starterProject(name: string): Project {
       objects: [cube, camera, light],
       activeCamera: camera.id,
     },
+    assets: [],
     selection: [],
     workspace: "studio",
     viewport: { mode: "solid", gridVisible: true },
@@ -123,14 +134,39 @@ export function createMockBridge(): StudioBridge {
     };
   };
 
+  const requireProject = (): Project => {
+    if (!project) throw new Error("no project is open");
+    return project;
+  };
+
   const find = (id: string): SceneObject => {
-    const object = project?.scene.objects.find((candidate) => candidate.id === id);
+    const object = requireProject().scene.objects.find((candidate) => candidate.id === id);
     if (!object) throw new Error(`object ${id.slice(0, 8)} does not exist`);
     return object;
   };
 
+  const uniqueName = (base: string): string => {
+    const scene = requireProject().scene;
+    const taken = (candidate: string) =>
+      scene.objects.some((object) => object.name.toLowerCase() === candidate.toLowerCase());
+    if (!taken(base)) return base;
+    for (let suffix = 1; suffix < 10_000; suffix += 1) {
+      const candidate = `${base}.${String(suffix).padStart(3, "0")}`;
+      if (!taken(candidate)) return candidate;
+    }
+    return `${base}.copy`;
+  };
+
+  const validateAsset = (asset: Asset) => {
+    if (!asset.id) throw new Error("asset id must not be empty");
+    if (!asset.name.trim()) throw new Error("asset name must not be empty");
+    if (!asset.path.trim()) throw new Error("asset path must not be empty");
+    if (asset.byteSize <= 0) throw new Error("asset file is empty");
+  };
+
   const apply = (command: Command): { label: string; affected: string[] } => {
-    if (!project) throw new Error("no project is open");
+    const scene = requireProject().scene;
+
     const label = (() => {
       switch (command.type) {
         case "setTransform":
@@ -149,8 +185,18 @@ export function createMockBridge(): StudioBridge {
           return `Reshape ${find(command.id).name}`;
         case "createObject":
           return `Create ${command.object.name}`;
+        case "createPrimitive":
+          return `Add ${command.primitive.type === "cube" ? "Cube" : command.primitive.type === "sphere" ? "Sphere" : "Plane"}`;
         case "deleteObject":
           return `Delete ${find(command.id).name}`;
+        case "duplicateObject":
+          return `Duplicate ${find(command.id).name}`;
+        case "addAsset":
+          return `Import ${command.asset.name}`;
+        case "importGltf":
+          return `Import ${command.name}`;
+        case "removeAsset":
+          return "Remove asset";
         case "setActiveCamera":
           return "Set active camera";
         case "setViewport":
@@ -205,44 +251,100 @@ export function createMockBridge(): StudioBridge {
 
       case "setPrimitive": {
         const primitive: Primitive = command.primitive;
-        const extent =
-          primitive.type === "sphere" ? primitive.radius : primitive.size;
+        const extent = primitive.type === "sphere" ? primitive.radius : primitive.size;
         if (!(extent > 0)) throw new Error("primitive size must be positive");
         const object = find(command.id);
         if (object.kind.type !== "mesh") throw new Error("object is not a mesh");
-        object.kind = { type: "mesh", primitive };
+        if (object.kind.source.type !== "primitive")
+          throw new Error("object is an imported mesh, not a primitive");
+        object.kind = { type: "mesh", source: { type: "primitive", primitive } };
         return { label, affected: [command.id] };
       }
 
       case "createObject": {
-        if (project.scene.objects.some((o) => o.id === command.object.id))
+        if (scene.objects.some((o) => o.id === command.object.id))
           throw new Error("an object with that id already exists");
-        const index = command.index ?? project.scene.objects.length;
-        project.scene.objects.splice(index, 0, structuredClone(command.object));
+        const source = command.object.kind.type === "mesh" ? command.object.kind.source : null;
+        if (source?.type === "gltf" && !requireProject().assets.some((a) => a.id === source.asset))
+          throw new Error("asset does not exist");
+        const index = command.index ?? scene.objects.length;
+        scene.objects.splice(index, 0, structuredClone(command.object));
         return { label, affected: [command.object.id] };
+      }
+
+      case "createPrimitive": {
+        const base =
+          command.primitive.type === "cube"
+            ? "Cube"
+            : command.primitive.type === "sphere"
+              ? "Sphere"
+              : "Plane";
+        const object = primitiveObject(command.name?.trim() || uniqueName(base), command.primitive);
+        scene.objects.push(object);
+        return { label, affected: [object.id] };
+      }
+
+      case "duplicateObject": {
+        const index = scene.objects.findIndex((o) => o.id === command.id);
+        if (index < 0) throw new Error("object does not exist");
+        const source = scene.objects[index];
+        const copy: SceneObject = {
+          ...structuredClone(source),
+          id: newId(),
+          name: command.name?.trim() || uniqueName(source.name),
+        };
+        if (command.name !== undefined && command.name !== null && !command.name.trim())
+          throw new Error("object name must not be empty");
+        scene.objects.splice(index + 1, 0, copy);
+        return { label, affected: [copy.id] };
       }
 
       case "deleteObject": {
         const object = find(command.id);
-        if (project.scene.objects.some((o) => o.parent === object.id))
+        if (scene.objects.some((o) => o.parent === object.id))
           throw new Error("object has children; delete them first");
-        project.scene.objects = project.scene.objects.filter((o) => o.id !== object.id);
-        project.selection = project.selection.filter((id) => id !== object.id);
-        if (project.scene.activeCamera === object.id) project.scene.activeCamera = null;
+        scene.objects = scene.objects.filter((o) => o.id !== object.id);
+        requireProject().selection = requireProject().selection.filter((id) => id !== object.id);
+        if (scene.activeCamera === object.id) scene.activeCamera = null;
         return { label, affected: [command.id] };
       }
+
+      case "addAsset": {
+        validateAsset(command.asset);
+        if (requireProject().assets.some((asset) => asset.id === command.asset.id))
+          throw new Error("an asset with that id already exists");
+        requireProject().assets.push(structuredClone(command.asset));
+        return { label, affected: [] };
+      }
+
+      case "removeAsset": {
+        const found = requireProject().assets.find((asset) => asset.id === command.id);
+        if (!found) throw new Error("asset does not exist");
+        const used = scene.objects.some(
+          (object) =>
+            object.kind.type === "mesh" &&
+            object.kind.source.type === "gltf" &&
+            object.kind.source.asset === command.id,
+        );
+        if (used) throw new Error("asset is still used by an object");
+        requireProject().assets = requireProject().assets.filter((a) => a.id !== command.id);
+        return { label, affected: [] };
+      }
+
+      case "importGltf":
+        throw new Error("glTF import needs the desktop shell");
 
       case "setActiveCamera": {
         if (command.id) {
           const object = find(command.id);
           if (object.kind.type !== "camera") throw new Error("object is not a camera");
         }
-        project.scene.activeCamera = command.id;
+        scene.activeCamera = command.id;
         return { label, affected: command.id ? [command.id] : [] };
       }
 
       case "setViewport":
-        project.viewport = { ...command.viewport };
+        requireProject().viewport = { ...command.viewport };
         return { label, affected: [] };
 
       case "batch":
@@ -257,7 +359,7 @@ export function createMockBridge(): StudioBridge {
     info: async () => ({
       name: "Forge3D Studio",
       version: "0.1.0",
-      phase: "Phase 1 — preview harness (no Rust shell)",
+      phase: "Phase 2 — preview harness (no Rust shell)",
     }),
 
     state: async () => (project ? state() : null),
@@ -339,8 +441,12 @@ export function createMockBridge(): StudioBridge {
     },
 
     setSelection: async (ids) => {
-      if (!project) throw new Error("no project is open");
-      project.selection = [...new Set(ids)];
+      const current = requireProject();
+      for (const id of ids) {
+        if (!current.scene.objects.some((object) => object.id === id))
+          throw new Error("object does not exist");
+      }
+      current.selection = [...new Set(ids)];
       return state();
     },
 
@@ -361,6 +467,12 @@ export function createMockBridge(): StudioBridge {
     },
 
     discardRecovery: async () => {},
+
+    readMeshFile: async (): Promise<MeshFilePayload> => {
+      throw new Error(
+        "glTF import needs the desktop shell: the browser preview cannot read files",
+      );
+    },
   };
 
   return bridge;

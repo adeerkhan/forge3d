@@ -4,6 +4,7 @@ import type { StudioBridge } from "./index";
 import type {
   AutosaveStatus,
   EditResult,
+  MeshFilePayload,
   RecoveryEntry,
   SessionState,
   ShellInfo,
@@ -47,4 +48,6 @@ export const tauriBridge: StudioBridge = {
     invoke<SessionState>("restore_recovery", { id }),
 
   discardRecovery: (id) => invoke<void>("discard_recovery", { id }),
+
+  readMeshFile: (path) => invoke<MeshFilePayload>("read_mesh_file", { path }),
 };

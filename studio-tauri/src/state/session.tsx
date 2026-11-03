@@ -11,17 +11,28 @@ import {
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { bridge } from "../bridge/env";
+import { base64ToArrayBuffer, inspectGltf, putAssetBytes } from "../viewport/assets";
 import type {
+  Applied,
   AutosaveStatus,
   Command,
+  PrimitiveShape,
   RecoveryEntry,
   SessionState,
   ShellInfo,
+  Tool,
+  ToolSpace,
 } from "../bridge/types";
+import { DEFAULT_PRIMITIVES } from "../bridge/types";
 
 const PROJECT_FILTER = {
   name: "Forge3D Studio project",
   extensions: ["studio3d"],
+};
+
+const MESH_FILTER = {
+  name: "glTF / GLB",
+  extensions: ["gltf", "glb"],
 };
 
 interface SessionApi {
@@ -33,15 +44,25 @@ interface SessionApi {
   error: string | null;
   notice: string | null;
   busy: boolean;
+  /** Active manipulation tool. UI state, not project state. */
+  tool: Tool;
+  setTool(tool: Tool): void;
+  /** Gizmo orientation. UI state, not project state. */
+  space: ToolSpace;
+  setSpace(space: ToolSpace): void;
   actions: {
     newProject(): Promise<void>;
     openProject(): Promise<void>;
     saveProject(saveAs?: boolean): Promise<void>;
     closeProject(): Promise<void>;
-    apply(command: Command): Promise<boolean>;
+    apply(command: Command): Promise<Applied | null>;
     undo(): Promise<void>;
     redo(): Promise<void>;
     select(ids: string[]): Promise<void>;
+    addPrimitive(shape: PrimitiveShape): Promise<void>;
+    duplicateSelection(): Promise<void>;
+    deleteSelection(): Promise<void>;
+    importMesh(): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;
@@ -58,6 +79,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [tool, setTool] = useState<Tool>("select");
+  const [space, setSpace] = useState<ToolSpace>("world");
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((message: string) => {
@@ -124,6 +147,117 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [state],
   );
+
+  const applyCommand = useCallback(
+    async (command: Command): Promise<Applied | null> => {
+      try {
+        const result = await bridge.applyCommand(command);
+        setState(result.state);
+        return result.applied;
+      } catch (cause) {
+        fail(cause);
+        return null;
+      }
+    },
+    [fail],
+  );
+
+  const select = useCallback(async (ids: string[]) => {
+    try {
+      setState(await bridge.setSelection(ids));
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [fail]);
+
+  const addPrimitive = useCallback(
+    async (shape: PrimitiveShape) => {
+      const applied = await applyCommand({
+        type: "createPrimitive",
+        primitive: DEFAULT_PRIMITIVES[shape],
+      });
+      const id = applied?.affected[0];
+      if (id) await select([id]);
+    },
+    [applyCommand, select],
+  );
+
+  const duplicateSelection = useCallback(async () => {
+    const selection = state?.project.selection ?? [];
+    if (selection.length === 0) return;
+    const applied = await applyCommand({
+      type: "batch",
+      commands: selection.map((id) => ({ type: "duplicateObject" as const, id })),
+    });
+    if (applied && applied.affected.length > 0) {
+      await select(applied.affected);
+      flash(
+        applied.affected.length === 1
+          ? "Duplicated object"
+          : `Duplicated ${applied.affected.length} objects`,
+      );
+    }
+  }, [applyCommand, flash, select, state]);
+
+  const deleteSelection = useCallback(async () => {
+    const scene = state?.project.scene;
+    const selection = state?.project.selection ?? [];
+    if (!scene || selection.length === 0) return;
+
+    // Children before parents, so deleting a subtree in one batch is legal.
+    const ordered = [...selection].sort(
+      (a, b) =>
+        scene.objects.findIndex((object) => object.id === b) -
+        scene.objects.findIndex((object) => object.id === a),
+    );
+    const applied = await applyCommand({
+      type: "batch",
+      commands: ordered.map((id) => ({ type: "deleteObject" as const, id })),
+    });
+    if (applied) {
+      await select([]);
+      flash(
+        applied.affected.length === 1
+          ? "Deleted object"
+          : `Deleted ${applied.affected.length} objects`,
+      );
+    }
+  }, [applyCommand, flash, select, state]);
+
+  const importMesh = useCallback(async () => {
+    if (bridge.kind !== "tauri") {
+      fail(new Error("glTF import needs the desktop shell: the browser preview cannot read files"));
+      return;
+    }
+    try {
+      const picked = await openDialog({ multiple: false, filters: [MESH_FILTER] });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+
+      setBusy(true);
+      const payload = await bridge.readMeshFile(path);
+      const buffer = base64ToArrayBuffer(payload.base64);
+      // Parse before registering: a corrupt file must not reach the project.
+      const { meshes } = await inspectGltf(buffer, payload.name);
+      putAssetBytes(payload.path, buffer);
+
+      const applied = await applyCommand({
+        type: "importGltf",
+        name: payload.name,
+        path: payload.path,
+        kind: payload.kind,
+        byteSize: payload.byteSize,
+        node: null,
+      });
+      const id = applied?.affected[0];
+      if (id) await select([id]);
+      flash(`Imported ${payload.name} (${meshes} mesh${meshes === 1 ? "" : "es"})`);
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [applyCommand, fail, flash, select]);
 
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
@@ -207,16 +341,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }
       },
 
-      async apply(command) {
-        try {
-          const result = await bridge.applyCommand(command);
-          setState(result.state);
-          return true;
-        } catch (cause) {
-          fail(cause);
-          return false;
-        }
-      },
+      apply: applyCommand,
 
       async undo() {
         try {
@@ -234,13 +359,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         }
       },
 
-      async select(ids) {
-        try {
-          setState(await bridge.setSelection(ids));
-        } catch (cause) {
-          fail(cause);
-        }
-      },
+      select,
+      addPrimitive,
+      duplicateSelection,
+      deleteSelection,
+      importMesh,
 
       async restoreRecovery(id) {
         setBusy(true);
@@ -269,7 +392,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setError(null);
       },
     }),
-    [bridge, fail, flash, guardUnsaved, refreshRecovery, state],
+    [
+      addPrimitive,
+      applyCommand,
+      deleteSelection,
+      duplicateSelection,
+      fail,
+      flash,
+      guardUnsaved,
+      importMesh,
+      refreshRecovery,
+      select,
+      state,
+    ],
   );
 
   const value: SessionApi = {
@@ -281,12 +416,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     error,
     notice,
     busy,
+    tool,
+    setTool,
+    space,
+    setSpace,
     actions,
   };
 
-  return (
-    <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
-  );
+  return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 
 export function useSession(): SessionApi {

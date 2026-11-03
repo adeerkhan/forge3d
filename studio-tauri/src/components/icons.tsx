@@ -146,6 +146,57 @@ export const RestoreIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const CursorIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M5 3l6.5 16 2.2-6.1L20 10.5 5 3z" />
+  </Icon>
+);
+
+export const MoveIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 3v18M3 12h18" />
+    <path d="M12 3l-2.4 2.6M12 3l2.4 2.6M12 21l-2.4-2.6M12 21l2.4-2.6M3 12l2.6-2.4M3 12l2.6 2.4M21 12l-2.6-2.4M21 12l-2.6 2.4" />
+  </Icon>
+);
+
+export const RotateIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M20 12a8 8 0 11-2.6-5.9" />
+    <path d="M20 4v4.5h-4.5" />
+  </Icon>
+);
+
+export const ScaleIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 20L14 10" />
+    <path d="M9 20H4v-5M20 9V4h-5" />
+    <rect x="3" y="17" width="4" height="4" rx="1" />
+    <rect x="17" y="3" width="4" height="4" rx="1" />
+  </Icon>
+);
+
+export const TrashIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M4 7h16M9 7V4.5h6V7M6.5 7l.8 13h9.4l.8-13" />
+    <path d="M10 11v5.5M14 11v5.5" />
+  </Icon>
+);
+
+export const CopyIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <rect x="9" y="9" width="11" height="11" rx="2" />
+    <path d="M15 9V6.5A2.5 2.5 0 0012.5 4h-5A2.5 2.5 0 005 6.5v5A2.5 2.5 0 007.5 14H9" />
+  </Icon>
+);
+
+export const ImportIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M12 4v10" />
+    <path d="M8 10.5l4 4 4-4" />
+    <path d="M4 18.5h16" />
+  </Icon>
+);
+
 export const objectIcon = (type: "mesh" | "camera" | "light") => {
   switch (type) {
     case "mesh":

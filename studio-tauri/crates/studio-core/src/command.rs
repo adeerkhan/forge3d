@@ -7,10 +7,13 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::ObjectId;
+use std::path::Path;
+
+use crate::ids::{new_id, AssetId, ObjectId};
 use crate::math::Transform;
-use crate::project::{Project, ViewportState};
-use crate::scene::{validate_name, CameraObject, LightObject, Primitive, SceneObject};
+use crate::project::AssetKind;
+use crate::project::{Asset, Project, ViewportState};
+use crate::scene::{validate_name, CameraObject, LightObject, MeshObject, Primitive, SceneObject};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CommandError {
@@ -31,6 +34,18 @@ pub enum CommandError {
 
     #[error("object {id} is not a mesh")]
     NotAMesh { id: ObjectId },
+
+    #[error("object {id} is an imported mesh, not a primitive")]
+    NotAPrimitive { id: ObjectId },
+
+    #[error("asset {id} does not exist")]
+    AssetNotFound { id: AssetId },
+
+    #[error("asset {id} is still used by an object")]
+    AssetInUse { id: AssetId },
+
+    #[error("an asset with id {id} already exists")]
+    DuplicateAsset { id: AssetId },
 
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
@@ -106,6 +121,50 @@ pub enum Command {
         primitive: Primitive,
     },
 
+    /// Create a primitive mesh object at the origin, in one step.
+    ///
+    /// The id is minted here rather than in the UI: object identity belongs to
+    /// the model, and a caller-supplied id would let a stale window collide.
+    CreatePrimitive {
+        primitive: Primitive,
+        #[serde(default)]
+        name: Option<String>,
+    },
+
+    /// Duplicate an object in place. Children are not duplicated in Phase 2.
+    DuplicateObject {
+        id: ObjectId,
+        /// Explicit name; defaults to a free Blender-style name (`Cube.001`).
+        #[serde(default)]
+        name: Option<String>,
+    },
+
+    /// Register an imported asset — batched with the object that uses it.
+    AddAsset {
+        asset: Asset,
+    },
+
+    /// Register a glTF/GLB file and create the mesh object that renders it, as
+    /// one undo step. Both ids are minted here, so the UI never invents
+    /// identities and redo cannot drift.
+    ImportGltf {
+        /// Display name, normally the file name.
+        name: String,
+        /// Path as read from disk. Relative paths resolve to the project
+        /// directory on load.
+        path: String,
+        kind: AssetKind,
+        byte_size: u64,
+        /// glTF node to render; `None` means the whole asset.
+        #[serde(default)]
+        node: Option<String>,
+    },
+
+    /// Unregister an asset. Refused while an object still references it.
+    RemoveAsset {
+        id: AssetId,
+    },
+
     /// Point the viewport and Forge3D handoff at a camera (or none).
     SetActiveCamera {
         id: Option<ObjectId>,
@@ -138,7 +197,19 @@ impl Command {
     /// On error the project is left unchanged: every variant reads and
     /// validates before it writes.
     pub fn apply(&self, project: &mut Project) -> Result<Command, CommandError> {
-        self.apply_inner(project).map(|applied| applied.inverse)
+        self.apply_inner(project).map(|outcome| outcome.inverse)
+    }
+
+    /// Apply and also return the object IDs that actually changed.
+    ///
+    /// This is the authoritative answer, unlike [`Command::affected`]: a
+    /// duplicate's new ID does not exist until the command runs.
+    pub fn apply_with_effect(
+        &self,
+        project: &mut Project,
+    ) -> Result<(Command, Vec<ObjectId>), CommandError> {
+        self.apply_inner(project)
+            .map(|outcome| (outcome.inverse, outcome.affected))
     }
 
     fn apply_inner(&self, project: &mut Project) -> Result<Outcome, CommandError> {
@@ -153,6 +224,11 @@ impl Command {
                 if let Some(parent) = object.parent {
                     if project.scene.object(parent).is_none() {
                         return Err(CommandError::ObjectNotFound { id: parent });
+                    }
+                }
+                if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
+                    if project.asset(asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: asset });
                     }
                 }
                 let len = project.scene.objects.len();
@@ -327,23 +403,24 @@ impl Command {
                     .scene
                     .object(*id)
                     .ok_or(CommandError::ObjectNotFound { id: *id })?;
-                let previous = match &object.kind {
-                    crate::scene::ObjectKind::Mesh(mesh) => mesh.primitive.clone(),
-                    _ => return Err(CommandError::NotAMesh { id: *id }),
+                let previous = match object.mesh() {
+                    Some(mesh) => mesh
+                        .primitive_source()
+                        .cloned()
+                        .ok_or(CommandError::NotAPrimitive { id: *id })?,
+                    None => return Err(CommandError::NotAMesh { id: *id }),
                 };
-                // Validate by building the mesh payload and validating it as
-                // part of a whole object, so primitive rules live in one place.
+                // Validate by building the whole object, so primitive rules
+                // live in one place (`scene::Primitive::validate`).
                 let mut probe = object.clone();
-                probe.kind = crate::scene::ObjectKind::Mesh(crate::scene::MeshObject {
-                    primitive: primitive.clone(),
-                });
+                probe.kind =
+                    crate::scene::ObjectKind::Mesh(MeshObject::primitive(primitive.clone()));
                 probe
                     .validate()
                     .map_err(|reason| CommandError::invalid("primitive", reason))?;
                 if let Some(object) = project.scene.object_mut(*id) {
-                    object.kind = crate::scene::ObjectKind::Mesh(crate::scene::MeshObject {
-                        primitive: primitive.clone(),
-                    });
+                    object.kind =
+                        crate::scene::ObjectKind::Mesh(MeshObject::primitive(primitive.clone()));
                 }
                 Ok(Outcome {
                     inverse: Command::SetPrimitive {
@@ -351,6 +428,148 @@ impl Command {
                         primitive: previous,
                     },
                     affected: vec![*id],
+                })
+            }
+
+            Command::CreatePrimitive { primitive, name } => {
+                let default_name = match primitive {
+                    Primitive::Cube { .. } => "Cube",
+                    Primitive::Sphere { .. } => "Sphere",
+                    Primitive::Plane { .. } => "Plane",
+                };
+                let object = SceneObject {
+                    id: new_id(),
+                    name: match name {
+                        Some(name) => {
+                            validate_name(name, "object name")
+                                .map_err(|reason| CommandError::invalid("object name", reason))?;
+                            name.clone()
+                        }
+                        None => project.scene.unique_name(default_name),
+                    },
+                    parent: None,
+                    transform: Transform::default(),
+                    visible: true,
+                    locked: false,
+                    kind: crate::scene::ObjectKind::Mesh(MeshObject::primitive(primitive.clone())),
+                };
+                object
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("object", reason))?;
+                let id = object.id;
+                project.scene.objects.push(object);
+                Ok(Outcome {
+                    inverse: Command::DeleteObject { id },
+                    affected: vec![id],
+                })
+            }
+
+            Command::DuplicateObject { id, name } => {
+                let index = project
+                    .scene
+                    .index_of(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let mut copy = project.scene.objects[index].clone();
+                copy.id = new_id();
+                copy.name = match name {
+                    Some(name) => {
+                        validate_name(name, "object name")
+                            .map_err(|reason| CommandError::invalid("object name", reason))?;
+                        name.clone()
+                    }
+                    None => project.scene.unique_name(&copy.name),
+                };
+                // A duplicated camera must not silently take over rendering.
+                let copy_id = copy.id;
+                project.scene.objects.insert(index + 1, copy);
+
+                Ok(Outcome {
+                    inverse: Command::DeleteObject { id: copy_id },
+                    affected: vec![copy_id],
+                })
+            }
+
+            Command::ImportGltf {
+                name,
+                path,
+                kind,
+                byte_size,
+                node,
+            } => {
+                let asset = Asset {
+                    id: new_id(),
+                    name: name.clone(),
+                    path: path.clone(),
+                    kind: *kind,
+                    byte_size: *byte_size,
+                };
+                asset
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("asset", reason))?;
+
+                let stem = Path::new(name)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .filter(|stem| !stem.trim().is_empty())
+                    .unwrap_or_else(|| "Imported".to_owned());
+                let object = SceneObject {
+                    id: new_id(),
+                    name: project.scene.unique_name(&stem),
+                    parent: None,
+                    transform: Transform::default(),
+                    visible: true,
+                    locked: false,
+                    kind: crate::scene::ObjectKind::Mesh(MeshObject::gltf(asset.id, node.clone())),
+                };
+                object
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("object", reason))?;
+
+                let asset_id = asset.id;
+                let object_id = object.id;
+                project.assets.push(asset);
+                project.scene.objects.push(object);
+
+                // Undo removes the object first: the asset may not be dropped
+                // while something still references it.
+                Ok(Outcome {
+                    inverse: Command::Batch {
+                        commands: vec![
+                            Command::DeleteObject { id: object_id },
+                            Command::RemoveAsset { id: asset_id },
+                        ],
+                    },
+                    affected: vec![object_id],
+                })
+            }
+
+            Command::AddAsset { asset } => {
+                asset
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("asset", reason))?;
+                if project.asset(asset.id).is_some() {
+                    return Err(CommandError::DuplicateAsset { id: asset.id });
+                }
+                project.assets.push(asset.clone());
+                Ok(Outcome {
+                    inverse: Command::RemoveAsset { id: asset.id },
+                    affected: Vec::new(),
+                })
+            }
+
+            Command::RemoveAsset { id } => {
+                let index = project
+                    .assets
+                    .iter()
+                    .position(|asset| asset.id == *id)
+                    .ok_or(CommandError::AssetNotFound { id: *id })?;
+                if project.used_assets().contains(id) {
+                    return Err(CommandError::AssetInUse { id: *id });
+                }
+                let asset = project.assets.remove(index);
+                Ok(Outcome {
+                    inverse: Command::AddAsset { asset },
+                    affected: Vec::new(),
                 })
             }
 
@@ -396,7 +615,10 @@ impl Command {
         }
     }
 
-    /// Object IDs this command touches — what a viewport adapter re-syncs.
+    /// Object IDs this command names *before* it runs.
+    ///
+    /// A preview only: prefer [`Command::apply_with_effect`], which reports the
+    /// IDs that actually changed (a duplicate's ID is created during `apply`).
     pub fn affected(&self) -> Vec<ObjectId> {
         match self {
             Command::CreateObject { object, .. } => vec![object.id],
@@ -409,7 +631,12 @@ impl Command {
             | Command::SetLight { id, .. }
             | Command::SetPrimitive { id, .. } => vec![*id],
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
+            // The duplicate's id is only known once applied; resyncing the
+            // original object is enough for an adapter to refresh the scene.
+            Command::DuplicateObject { id, .. } => vec![*id],
+            Command::CreatePrimitive { .. } | Command::ImportGltf { .. } => Vec::new(),
             Command::SetViewport { .. } => Vec::new(),
+            Command::AddAsset { .. } | Command::RemoveAsset { .. } => Vec::new(),
             Command::Batch { commands } => {
                 let mut ids = Vec::new();
                 for command in commands {
@@ -455,6 +682,18 @@ impl Command {
                 Some(id) => format!("Set active camera {}", name_of(id)),
                 None => "Clear active camera".to_owned(),
             },
+            Command::CreatePrimitive { primitive, .. } => {
+                let label = match primitive {
+                    Primitive::Cube { .. } => "Cube",
+                    Primitive::Sphere { .. } => "Sphere",
+                    Primitive::Plane { .. } => "Plane",
+                };
+                format!("Add {label}")
+            }
+            Command::ImportGltf { name, .. } => format!("Import {name}"),
+            Command::DuplicateObject { id, .. } => format!("Duplicate {}", name_of(id)),
+            Command::AddAsset { asset } => format!("Import {}", asset.name),
+            Command::RemoveAsset { .. } => "Remove asset".to_owned(),
             Command::SetViewport { .. } => "Viewport settings".to_owned(),
             Command::Batch { commands } => commands
                 .first()

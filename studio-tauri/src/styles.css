@@ -806,17 +806,19 @@ kbd {
 }
 
 .viewport-canvas {
-  display: block;
+  position: absolute;
+  inset: 0;
   width: 100%;
   height: 100%;
+  display: block;
   cursor: grab;
+  touch-action: none;
 }
 
 .viewport-canvas:active {
   cursor: grabbing;
 }
 
-.viewport overlay,
 .viewport-overlay {
   position: absolute;
   left: 12px;
@@ -829,28 +831,9 @@ kbd {
   color: var(--text-muted);
 }
 
-.viewport-overlay--top {
-  top: 10px;
-}
-
 .viewport-overlay--bottom {
   bottom: 10px;
   justify-content: space-between;
-}
-
-.viewport-overlay button,
-.viewport-overlay .chip {
-  pointer-events: auto;
-}
-
-.viewport-tools {
-  margin-left: auto;
-  display: flex;
-  gap: 4px;
-  background: rgba(20, 23, 29, 0.72);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 2px;
 }
 
 .viewport-hint {
@@ -869,19 +852,185 @@ kbd {
   color: var(--text-dim);
 }
 
-.chip {
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid var(--border-strong);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-  background: rgba(20, 23, 29, 0.72);
+/* Floating tool strip (Blender-style palette) */
+.viewport-toolbar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 9px;
+  background: rgba(20, 23, 29, 0.82);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
 }
 
-.chip--muted {
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.tool-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tool-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.tool-button.is-active {
+  background: var(--accent-quiet);
+  border-color: rgba(240, 169, 74, 0.45);
+  color: var(--accent);
+}
+
+.tool-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.tool-button--wide {
+  padding: 0 9px;
+}
+
+.toolbar-segment {
+  display: flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.segment-button {
+  border: 0;
+  background: transparent;
   color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.segment-button.is-active {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+
+.segment-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.add-menu {
+  position: relative;
+}
+
+.add-menu__dropdown {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  min-width: 176px;
+  display: flex;
+  flex-direction: column;
+  padding: 5px;
+  z-index: 20;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+}
+
+.add-menu__dropdown button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.add-menu__dropdown button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.add-menu__dropdown button:disabled {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+/* Viewport orientation gizmo (top right) */
+.axis-gizmo {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 100px;
+  height: 100px;
+  pointer-events: auto;
+}
+
+.axis-gizmo svg {
+  display: block;
+  overflow: visible;
+}
+
+.axis-gizmo__ring {
+  fill: rgba(16, 19, 24, 0.6);
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.axis-gizmo__axis {
+  cursor: pointer;
+}
+
+.axis-gizmo__axis:hover circle {
+  filter: brightness(1.25);
+}
+
+.viewport-problem {
+  position: absolute;
+  left: 12px;
+  bottom: 36px;
+  max-width: min(560px, 72%);
+  padding: 7px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  color: #ffd9d4;
+  background: rgba(240, 106, 93, 0.16);
+  border: 1px solid rgba(240, 106, 93, 0.45);
+  pointer-events: auto;
 }
 
 /* -------------------------------------------------------------- recovery */

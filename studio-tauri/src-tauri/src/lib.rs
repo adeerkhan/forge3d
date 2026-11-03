@@ -63,6 +63,7 @@ pub fn run() {
             commands::list_recovery,
             commands::restore_recovery,
             commands::discard_recovery,
+            commands::read_mesh_file,
             commands::shell_info,
         ])
         .run(tauri::generate_context!())
@@ -92,11 +93,7 @@ fn spawn_autosave_loop(app: AppHandle) {
         };
 
         if let Some(report) = wrote {
-            log::info!(
-                "autosaved {} at {}",
-                report.id,
-                report.written_unix_ms
-            );
+            log::info!("autosaved {} at {}", report.id, report.written_unix_ms);
             if let Err(error) = state.autosave.prune(studio_core::DEFAULT_AUTOSAVE_KEEP) {
                 log::warn!("failed to prune recovery snapshots: {error}");
             }
