@@ -1,0 +1,166 @@
+//! The wire format is a contract with the TypeScript UI.
+//!
+//! `src/bridge/types.ts` mirrors these shapes by hand (Phase 1 does not
+//! generate types). This test fails the moment the Rust side renames a field,
+//! changes a tag, or drops a key, so the mirror cannot drift silently.
+
+use std::collections::BTreeSet;
+
+use serde_json::Value;
+use studio_core::command::Command;
+use studio_core::math::{Transform, Vec3};
+use studio_core::project::{Project, UNTITLED};
+
+fn keys(value: &Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .expect("expected an object")
+        .keys()
+        .cloned()
+        .collect()
+}
+
+fn expect_keys(value: &Value, expected: &[&str]) {
+    let expected: BTreeSet<String> = expected.iter().map(|key| (*key).to_owned()).collect();
+    assert_eq!(keys(value), expected, "unexpected key set in {value}");
+}
+
+#[test]
+fn project_document_key_shape_is_stable() {
+    let value = serde_json::to_value(Project::new(UNTITLED)).unwrap();
+    expect_keys(
+        &value,
+        &[
+            "format",
+            "schemaVersion",
+            "id",
+            "name",
+            "createdUnixMs",
+            "updatedUnixMs",
+            "scene",
+            "selection",
+            "workspace",
+            "viewport",
+            "render",
+        ],
+    );
+    assert_eq!(value["format"], "studio3d");
+    assert_eq!(value["schemaVersion"], 1);
+    assert_eq!(value["workspace"], "studio");
+
+    expect_keys(&value["viewport"], &["mode", "gridVisible"]);
+    assert_eq!(value["viewport"]["mode"], "solid");
+    expect_keys(&value["render"], &["width", "height"]);
+}
+
+#[test]
+fn scene_and_object_shapes_are_stable() {
+    let value = serde_json::to_value(Project::new(UNTITLED)).unwrap();
+    let scene = &value["scene"];
+    expect_keys(scene, &["id", "name", "objects", "activeCamera"]);
+
+    let objects = scene["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 3);
+    for object in objects {
+        expect_keys(
+            object,
+            &[
+                "id",
+                "name",
+                "parent",
+                "transform",
+                "visible",
+                "locked",
+                "kind",
+            ],
+        );
+        expect_keys(
+            &object["transform"],
+            &["translation", "rotationDeg", "scale"],
+        );
+        expect_keys(&object["transform"]["translation"], &["x", "y", "z"]);
+    }
+
+    let cube = objects
+        .iter()
+        .find(|object| object["kind"]["type"] == "mesh")
+        .expect("starter scene has a cube");
+    assert_eq!(cube["kind"]["primitive"]["type"], "cube");
+    expect_keys(&cube["kind"]["primitive"], &["type", "size"]);
+    assert_eq!(cube["kind"]["primitive"]["size"], 2.0);
+
+    let camera = objects
+        .iter()
+        .find(|object| object["kind"]["type"] == "camera")
+        .expect("starter scene has a camera");
+    expect_keys(&camera["kind"], &["type", "fovDeg", "near", "far"]);
+
+    let light = objects
+        .iter()
+        .find(|object| object["kind"]["type"] == "light")
+        .expect("starter scene has a light");
+    expect_keys(&light["kind"], &["type", "kind", "color", "intensity"]);
+    assert_eq!(light["kind"]["kind"], "directional");
+}
+
+#[test]
+fn primitives_and_light_kinds_use_the_documented_tags() {
+    let mesh = serde_json::to_value(studio_core::Primitive::Sphere { radius: 1.5 }).unwrap();
+    assert_eq!(mesh, serde_json::json!({"type": "sphere", "radius": 1.5}));
+    let plane = serde_json::to_value(studio_core::Primitive::Plane { size: 4.0 }).unwrap();
+    assert_eq!(plane, serde_json::json!({"type": "plane", "size": 4.0}));
+    let light = serde_json::to_value(studio_core::LightKind::Point).unwrap();
+    assert_eq!(light, "point");
+}
+
+#[test]
+fn commands_use_camel_case_type_tags() {
+    let transform = Transform {
+        translation: Vec3::new(1.0, 2.0, 3.0),
+        rotation_deg: Vec3::ZERO,
+        scale: Vec3::ONE,
+    };
+    let value = serde_json::to_value(Command::SetTransform {
+        id: studio_core::ids::new_id(),
+        transform,
+    })
+    .unwrap();
+    expect_keys(&value, &["type", "id", "transform"]);
+    assert_eq!(value["type"], "setTransform");
+
+    let visibility = serde_json::to_value(Command::SetVisibility {
+        id: studio_core::ids::new_id(),
+        visible: false,
+    })
+    .unwrap();
+    assert_eq!(visibility["type"], "setVisibility");
+
+    let active = serde_json::to_value(Command::SetActiveCamera { id: None }).unwrap();
+    assert_eq!(
+        active,
+        serde_json::json!({"type": "setActiveCamera", "id": null})
+    );
+
+    let batch = serde_json::to_value(Command::Batch { commands: vec![] }).unwrap();
+    assert_eq!(batch, serde_json::json!({"type": "batch", "commands": []}));
+}
+
+#[test]
+fn session_state_shape_matches_the_ui_mirror() {
+    let editor = studio_core::Editor::new(Project::new(UNTITLED));
+    let value = serde_json::to_value(editor.state()).unwrap();
+    expect_keys(
+        &value,
+        &[
+            "project",
+            "revision",
+            "dirty",
+            "path",
+            "canUndo",
+            "canRedo",
+            "undoLabel",
+            "redoLabel",
+            "historyLen",
+        ],
+    );
+}

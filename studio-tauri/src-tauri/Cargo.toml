@@ -1,0 +1,21 @@
+[package]
+name = "forge3d-studio-shell"
+description = "Forge3D Studio desktop shell (Tauri) — Phase 1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "studio_shell"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+studio-core.workspace = true
+serde.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+log = "0.4"
+env_logger = "0.11"

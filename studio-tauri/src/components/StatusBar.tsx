@@ -1,0 +1,57 @@
+import { useSession } from "../state/session";
+
+function time(unixMs: number | null | undefined): string {
+  if (!unixMs) return "—";
+  return new Date(unixMs).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+export function StatusBar() {
+  const { state, autosave, recovery, bridgeKind, busy } = useSession();
+
+  const objects = state?.project.scene.objects.length ?? 0;
+  const selected = state?.project.selection.length ?? 0;
+
+  return (
+    <footer className="statusbar">
+      <span className={`status-chip status-chip--${bridgeKind}`}>
+        {bridgeKind === "tauri" ? "Tauri shell" : "Preview harness"}
+      </span>
+      {state ? (
+        <>
+          <span>{objects} objects</span>
+          <span>{selected} selected</span>
+          <span className="mono">rev {state.revision}</span>
+          <span>{state.historyLen} undo steps</span>
+          <span className={state.dirty ? "status-dirty" : "status-clean"}>
+            {state.dirty ? "unsaved" : "saved"}
+          </span>
+        </>
+      ) : (
+        <span>No project</span>
+      )}
+
+      <span className="statusbar__spacer" />
+
+      {busy && <span className="status-busy">working…</span>}
+      {recovery.length > 0 && (
+        <span className="status-warn">{recovery.length} recovery snapshot(s)</span>
+      )}
+      {autosave?.lastError ? (
+        <span className="status-error" title={autosave.lastError}>
+          autosave failed
+        </span>
+      ) : (
+        <span className="status-muted">
+          autosave {autosave ? `every ${autosave.intervalSeconds}s` : "off"}
+          {autosave?.lastWriteUnixMs
+            ? ` · last ${time(autosave.lastWriteUnixMs)}`
+            : " · not written yet"}
+        </span>
+      )}
+    </footer>
+  );
+}

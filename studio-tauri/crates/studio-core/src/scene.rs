@@ -1,0 +1,402 @@
+//! The scene graph: objects, their transforms, and their typed payloads.
+//!
+//! Phase 1 intentionally supports exactly the object kinds the plan calls for
+//! — a mesh (primitive cube/sphere/plane), a camera, and a light. Materials,
+//! imported meshes, terrain layers, and animation tracks are additive schema
+//! versions, not placeholders here.
+
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{new_id, ObjectId, SceneId};
+use crate::math::Transform;
+
+/// Maximum display-name length; long enough for real names, short enough that
+/// a corrupted file cannot smuggle megabytes into a panel header.
+pub const MAX_NAME_LEN: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Scene {
+    pub id: SceneId,
+    pub name: String,
+    /// Ordered list; order is the outliner order. Hierarchy is expressed by
+    /// [`SceneObject::parent`], never by list position.
+    pub objects: Vec<SceneObject>,
+    /// Camera rendered by the viewport and by Forge3D handoff.
+    pub active_camera: Option<ObjectId>,
+}
+
+impl Scene {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            id: new_id(),
+            name: name.into(),
+            objects: Vec::new(),
+            active_camera: None,
+        }
+    }
+
+    pub fn object(&self, id: ObjectId) -> Option<&SceneObject> {
+        self.objects.iter().find(|object| object.id == id)
+    }
+
+    pub fn object_mut(&mut self, id: ObjectId) -> Option<&mut SceneObject> {
+        self.objects.iter_mut().find(|object| object.id == id)
+    }
+
+    pub fn index_of(&self, id: ObjectId) -> Option<usize> {
+        self.objects.iter().position(|object| object.id == id)
+    }
+
+    /// The camera Forge3D and the viewport should use: the active camera when
+    /// it exists and is a camera, otherwise the first camera in the scene.
+    pub fn camera(&self) -> Option<&SceneObject> {
+        let active = self
+            .active_camera
+            .and_then(|id| self.object(id))
+            .filter(|object| object.is_camera());
+        active.or_else(|| self.objects.iter().find(|object| object.is_camera()))
+    }
+
+    /// Children of `id`, in outliner order.
+    pub fn children_of(&self, id: ObjectId) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|object| object.parent == Some(id))
+            .map(|object| object.id)
+            .collect()
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_name(&self.name, "scene name")?;
+
+        let mut seen: Vec<ObjectId> = Vec::with_capacity(self.objects.len());
+        for object in &self.objects {
+            if seen.contains(&object.id) {
+                return Err(format!("duplicate object id {}", object.id));
+            }
+            seen.push(object.id);
+        }
+
+        for object in &self.objects {
+            object.validate()?;
+            if let Some(parent) = object.parent {
+                if parent == object.id {
+                    return Err(format!("object {:?} is its own parent", object.name));
+                }
+                if self.object(parent).is_none() {
+                    return Err(format!(
+                        "object {:?} references missing parent {parent}",
+                        object.name
+                    ));
+                }
+                // Walk up; a cycle would otherwise hang every recursive walk.
+                let mut cursor = Some(parent);
+                let mut depth = 0;
+                while let Some(current) = cursor {
+                    depth += 1;
+                    if depth > self.objects.len() {
+                        return Err(format!(
+                            "object {:?} is part of a parent cycle",
+                            object.name
+                        ));
+                    }
+                    if current == object.id {
+                        return Err(format!(
+                            "object {:?} is part of a parent cycle",
+                            object.name
+                        ));
+                    }
+                    cursor = self.object(current).and_then(|next| next.parent);
+                }
+            }
+        }
+
+        if let Some(active) = self.active_camera {
+            match self.object(active) {
+                Some(object) if object.is_camera() => {}
+                Some(_) => return Err(format!("active camera {active} is not a camera object")),
+                None => {
+                    return Err(format!("active camera {active} does not exist"));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneObject {
+    pub id: ObjectId,
+    pub name: String,
+    /// Parent-relative hierarchy; `None` means the object is at scene root.
+    #[serde(default)]
+    pub parent: Option<ObjectId>,
+    pub transform: Transform,
+    #[serde(default = "default_true")]
+    pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
+    pub kind: ObjectKind,
+}
+
+impl SceneObject {
+    pub fn is_camera(&self) -> bool {
+        matches!(self.kind, ObjectKind::Camera(_))
+    }
+
+    pub fn is_light(&self) -> bool {
+        matches!(self.kind, ObjectKind::Light(_))
+    }
+
+    pub fn is_mesh(&self) -> bool {
+        matches!(self.kind, ObjectKind::Mesh(_))
+    }
+
+    /// Short label used by the outliner type column.
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind {
+            ObjectKind::Mesh(_) => "mesh",
+            ObjectKind::Camera(_) => "camera",
+            ObjectKind::Light(_) => "light",
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        validate_name(&self.name, "object name")?;
+        self.transform
+            .validate()
+            .map_err(|reason| format!("object {:?}: {reason}", self.name))?;
+        match &self.kind {
+            ObjectKind::Mesh(mesh) => mesh
+                .validate()
+                .map_err(|reason| format!("object {:?}: {reason}", self.name)),
+            ObjectKind::Camera(camera) => camera
+                .validate()
+                .map_err(|reason| format!("object {:?}: {reason}", self.name)),
+            ObjectKind::Light(light) => light
+                .validate()
+                .map_err(|reason| format!("object {:?}: {reason}", self.name)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ObjectKind {
+    Mesh(MeshObject),
+    Camera(CameraObject),
+    Light(LightObject),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeshObject {
+    pub primitive: Primitive,
+}
+
+impl MeshObject {
+    fn validate(&self) -> Result<(), String> {
+        self.primitive.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Primitive {
+    Cube { size: f32 },
+    Sphere { radius: f32 },
+    Plane { size: f32 },
+}
+
+impl Primitive {
+    /// Edge length / diameter used by the solid viewport gizmo.
+    pub fn extent(&self) -> f32 {
+        match *self {
+            Primitive::Cube { size } => size,
+            Primitive::Sphere { radius } => radius * 2.0,
+            Primitive::Plane { size } => size,
+        }
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        let (label, value) = match *self {
+            Primitive::Cube { size } => ("cube size", size),
+            Primitive::Sphere { radius } => ("sphere radius", radius),
+            Primitive::Plane { size } => ("plane size", size),
+        };
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("{label} must be a positive finite number"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CameraObject {
+    pub fov_deg: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+impl CameraObject {
+    pub fn validate(&self) -> Result<(), String> {
+        if !self.fov_deg.is_finite() || !(1.0..179.0).contains(&self.fov_deg) {
+            return Err("camera field of view must be between 1 and 179 degrees".to_owned());
+        }
+        if !self.near.is_finite() || self.near <= 0.0 {
+            return Err("camera near plane must be a positive number".to_owned());
+        }
+        if !self.far.is_finite() || self.far <= self.near {
+            return Err("camera far plane must be greater than the near plane".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightKind {
+    Directional,
+    Point,
+}
+
+impl LightKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            LightKind::Directional => "Directional",
+            LightKind::Point => "Point",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightObject {
+    pub kind: LightKind,
+    /// Linear RGB in 0..=1.
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+impl LightObject {
+    pub fn validate(&self) -> Result<(), String> {
+        for channel in self.color {
+            if !channel.is_finite() || !(0.0..=1.0).contains(&channel) {
+                return Err("light colour channels must be between 0 and 1".to_owned());
+            }
+        }
+        if !self.intensity.is_finite() || self.intensity < 0.0 {
+            return Err("light intensity must be a non-negative number".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+pub(crate) fn validate_name(name: &str, field: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if trimmed.chars().count() > MAX_NAME_LEN {
+        return Err(format!("{field} must be at most {MAX_NAME_LEN} characters"));
+    }
+    if name.chars().any(|ch| ch.is_control()) {
+        return Err(format!("{field} must not contain control characters"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Vec3;
+
+    fn cube(name: &str) -> SceneObject {
+        SceneObject {
+            id: new_id(),
+            name: name.to_owned(),
+            parent: None,
+            transform: Transform::default(),
+            visible: true,
+            locked: false,
+            kind: ObjectKind::Mesh(MeshObject {
+                primitive: Primitive::Cube { size: 2.0 },
+            }),
+        }
+    }
+
+    #[test]
+    fn duplicate_ids_are_rejected() {
+        let mut scene = Scene::new("Scene");
+        let object = cube("Cube");
+        let mut clone = object.clone();
+        clone.name = "Cube 2".to_owned();
+        scene.objects.push(object);
+        scene.objects.push(clone);
+        assert!(scene
+            .validate()
+            .unwrap_err()
+            .contains("duplicate object id"));
+    }
+
+    #[test]
+    fn parent_cycles_are_rejected() {
+        let mut scene = Scene::new("Scene");
+        let mut a = cube("A");
+        let mut b = cube("B");
+        a.parent = Some(b.id);
+        b.parent = Some(a.id);
+        scene.objects.push(a);
+        scene.objects.push(b);
+        assert!(scene.validate().unwrap_err().contains("parent cycle"));
+    }
+
+    #[test]
+    fn missing_parent_is_rejected() {
+        let mut scene = Scene::new("Scene");
+        let mut a = cube("A");
+        a.parent = Some(new_id());
+        scene.objects.push(a);
+        assert!(scene.validate().unwrap_err().contains("missing parent"));
+    }
+
+    #[test]
+    fn active_camera_must_be_a_camera() {
+        let mut scene = Scene::new("Scene");
+        let change = cube("Cube");
+        scene.active_camera = Some(change.id);
+        scene.objects.push(change);
+        assert!(scene.validate().unwrap_err().contains("not a camera"));
+    }
+
+    #[test]
+    fn camera_falls_back_to_first_camera_object() {
+        let mut scene = Scene::new("Scene");
+        let mut camera = cube("Camera");
+        camera.kind = ObjectKind::Camera(CameraObject {
+            fov_deg: 45.0,
+            near: 0.1,
+            far: 100.0,
+        });
+        let camera_id = camera.id;
+        scene.objects.push(camera);
+        assert_eq!(scene.camera().map(|object| object.id), Some(camera_id));
+        assert_eq!(scene.objects[0].transform.translation, Vec3::ZERO);
+    }
+
+    #[test]
+    fn name_validation_rejects_control_characters() {
+        assert!(validate_name("ok", "name").is_ok());
+        assert!(validate_name("  ", "name").is_err());
+        assert!(validate_name("bad\u{7}", "name").is_err());
+        assert!(validate_name(&"x".repeat(MAX_NAME_LEN + 1), "name").is_err());
+    }
+}
