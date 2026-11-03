@@ -141,45 +141,49 @@ class StudioRenderer:
         self.size: Optional[tuple[int, int]] = None
 
     def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
-        """Read a raster overlay and resample it to the render size.
+        """Read a raster overlay decimated to the frame, aiming for the drape.
 
-        Categorical rasters (land cover) keep their source colours; continuous
-        ones are stretched to 0-255.
+        Deliberately no reprojection: the overlay is stretched across the terrain
+        footprint, which is what the gallery examples do. (Reprojecting into a
+        0..N destination grid put a georeferenced raster at coordinates far from
+        its own extent and produced a flat grey layer.)
         """
         import rasterio
         from rasterio.enums import Resampling as RasterioResampling
-        from rasterio.warp import reproject
 
         with rasterio.open(overlay["path"]) as src:
             bands = min(3, src.count)
-            rgb = np.zeros((height, width, 3), dtype=np.float32)
-            for band in range(bands):
-                plane = np.zeros((height, width), dtype=np.float32)
-                reproject(
-                    source=rasterio.band(src, band + 1),
-                    destination=plane,
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=rasterio.transform.from_bounds(
-                        0, 0, width, height, width, height
-                    ),
-                    dst_crs=src.crs,
-                    resampling=RasterioResampling.bilinear,
+            planes = [
+                src.read(
+                    band + 1,
+                    out_shape=(height, width),
+                    resampling=RasterioResampling.average,
+                    masked=True,
                 )
-                rgb[:, :, band] = plane
+                for band in range(bands)
+            ]
+            valid = np.ones((height, width), dtype=bool)
+            for plane in planes:
+                valid &= ~np.ma.getmaskarray(plane)
+            rgb = np.zeros((height, width, 3), dtype=np.float32)
+            for index, plane in enumerate(planes):
+                values = np.asarray(plane.filled(0.0), dtype=np.float32)
+                rgb[:, :, index] = np.clip(values, 0.0, None)
             if bands == 1:
                 rgb[:, :, 1] = rgb[:, :, 0]
                 rgb[:, :, 2] = rgb[:, :, 0]
 
         flat = rgb.reshape(-1, 3)
         finite = np.isfinite(flat).all(axis=1)
-        low, high = np.percentile(flat[finite], [1, 99]) if finite.any() else (0.0, 255.0)
+        low, high = (
+            np.percentile(flat[finite], [1, 99]) if finite.any() else (0.0, 255.0)
+        )
         if high - low < 1e-6:
             low, high = 0.0, 255.0
         scaled = np.clip((rgb - low) / (high - low), 0.0, 1.0)
+        alpha = np.where(valid, 255, 0).astype(np.uint8)
         rgba = np.concatenate(
-            [ (scaled * 255.0).astype(np.uint8), np.full((height, width, 1), 255, np.uint8) ],
-            axis=2,
+            [(scaled * 255.0).astype(np.uint8), alpha[..., None]], axis=2
         )
         return self.f3d.OverlayLayer.from_raster_rgba(
             rgba, strength=float(overlay.get("opacity", 0.82))

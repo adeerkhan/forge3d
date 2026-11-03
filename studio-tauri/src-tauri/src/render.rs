@@ -427,11 +427,11 @@ impl RenderRequest {
             // the viewport; fall back to the viewer's framing only when the
             // project cannot say (no camera distance available).
             radius: camera.radius.unwrap_or_else(|| span[0].max(span[1]) * 1.5),
-            target: camera.target.unwrap_or([
-                span[0] * 0.5,
-                span[1] * 0.5,
-                f64::from(elevation[0] + elevation[1]) * 0.5,
-            ]),
+            // The renderer builds the terrain mesh centred on the origin, so the
+            // orbit target is the origin at mid-elevation — not the DEM's corner
+            // in map coordinates. Aiming at (span/2, span/2) looked past the mesh
+            // and produced frames of pure sky.
+            target: [0.0, 0.0, f64::from(elevation[0] + elevation[1]) * 0.5],
             fov_deg: f64::from(camera.fov_deg),
             sun_azimuth_deg: handoff
                 .sun
