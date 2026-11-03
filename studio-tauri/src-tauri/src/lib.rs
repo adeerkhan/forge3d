@@ -58,6 +58,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::project_state,
             commands::new_project,
+            commands::scene_presets,
             commands::open_project,
             commands::save_project,
             commands::close_project,

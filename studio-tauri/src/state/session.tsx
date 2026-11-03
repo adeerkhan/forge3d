@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -11,6 +9,7 @@ import {
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
 import { bridge } from "../bridge/env";
+import { SessionContext, type SessionApi } from "./session-context";
 import { base64ToArrayBuffer, inspectGltf, putAssetBytes } from "../viewport/assets";
 import type {
   Applied,
@@ -18,6 +17,7 @@ import type {
   Command,
   EngineStatus,
   RenderFrame,
+  ScenePreset,
   ViewportMode,
   PrimitiveShape,
   RecoveryEntry,
@@ -38,65 +38,6 @@ const MESH_FILTER = {
   extensions: ["gltf", "glb"],
 };
 
-interface SessionApi {
-  bridgeKind: "tauri" | "mock";
-  info: ShellInfo | null;
-  state: SessionState | null;
-  autosave: AutosaveStatus | null;
-  recovery: RecoveryEntry[];
-  error: string | null;
-  notice: string | null;
-  busy: boolean;
-  /** Active manipulation tool. UI state, not project state. */
-  tool: Tool;
-  setTool(tool: Tool): void;
-  /** Gizmo orientation. UI state, not project state. */
-  space: ToolSpace;
-  setSpace(space: ToolSpace): void;
-  /** Look through the scene's active camera instead of the free view. */
-  cameraView: boolean;
-  setCameraView(enabled: boolean): void;
-  /** Forge3D engine discovery (renderer + probe). */
-  engine: EngineStatus | null;
-  /** Heightfield resolution used by the Solid terrain preview. */
-  terrainResolution: number;
-  setTerrainResolution(resolution: number): void;
-  /** Last embedded-renderer frame (Rendered viewport mode). */
-  render: {
-    frame: RenderFrame | null;
-    busy: boolean;
-    error: string | null;
-  };
-  actions: {
-    newProject(): Promise<void>;
-    openProject(): Promise<void>;
-    saveProject(saveAs?: boolean): Promise<void>;
-    closeProject(): Promise<void>;
-    apply(command: Command): Promise<Applied | null>;
-    undo(): Promise<void>;
-    redo(): Promise<void>;
-    select(ids: string[]): Promise<void>;
-    addPrimitive(shape: PrimitiveShape): Promise<void>;
-    duplicateSelection(): Promise<void>;
-    deleteSelection(): Promise<void>;
-    importMesh(): Promise<void>;
-    refreshEngine(force?: boolean): Promise<void>;
-    setViewportMode(mode: ViewportMode): Promise<void>;
-    renderViewport(
-      width: number,
-      height: number,
-      quality?: "preview" | "final",
-    ): Promise<void>;
-    /** Render a full-resolution still and save it (dialog). */
-    renderStill(): Promise<void>;
-    restoreRecovery(id: string): Promise<void>;
-    discardRecovery(id: string): Promise<void>;
-    dismissError(): void;
-  };
-}
-
-const SessionContext = createContext<SessionApi | null>(null);
-
 export function SessionProvider({ children }: { children: ReactNode }) {
   const [info, setInfo] = useState<ShellInfo | null>(null);
   const [state, setState] = useState<SessionState | null>(null);
@@ -110,6 +51,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [cameraView, setCameraView] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [terrainResolution, setTerrainResolution] = useState(96);
+  const [presets, setPresets] = useState<ScenePreset[]>([]);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [render, setRender] = useState<{ frame: RenderFrame | null; busy: boolean; error: string | null }>({
     frame: null,
     busy: false,
@@ -164,6 +107,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // can run, without a whole workspace for it.
   useEffect(() => {
     void refreshEngine();
+    if (bridge.kind === "tauri") {
+      bridge
+        .scenePresets()
+        .then(setPresets)
+        .catch(() => undefined);
+    } else {
+      bridge
+        .scenePresets()
+        .then(setPresets)
+        .catch(() => undefined);
+    }
     // Mount-time probe only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -384,10 +338,31 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
       async newProject() {
+        // Kept for programmatic use (keyboard shortcut opens the dialog instead).
+        await actions.createProject(null);
+      },
+
+      requestNewProject() {
         if (!guardUnsaved("start a new project")) return;
+        if (presets.length === 0) {
+          bridge
+            .scenePresets()
+            .then(setPresets)
+            .catch(() => undefined);
+        }
+        setNewProjectOpen(true);
+      },
+
+      dismissNewProject() {
+        setNewProjectOpen(false);
+      },
+
+      async createProject(presetId) {
         setBusy(true);
+        setNewProjectOpen(false);
         try {
-          setState(await bridge.newProject());
+          const snapshot = await bridge.newProject(null, presetId);
+          setState(snapshot);
           await refreshRecovery();
           flash("New project");
         } catch (cause) {
@@ -559,6 +534,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const value: SessionApi = {
     bridgeKind: bridge.kind,
+    presets,
+    newProjectOpen,
     info,
     state,
     autosave,
@@ -582,8 +559,3 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }
 
-export function useSession(): SessionApi {
-  const value = useContext(SessionContext);
-  if (!value) throw new Error("useSession must be used inside SessionProvider");
-  return value;
-}

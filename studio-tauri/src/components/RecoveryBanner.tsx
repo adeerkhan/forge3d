@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import { CloseIcon, RestoreIcon } from "./icons";
 
 /** Offers unsaved work found in the recovery directory at startup. */

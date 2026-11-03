@@ -2,13 +2,14 @@ import { useEffect } from "react";
 
 import { EmptyState } from "./components/EmptyState";
 import { Inspector } from "./components/Inspector";
+import { NewProjectDialog } from "./components/NewProjectDialog";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { SceneTree } from "./components/SceneTree";
 import { StatusBar } from "./components/StatusBar";
 import { TopBar } from "./components/TopBar";
 import { Viewport3D } from "./viewport/Viewport3D";
 import { CloseIcon } from "./components/icons";
-import { useSession } from "./state/session";
+import { useSession } from "./state/session-context";
 
 export default function App() {
   const { state, error, notice, actions } = useSession();
@@ -42,6 +43,7 @@ export default function App() {
       </main>
 
       <StatusBar />
+      <NewProjectDialog />
 
       <div className="toast-stack">
         {error && (
@@ -146,7 +148,7 @@ function useKeyboardShortcuts() {
           break;
         case "n":
           event.preventDefault();
-          void actions.newProject();
+          actions.requestNewProject();
           break;
       }
     };

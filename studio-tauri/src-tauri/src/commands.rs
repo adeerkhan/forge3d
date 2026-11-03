@@ -52,15 +52,55 @@ pub fn project_state(state: State<'_, AppState>) -> Result<Option<SessionState>,
     Ok(lock(&state)?.state())
 }
 
+/// Starter scenes offered by the New Project dialog.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScenePreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub dem_name: Option<String>,
+    pub grid: Option<[u32; 2]>,
+    pub elevation_range: Option<[f32; 2]>,
+    pub world_span: Option<[f64; 2]>,
+    /// False when the DEM is missing from this checkout; the UI disables it.
+    pub available: bool,
+}
+
+#[tauri::command]
+pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
+    let mut presets = Vec::new();
+    for (id, name, dem_file, description) in crate::forge3d::SCENE_PRESETS {
+        let seed = forge.terrain_seed(Some(id));
+        presets.push(ScenePreset {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            description: description.to_owned(),
+            dem_name: seed.as_ref().map(|seed| seed.name.clone()),
+            grid: seed.as_ref().and_then(|seed| seed.dimensions),
+            elevation_range: seed.as_ref().and_then(|seed| seed.elevation_range),
+            world_span: seed.as_ref().and_then(|seed| seed.world_span_xz),
+            available: seed.is_some(),
+        });
+        let _ = dem_file;
+    }
+    presets
+}
+
 #[tauri::command]
 pub fn new_project(
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
     name: Option<String>,
+    preset: Option<String>,
 ) -> Result<SessionState, String> {
-    // A new project starts from the bundled DEM when one can be found; the core
-    // falls back to the primitive starter when it cannot.
-    let seed = forge.default_terrain_seed();
+    // A new project starts from the chosen bundled DEM (Bryce by default); the
+    // core falls back to the primitive starter when none can be found.
+    let seed = match preset.as_deref() {
+        // The dialog's "Empty scene" really is empty: no DEM.
+        Some("empty") => None,
+        other => forge.terrain_seed(other),
+    };
     Ok(lock(&state)?.new_project_seeded(name, seed))
 }
 

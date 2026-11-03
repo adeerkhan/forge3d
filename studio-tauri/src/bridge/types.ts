@@ -268,6 +268,18 @@ export interface EngineStatus {
   detail: string;
 }
 
+/** A starter scene offered when creating a project. */
+export interface ScenePreset {
+  id: string;
+  name: string;
+  description: string;
+  demName: string | null;
+  grid: [number, number] | null;
+  elevationRange: [number, number] | null;
+  worldSpan: [number, number] | null;
+  available: boolean;
+}
+
 /** Camera override from the viewport, so frames match the solid view. */
 export interface RenderView {
   phiDeg: number;

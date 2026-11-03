@@ -1,4 +1,4 @@
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 
 function time(unixMs: number | null | undefined): string {
   if (!unixMs) return "—";

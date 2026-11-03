@@ -147,23 +147,24 @@ impl Project {
         };
         let asset = Asset {
             id: new_id(),
-            name: seed.name,
-            path: seed.path,
+            name: seed.name.clone(),
+            path: seed.path.clone(),
             kind: AssetKind::Dem,
             byte_size: seed.byte_size,
         };
-        project.assets.push(asset.clone());
+        let title = seed.title.clone().unwrap_or_else(|| humanize(&seed.name));
         let mut terrain = TerrainObject::new(asset.id);
         if let (Some(dimensions), Some(range)) = (seed.dimensions, seed.elevation_range) {
             terrain =
                 terrain.with_dem_info(dimensions, range, seed.world_origin_xz, seed.world_span_xz);
         }
+        project.assets.push(asset);
         project.scene.objects.retain(|object| !object.is_mesh());
         project.scene.objects.insert(
             0,
             SceneObject {
                 id: new_id(),
-                name: "Bryce Canyon".to_owned(),
+                name: title,
                 parent: None,
                 transform: Transform::default(),
                 visible: true,
@@ -347,6 +348,9 @@ impl ViewportMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainSeed {
+    /// Display title for the terrain object ("Swiss Alps"); defaults to the file stem.
+    #[serde(default)]
+    pub title: Option<String>,
     pub name: String,
     pub path: String,
     pub byte_size: u64,
@@ -470,6 +474,29 @@ impl AssetKind {
     pub fn is_raster(self) -> bool {
         matches!(self, AssetKind::Dem | AssetKind::Orthophoto)
     }
+}
+
+/// `switzerland_dem.tif` -> "Switzerland Dem" when no title was supplied.
+fn humanize(file_name: &str) -> String {
+    let stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(file_name);
+    let words = stem
+        .split(['_', '-', ' '])
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        return file_name.to_owned();
+    }
+    words.join(" ")
 }
 
 #[cfg(test)]

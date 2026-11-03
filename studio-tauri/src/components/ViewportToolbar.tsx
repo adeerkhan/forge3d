@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { PrimitiveShape, Tool } from "../bridge/types";
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import {
   CameraIcon,
   CopyIcon,

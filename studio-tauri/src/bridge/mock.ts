@@ -22,6 +22,7 @@ import type {
   ObjectKind,
   RenderFrame,
   RenderStatus,
+  ScenePreset,
   RenderView,
   Primitive,
   Project,
@@ -55,7 +56,7 @@ function primitiveObject(
   };
 }
 
-function starterProject(name: string): Project {
+function starterProject(name: string, preset: string = "bryce"): Project {
   const now = Date.now();
   // The preview harness mirrors the desktop starter: a DEM, not a cube.
   const demAsset = {
@@ -65,9 +66,10 @@ function starterProject(name: string): Project {
     kind: "dem" as const,
     byteSize: 3_321_356,
   };
+  const cube = primitiveObject("Cube", { type: "cube", size: 2 });
   const terrain: SceneObject = {
     id: newId(),
-    name: "Bryce Canyon",
+    name: preset === "swiss" ? "Swiss Alps" : "Bryce Canyon",
     parent: null,
     transform: identity(),
     visible: true,
@@ -124,10 +126,10 @@ function starterProject(name: string): Project {
     scene: {
       id: newId(),
       name: "Scene",
-      objects: [terrain, camera, light],
+      objects: preset === "empty" ? [cube, camera, light] : [terrain, camera, light],
       activeCamera: camera.id,
     },
-    assets: [demAsset],
+    assets: preset === "empty" ? [] : [demAsset],
     selection: [],
     workspace: "studio",
     viewport: { mode: "solid", gridVisible: true },
@@ -412,8 +414,31 @@ export function createMockBridge(): StudioBridge {
 
     state: async () => (project ? state() : null),
 
-    newProject: async (name) => {
-      project = starterProject(name ?? "Untitled");
+    scenePresets: async (): Promise<ScenePreset[]> => [
+      {
+        id: "bryce",
+        name: "Bryce Canyon",
+        description: "4 x 3.8 km · 1024² DEM · hoodoo amphitheatre",
+        demName: "Bryce_Canyon_1024.tif",
+        grid: [1024, 1024],
+        elevationRange: [2099.23, 2553.58],
+        worldSpan: [4000, 3800],
+        available: true,
+      },
+      {
+        id: "swiss",
+        name: "Swiss Alps",
+        description: "353 x 226 km · national DEM · Alps to Jura",
+        demName: "switzerland_dem.tif",
+        grid: [7294, 3200],
+        elevationRange: [186, 4503],
+        worldSpan: [352600, 225700],
+        available: true,
+      },
+    ],
+
+    newProject: async (name, preset) => {
+      project = starterProject(name ?? "Untitled", preset ?? "bryce");
       revision = 0;
       dirty = true;
       path = null;

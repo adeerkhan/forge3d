@@ -9,6 +9,7 @@ import type {
   RecoveryEntry,
   RenderFrame,
   RenderStatus,
+  ScenePreset,
   SessionState,
   ShellInfo,
   TerrainPreview,
@@ -22,8 +23,10 @@ export const tauriBridge: StudioBridge = {
 
   state: () => invoke<SessionState | null>("project_state"),
 
-  newProject: (name) =>
-    invoke<SessionState>("new_project", { name: name ?? null }),
+  newProject: (name, preset) =>
+    invoke<SessionState>("new_project", { name: name ?? null, preset: preset ?? null }),
+
+  scenePresets: () => invoke<ScenePreset[]>("scene_presets"),
 
   openProject: (path) =>
     invoke<SessionState>("open_project", { path }),

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import {
   FileIcon,
   FolderIcon,
@@ -60,7 +60,7 @@ export function TopBar() {
               role="menuitem"
               onClick={() => {
                 setMenuOpen(false);
-                void actions.newProject();
+                actions.requestNewProject();
               }}
             >
               <FileIcon size={14} /> New project

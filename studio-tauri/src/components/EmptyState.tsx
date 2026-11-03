@@ -1,4 +1,4 @@
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import { FileIcon, FolderIcon } from "./icons";
 
 export function EmptyState() {
@@ -20,7 +20,7 @@ export function EmptyState() {
           <button
             type="button"
             className="button button--primary"
-            onClick={() => void actions.newProject()}
+            onClick={() => actions.requestNewProject()}
           >
             <FileIcon size={14} /> New project
           </button>

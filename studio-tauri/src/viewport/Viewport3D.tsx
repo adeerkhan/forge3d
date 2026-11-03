@@ -12,7 +12,7 @@ import type {
   Transform,
 } from "../bridge/types";
 import { ViewportToolbar } from "../components/ViewportToolbar";
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
 import type { TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
@@ -265,6 +265,7 @@ export function Viewport3D() {
     cameraView,
     render,
     terrainResolution,
+    setCameraView,
   } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -790,12 +791,19 @@ export function Viewport3D() {
   sizeRef.current = size;
   const stateRef = useRef(state);
   stateRef.current = state;
+  const setCameraViewRef = useRef(setCameraView);
+  setCameraViewRef.current = setCameraView;
 
-  /** The solid camera as a scene transform (X, then Y, then Z). */
+  /** The solid camera as a scene transform, aimed at the terrain centre. */
   const cameraTransformFromView = useCallback((): Transform | null => {
     const runtime = runtimeRef.current;
     if (!runtime) return null;
-    const euler = new THREE.Euler().setFromQuaternion(runtime.camera.quaternion, "ZYX");
+    const aim = new THREE.Object3D();
+    aim.position.copy(runtime.camera.position);
+    // The renderer's terrain camera is an orbit around the scene centre, so the
+    // captured camera must look there; otherwise no render can match it.
+    aim.lookAt(0, 0, 0);
+    const euler = new THREE.Euler().setFromQuaternion(aim.quaternion, "ZYX");
     return {
       translation: {
         x: runtime.camera.position.x,
@@ -836,6 +844,8 @@ export function Viewport3D() {
       transform,
     });
     await actionsRef.current.apply({ type: "setActiveCamera", id: active.id });
+    // Numpad 1 should also put the viewport into camera mode.
+    setCameraViewRef.current(true);
     setProblem(null);
   }, [cameraTransformFromView]);
 

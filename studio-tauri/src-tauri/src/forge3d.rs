@@ -15,6 +15,22 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+/// Bundled DEMs offered as starter scenes. `id` is what the UI sends back.
+pub const SCENE_PRESETS: [(&str, &str, &str, &str); 2] = [
+    (
+        "bryce",
+        "Bryce Canyon",
+        "Bryce_Canyon_1024.tif",
+        "4 x 3.8 km · 1024² DEM · hoodoo amphitheatre",
+    ),
+    (
+        "swiss",
+        "Swiss Alps",
+        "switzerland_dem.tif",
+        "353 x 226 km · national DEM · Alps to Jura",
+    ),
+];
+
 /// Bundled DEM used as the default scene. Overridable with `FORGE3D_STUDIO_DEM`.
 const DEFAULT_DEM_RELATIVE: &str = "assets/tif/Bryce_Canyon_1024.tif";
 
@@ -192,12 +208,17 @@ impl Forge3dState {
         last
     }
 
-    /// The default scene's DEM, with its measured dimensions and elevation
-    /// range so the project can reproduce the renderer's framing without Python.
-    ///
-    /// Sampling costs a Python start-up; the result is cached per path.
-    pub fn default_terrain_seed(&self) -> Option<studio_core::TerrainSeed> {
-        let path = resolve_default_dem()?;
+    /// A starter DEM by preset id ("bryce" | "swiss"), else the default.
+    pub fn terrain_seed(&self, preset: Option<&str>) -> Option<studio_core::TerrainSeed> {
+        let relative = preset
+            .and_then(|id| SCENE_PRESETS.iter().find(|(key, ..)| *key == id))
+            .map(|(_, _, file, _)| format!("assets/tif/{file}"))
+            .unwrap_or_else(|| DEFAULT_DEM_RELATIVE.to_owned());
+        self.seed_for_relative(&relative)
+    }
+
+    fn seed_for_relative(&self, relative: &str) -> Option<studio_core::TerrainSeed> {
+        let path = resolve_dem(relative)?;
         let path_text = path.to_string_lossy().into_owned();
 
         if let Ok(cache) = self.terrain_cache.lock() {
@@ -213,7 +234,12 @@ impl Forge3dState {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "terrain.tif".to_owned());
+        let title = SCENE_PRESETS
+            .iter()
+            .find(|(_, _, file, _)| format!("assets/tif/{file}") == relative)
+            .map(|(_, name, _, _)| (*name).to_owned());
         let mut seed = studio_core::TerrainSeed {
+            title,
             name,
             path: path_text.clone(),
             byte_size: metadata.len(),
@@ -258,12 +284,15 @@ impl Forge3dState {
     }
 }
 
-/// Resolve the bundled/default DEM: `FORGE3D_STUDIO_DEM`, else the checkout's
-/// Bryce Canyon sample, searched from the executable and the working directory.
-fn resolve_default_dem() -> Option<PathBuf> {
+/// Resolve a bundled DEM: `FORGE3D_STUDIO_DEM` overrides the default sample,
+/// otherwise the named file is searched from the executable and the working
+/// directory.
+fn resolve_dem(relative: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(path) = std::env::var_os("FORGE3D_STUDIO_DEM") {
-        candidates.push(PathBuf::from(path));
+    if relative == DEFAULT_DEM_RELATIVE {
+        if let Some(path) = std::env::var_os("FORGE3D_STUDIO_DEM") {
+            candidates.push(PathBuf::from(path));
+        }
     }
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -273,7 +302,7 @@ fn resolve_default_dem() -> Option<PathBuf> {
         roots.extend(current.ancestors().take(6).map(Path::to_path_buf));
     }
     for root in roots {
-        candidates.push(root.join(DEFAULT_DEM_RELATIVE));
+        candidates.push(root.join(relative));
     }
     candidates.into_iter().find(|candidate| candidate.is_file())
 }

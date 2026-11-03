@@ -11,6 +11,7 @@ use studio_core::Workspace;
 
 fn seed() -> TerrainSeed {
     TerrainSeed {
+        title: Some("Bryce Canyon".to_owned()),
         name: "Bryce_Canyon_1024.tif".to_owned(),
         path: "/data/Bryce_Canyon_1024.tif".to_owned(),
         byte_size: 3_321_356,

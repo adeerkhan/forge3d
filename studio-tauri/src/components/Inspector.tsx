@@ -8,7 +8,7 @@ import type {
   Transform,
 } from "../bridge/types";
 import { objectKindLabel } from "../bridge/types";
-import { useSession } from "../state/session";
+import { useSession } from "../state/session-context";
 import { NumberField, Section, TextField, Toggle } from "./fields";
 
 function TransformEditor({

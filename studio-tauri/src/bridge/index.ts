@@ -19,6 +19,7 @@ import type {
   MeshFilePayload,
   RenderFrame,
   RenderStatus,
+  ScenePreset,
   RenderView,
   ShellInfo,
   TerrainPreview,
@@ -28,7 +29,8 @@ export interface StudioBridge {
   readonly kind: "tauri" | "mock";
   info(): Promise<ShellInfo>;
   state(): Promise<SessionState | null>;
-  newProject(name?: string | null): Promise<SessionState>;
+  newProject(name?: string | null, preset?: string | null): Promise<SessionState>;
+  scenePresets(): Promise<ScenePreset[]>;
   openProject(path: string): Promise<SessionState>;
   saveProject(path?: string | null): Promise<SessionState>;
   closeProject(): Promise<null>;
