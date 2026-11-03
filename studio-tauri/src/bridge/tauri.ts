@@ -4,6 +4,9 @@ import type { StudioBridge } from "./index";
 import type {
   AutosaveStatus,
   EditResult,
+  EngineStatus,
+  Forge3dStatus,
+  Handoff,
   MeshFilePayload,
   RecoveryEntry,
   SessionState,
@@ -50,4 +53,17 @@ export const tauriBridge: StudioBridge = {
   discardRecovery: (id) => invoke<void>("discard_recovery", { id }),
 
   readMeshFile: (path) => invoke<MeshFilePayload>("read_mesh_file", { path }),
+
+  forge3dProbe: (force) => invoke<EngineStatus>("forge3d_probe", { force: force ?? false }),
+
+  forge3dStatus: () => invoke<Forge3dStatus>("forge3d_status"),
+
+  forge3dHandoff: () => invoke<Handoff>("forge3d_handoff"),
+
+  forge3dLaunch: (width, height) =>
+    invoke<Forge3dStatus>("forge3d_launch", { width: width ?? null, height: height ?? null }),
+
+  forge3dSyncCamera: () => invoke<Forge3dStatus>("forge3d_sync_camera"),
+
+  forge3dStop: () => invoke<Forge3dStatus>("forge3d_stop"),
 };

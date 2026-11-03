@@ -16,12 +16,16 @@ import type {
   Applied,
   AutosaveStatus,
   Command,
+  EngineStatus,
+  Forge3dStatus,
+  Handoff,
   PrimitiveShape,
   RecoveryEntry,
   SessionState,
   ShellInfo,
   Tool,
   ToolSpace,
+  Workspace,
 } from "../bridge/types";
 import { DEFAULT_PRIMITIVES } from "../bridge/types";
 
@@ -50,6 +54,13 @@ interface SessionApi {
   /** Gizmo orientation. UI state, not project state. */
   space: ToolSpace;
   setSpace(space: ToolSpace): void;
+  /** Look through the scene's active camera instead of the free view. */
+  cameraView: boolean;
+  setCameraView(enabled: boolean): void;
+  /** Forge3D workspace adapter state. */
+  engine: EngineStatus | null;
+  forgeStatus: Forge3dStatus | null;
+  handoff: Handoff | null;
   actions: {
     newProject(): Promise<void>;
     openProject(): Promise<void>;
@@ -63,6 +74,11 @@ interface SessionApi {
     duplicateSelection(): Promise<void>;
     deleteSelection(): Promise<void>;
     importMesh(): Promise<void>;
+    setWorkspace(workspace: Workspace): Promise<void>;
+    refreshForge3d(force?: boolean): Promise<void>;
+    openForge3d(): Promise<void>;
+    syncForge3dCamera(): Promise<void>;
+    stopForge3d(): Promise<void>;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;
@@ -81,6 +97,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [busy, setBusy] = useState(false);
   const [tool, setTool] = useState<Tool>("select");
   const [space, setSpace] = useState<ToolSpace>("world");
+  const [cameraView, setCameraView] = useState(false);
+  const [engine, setEngine] = useState<EngineStatus | null>(null);
+  const [forgeStatus, setForgeStatus] = useState<Forge3dStatus | null>(null);
+  const [handoff, setHandoff] = useState<Handoff | null>(null);
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((message: string) => {
@@ -259,6 +279,64 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [applyCommand, fail, flash, select]);
 
+  const refreshForge3d = useCallback(
+    async (force = false) => {
+      try {
+        setEngine(await bridge.forge3dProbe(force));
+        setForgeStatus(await bridge.forge3dStatus());
+        try {
+          setHandoff(await bridge.forge3dHandoff());
+        } catch {
+          // No project open: the panel shows the engine state only.
+          setHandoff(null);
+        }
+      } catch (cause) {
+        fail(cause);
+      }
+    },
+    [fail],
+  );
+
+  const openForge3d = useCallback(async () => {
+    try {
+      setForgeStatus(await bridge.forge3dLaunch());
+      setHandoff(await bridge.forge3dHandoff().catch(() => null));
+      flash("Forge3D viewer started");
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [fail, flash]);
+
+  const syncForge3dCamera = useCallback(async () => {
+    try {
+      setForgeStatus(await bridge.forge3dSyncCamera());
+      flash("Camera and sun sent to Forge3D");
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [fail, flash]);
+
+  const stopForge3d = useCallback(async () => {
+    try {
+      setForgeStatus(await bridge.forge3dStop());
+      flash("Forge3D viewer stopped");
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [fail, flash]);
+
+  // While the viewer runs, keep diagnostics and status fresh.
+  useEffect(() => {
+    if (!forgeStatus?.running || bridge.kind !== "tauri") return;
+    const timer = window.setInterval(() => {
+      bridge
+        .forge3dStatus()
+        .then(setForgeStatus)
+        .catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [forgeStatus?.running]);
+
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
       async newProject() {
@@ -365,6 +443,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       deleteSelection,
       importMesh,
 
+      async setWorkspace(workspace) {
+        await applyCommand({ type: "setWorkspace", workspace });
+        if (workspace === "forge3d") await refreshForge3d();
+      },
+
+      refreshForge3d,
+      openForge3d,
+      syncForge3dCamera,
+      stopForge3d,
+
       async restoreRecovery(id) {
         setBusy(true);
         try {
@@ -401,9 +489,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       flash,
       guardUnsaved,
       importMesh,
+      openForge3d,
+      refreshForge3d,
       refreshRecovery,
       select,
       state,
+      stopForge3d,
+      syncForge3dCamera,
     ],
   );
 
@@ -420,6 +512,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setTool,
     space,
     setSpace,
+    cameraView,
+    setCameraView,
+    engine,
+    forgeStatus,
+    handoff,
     actions,
   };
 

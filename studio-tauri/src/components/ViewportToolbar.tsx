@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { PrimitiveShape, Tool } from "../bridge/types";
 import { useSession } from "../state/session";
 import {
+  CameraIcon,
   CopyIcon,
   CursorIcon,
   ImportIcon,
@@ -28,7 +29,8 @@ const PRIMITIVES: Array<{ shape: PrimitiveShape; label: string }> = [
 
 /** Tool strip floating over the viewport: the Blender-style tool palette. */
 export function ViewportToolbar() {
-  const { state, actions, tool, setTool, space, setSpace, bridgeKind } = useSession();
+  const { state, actions, tool, setTool, space, setSpace, cameraView, setCameraView, bridgeKind } =
+    useSession();
   const [addOpen, setAddOpen] = useState(false);
   const addRef = useRef<HTMLDivElement>(null);
 
@@ -163,6 +165,18 @@ export function ViewportToolbar() {
           <TrashIcon size={15} />
         </button>
       </div>
+
+      <span className="toolbar-divider" />
+
+      <button
+        type="button"
+        className={`tool-button ${cameraView ? "is-active" : ""}`}
+        title="Camera view — look through the active camera (0)"
+        aria-pressed={cameraView}
+        onClick={() => setCameraView(!cameraView)}
+      >
+        <CameraIcon size={15} />
+      </button>
     </div>
   );
 }

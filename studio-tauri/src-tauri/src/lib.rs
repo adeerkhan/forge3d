@@ -5,11 +5,14 @@
 //! a preview until Phase 2 replaces it with a Three.js solid viewport.
 
 mod commands;
+mod forge3d;
 mod session;
 
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
+
+use forge3d::Forge3dState;
 
 pub use session::AppState;
 
@@ -27,6 +30,7 @@ pub fn run() {
                 .join("recovery");
             log::info!("recovery snapshots: {}", autosave_dir.display());
             app.manage(AppState::new(autosave_dir));
+            app.manage(Forge3dState::new());
             spawn_autosave_loop(app.handle().clone());
             Ok(())
         })
@@ -64,6 +68,12 @@ pub fn run() {
             commands::restore_recovery,
             commands::discard_recovery,
             commands::read_mesh_file,
+            commands::forge3d_probe,
+            commands::forge3d_status,
+            commands::forge3d_handoff,
+            commands::forge3d_launch,
+            commands::forge3d_sync_camera,
+            commands::forge3d_stop,
             commands::shell_info,
         ])
         .run(tauri::generate_context!())

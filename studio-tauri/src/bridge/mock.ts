@@ -121,8 +121,11 @@ export function createMockBridge(): StudioBridge {
 
   const state = (): SessionState => {
     if (!project) throw new Error("no project is open");
+    // Snapshot, never the live object: consumers legitimately memoise on
+    // reference identity, and mutating the project in place made those memos
+    // (the scene tree) go stale while the status bar updated.
     return {
-      project,
+      project: structuredClone(project),
       revision,
       dirty,
       path,
@@ -201,6 +204,8 @@ export function createMockBridge(): StudioBridge {
           return "Set active camera";
         case "setViewport":
           return "Viewport settings";
+        case "setWorkspace":
+          return "Switch workspace";
         case "batch":
           return command.commands.length
             ? `Edit ${command.commands.length} properties`
@@ -347,6 +352,10 @@ export function createMockBridge(): StudioBridge {
         requireProject().viewport = { ...command.viewport };
         return { label, affected: [] };
 
+      case "setWorkspace":
+        requireProject().workspace = command.workspace;
+        return { label, affected: [] };
+
       case "batch":
         for (const inner of command.commands) apply(inner);
         return { label, affected: [] };
@@ -473,6 +482,74 @@ export function createMockBridge(): StudioBridge {
         "glTF import needs the desktop shell: the browser preview cannot read files",
       );
     },
+
+    // The preview harness has no engine. It reports that honestly and still
+    // produces a handoff so the panel's layout can be reviewed.
+    forge3dProbe: async () => ({
+      available: false,
+      python: "python3",
+      packageVersion: null,
+      viewerBinary: null,
+      detail:
+        "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to connect the viewer.",
+    }),
+
+    forge3dStatus: async () => ({
+      running: false,
+      ready: false,
+      pid: null,
+      error: null,
+      lastHandoffKey: null,
+      payloadPath: null,
+      diagnostics: ["preview harness: no Forge3D process"],
+    }),
+
+    forge3dHandoff: async () => {
+      const current = requireProject();
+      const previewDetail =
+        "Preview harness: the real capability rules run in the desktop shell.";
+      return {
+        projectId: current.id,
+        sceneId: current.scene.id,
+        revision,
+        target: "forge3d",
+        idempotencyKey: `${current.id}:${current.scene.id}:${revision}:forge3d`,
+        report: {
+          target: "forge3d",
+          objects: current.scene.objects.map((object) => ({
+            id: object.id,
+            name: object.name,
+            kind: object.kind.type,
+            level: "partial" as const,
+            detail: previewDetail,
+          })),
+          degradations: [previewDetail],
+          supportsCameraSync: true,
+          hasRenderableContent: true,
+        },
+        camera: null,
+        assets: [],
+        sun: null,
+      };
+    },
+
+    forge3dLaunch: async () => {
+      throw new Error("the Forge3D viewer needs the desktop shell");
+    },
+
+    forge3dSyncCamera: async () => {
+      throw new Error("the Forge3D viewer needs the desktop shell");
+    },
+
+    forge3dStop: async () => ({
+      running: false,
+      ready: false,
+      pid: null,
+      error: null,
+      lastHandoffKey: null,
+      payloadPath: null,
+      diagnostics: ["preview harness: no Forge3D process"],
+    }),
   };
 
   return bridge;

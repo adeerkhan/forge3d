@@ -63,6 +63,48 @@ impl Default for Transform {
 }
 
 impl Transform {
+    /// Rotate a local vector by this transform's Euler angles (X, then Y, then
+    /// Z — the model's `Rz·Ry·Rx` convention, shared with the viewport).
+    pub fn rotate_vector(&self, vector: Vec3) -> Vec3 {
+        let (sin_x, cos_x) = (
+            self.rotation_deg.x.to_radians().sin(),
+            self.rotation_deg.x.to_radians().cos(),
+        );
+        let (sin_y, cos_y) = (
+            self.rotation_deg.y.to_radians().sin(),
+            self.rotation_deg.y.to_radians().cos(),
+        );
+        let (sin_z, cos_z) = (
+            self.rotation_deg.z.to_radians().sin(),
+            self.rotation_deg.z.to_radians().cos(),
+        );
+
+        // Rx
+        let y = vector.y * cos_x - vector.z * sin_x;
+        let z = vector.y * sin_x + vector.z * cos_x;
+        let x = vector.x;
+
+        // Ry — both outputs must use the *old* x and z, hence the temporaries.
+        let x_ry = x * cos_y + z * sin_y;
+        let z_ry = -x * sin_y + z * cos_y;
+
+        // Rz
+        let x_rz = x_ry * cos_z - y * sin_z;
+        let y_rz = x_ry * sin_z + y * cos_z;
+
+        Vec3::new(x_rz, y_rz, z_ry)
+    }
+
+    /// Local forward axis (`-Z`) in parent space.
+    pub fn forward(&self) -> Vec3 {
+        self.rotate_vector(Vec3::new(0.0, 0.0, -1.0))
+    }
+
+    /// Local up axis (`+Y`) in parent space.
+    pub fn up(&self) -> Vec3 {
+        self.rotate_vector(Vec3::new(0.0, 1.0, 0.0))
+    }
+
     /// Reject NaN/infinite values before they reach a renderer, where they
     /// become invisible objects and un-diagnosable blank frames.
     pub fn validate(&self) -> Result<(), String> {
@@ -89,6 +131,47 @@ mod tests {
         assert_eq!(t.translation, Vec3::ZERO);
         assert_eq!(t.rotation_deg, Vec3::ZERO);
         assert_eq!(t.scale, Vec3::ONE);
+    }
+
+    #[test]
+    fn euler_rotation_matches_the_documented_order() {
+        let assert_close = |actual: Vec3, expected: Vec3| {
+            let close = (actual.x - expected.x).abs() < 1e-5
+                && (actual.y - expected.y).abs() < 1e-5
+                && (actual.z - expected.z).abs() < 1e-5;
+            assert!(close, "expected {expected:?}, got {actual:?}");
+        };
+
+        // Yaw only: -Z turns to -X.
+        let yaw = Transform {
+            rotation_deg: Vec3::new(0.0, 90.0, 0.0),
+            ..Transform::default()
+        };
+        assert_close(yaw.forward(), Vec3::new(-1.0, 0.0, 0.0));
+
+        // Pitch only: -Z turns to -Y (looking down).
+        let pitch = Transform {
+            rotation_deg: Vec3::new(-90.0, 0.0, 0.0),
+            ..Transform::default()
+        };
+        assert_close(pitch.forward(), Vec3::new(0.0, -1.0, 0.0));
+        assert_close(pitch.up(), Vec3::new(0.0, 0.0, -1.0));
+
+        // Pitch then yaw, the starter sun's rotation: the Y output must not be
+        // contaminated by the yaw step (regression: a shadowed `x` did that).
+        let sun = Transform {
+            rotation_deg: Vec3::new(-50.0, 30.0, 0.0),
+            ..Transform::default()
+        };
+        let forward = sun.forward();
+        assert_close(
+            forward,
+            Vec3::new(
+                -0.5 * 50f32.to_radians().cos(),
+                -50f32.to_radians().sin(),
+                -0.866_025_4 * 50f32.to_radians().cos(),
+            ),
+        );
     }
 
     #[test]

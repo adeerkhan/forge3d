@@ -14,6 +14,7 @@
 //! * [`persist`] — atomic save and version-gated load.
 //! * [`autosave`] — crash recovery snapshots.
 //! * [`session`] — one open project: open, save, autosave, recovery.
+//! * [`workspace`] — what a project can carry into the Forge3D workspace.
 //!
 //! ## Why commands instead of direct mutation
 //!
@@ -40,6 +41,7 @@ pub mod persist;
 pub mod project;
 pub mod scene;
 pub mod session;
+pub mod workspace;
 
 pub use autosave::{AutosaveStore, RecoveryEntry, DEFAULT_AUTOSAVE_KEEP};
 pub use command::{Command, CommandError};
@@ -56,6 +58,10 @@ pub use scene::{
     SceneObject,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
+pub use workspace::{
+    capability_report, handoff, CameraSync, CapabilityLevel, CapabilityReport, Handoff,
+    ObjectCapability, SunAngles,
+};
 
 /// Wall-clock milliseconds since the Unix epoch.
 ///

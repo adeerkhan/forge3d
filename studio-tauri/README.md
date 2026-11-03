@@ -5,10 +5,12 @@ The desktop shell for the renewed **Forge3D Studio** product described in
 a Tauri app around a canonical project model, with one project serving both the
 Studio workspace and (from Phase 3) the Forge3D workspace.
 
-**Phases 1 and 2 are implemented**: the desktop shell, project schema and
-migration, open/save/autosave/recovery, command-based undo/redo, a Three.js solid
-viewport with orbit/pan/zoom, Blender-style move/rotate/scale tools, an
-orientation gizmo, add/duplicate/delete, and glTF/GLB import.
+**Phases 1–3 are implemented**: the desktop shell, project schema and migration,
+open/save/autosave/recovery, command-based undo/redo, a Three.js solid viewport
+with orbit/pan/zoom and a camera view, Blender-style move/rotate/scale tools, an
+orientation gizmo, add/duplicate/delete, glTF/GLB import, and the Forge3D
+workspace adapter (capability report, engine probe, viewer process, camera/sun
+sync, diagnostics).
 
 > The pre-existing `../studio/` tree is the earlier terrain-focused eframe/egui
 > Studio. It is a separate application and a separate Cargo workspace. This
@@ -29,6 +31,13 @@ orientation gizmo, add/duplicate/delete, and glTF/GLB import.
 | Orientation gizmo (top right, clickable) | `src/viewport/AxisGizmo.tsx` | done |
 | Add / delete / duplicate | `command.rs`, `session.tsx` | done |
 | glTF / GLB import | `ImportGltf` command + `assets.ts` | done (see limitation) |
+| Look through the active camera | `Viewport3D.tsx` (`0`, toolbar) | done |
+| **Phase 3** — workspace switching | `setWorkspace` command, `TopBar` | done |
+| Capability report per object | `crates/studio-core/src/workspace.rs` | done, tested |
+| Engine / viewer probe | `src-tauri/src/forge3d.rs` | written, unbuilt here |
+| Viewer process + IPC bridge | `forge3d.rs`, `studio_bridge.py` | written, unbuilt here |
+| Camera + sun sync | `forge3d_sync_camera`, `SunAngles` | written, unbuilt here |
+| Diagnostics + idempotent handoff | `forge3d.rs`, `workspace.rs` | done |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -45,14 +54,17 @@ studio-tauri/
 │   ├── editor.rs              Session: revision, dirty flag, undo/redo stacks
 │   ├── persist.rs             Version gate, v1→v2 migration, atomic save
 │   ├── autosave.rs            Recovery envelopes + pruning
-│   └── session.rs             One open project: open, save, autosave, recovery
+│   ├── session.rs             One open project: open, save, autosave, recovery
+│   └── workspace.rs           Capability report, camera/sun handoff payload
 ├── src-tauri/                 Tauri v2 shell
-│   ├── src/commands.rs        IPC surface (incl. mesh file reading)
+│   ├── src/commands.rs        IPC surface (mesh files, Forge3D adapter)
+│   ├── src/forge3d.rs         Engine probe, viewer process, diagnostics
+│   ├── src/studio_bridge.py   Embedded Python bridge (relays viewer IPC)
 │   ├── src/session.rs         Mutex around the core session
 │   └── src/lib.rs             App wiring + background autosave thread
 └── src/                       React + TypeScript UI
     ├── bridge/                Tauri IPC, with a browser preview harness
-    ├── components/            Top bar, tree, inspector, toolbar, status
+    ├── components/            Top bar, tree, inspector, toolbar, Forge3D panel
     ├── state/session.tsx      Session actions + active tool/space
     ├── viewport/
     │   ├── Viewport3D.tsx     Three.js scene, picking, gizmos, asset loading
@@ -129,7 +141,7 @@ npm run build        # typecheck + production bundle of the UI
 ### Tests
 
 ```bash
-cargo test -p studio-core      # 73 tests: model, commands, migration, persistence
+cargo test -p studio-core      # 85 tests: model, commands, migration, workspace
 npx tsc --noEmit               # UI types
 ```
 
@@ -145,10 +157,36 @@ npx tsc --noEmit               # UI types
 | `Shift + D` | Duplicate selection |
 | `X`, `Del` | Delete selection |
 | `Esc` | Clear selection |
+| `0` or the camera button | Toggle camera view (look through the active camera) |
 | Click the corner gizmo | Snap the view to an axis |
 
 The tool strip also holds **Global/Local** axis orientation and the **Add** menu
 (cube, sphere, plane, import glTF/GLB).
+
+## The Forge3D workspace (Phase 3)
+
+Switching the workspace tab moves the project into the Forge3D workspace. The
+viewer is a **separate window** driven over IPC; Studio keeps the project and
+every edit.
+
+The panel answers three questions, each from real state rather than a promise:
+
+1. **Can this machine run the viewer?** The shell probes a Python interpreter
+   (repo `.venv`, then `python3`) for `import forge3d` and for a resolvable
+   `interactive_viewer` binary, and names what is missing. If nothing is found,
+   the launch button is disabled with the reason as its tooltip.
+2. **What can the viewer take?** `workspace.rs` classifies each object against
+   the viewer's actual IPC surface: imported glTF meshes and cameras are fully
+   supported, directional sun is partial (no shadows/colour), primitives are
+   partial until geometry export lands in Phase 4, and point lights are
+   unsupported. Every row carries the reason, and scene-level degradations are
+   listed separately.
+3. **What did the viewer say?** The bridge process's stdout/stderr land in a
+   diagnostics pane, with exit and startup failures shown verbatim.
+
+Handoffs are idempotent per `(project, scene, revision)`: reopening the same
+revision reuses the running window instead of starting a second one. The payload
+is written to `<app-data>/forge3d/handoff.json` so it can be inspected.
 
 ## Known limitations
 
@@ -160,6 +198,17 @@ The tool strip also holds **Global/Local** axis orientation and the **Add** menu
   within an asset, and relinking arrive in Phase 5.
 - **No shadows or PBR environment** in the solid viewport; it is a modelling
   view, not the Forge3D render (Phase 4).
+- **The viewer needs a built binary.** `interactive_viewer` must exist (repo
+  `target/release`, an installed console script, `PATH`, or
+  `FORGE3D_VIEWER_BINARY`); the probe reports the exact build command when it is
+  missing. The engine package must also be importable by that interpreter
+  (`FORGE3D_STUDIO_PYTHON` overrides the choice).
+- **The Phase 3 process path is not yet exercised on this machine.** The shell
+  needs the webkit development packages to compile at all, so the launch/probe
+  code is written and reviewed but unbuilt here; the Rust core side (capability
+  report, camera/sun handoff, idempotency) is fully tested.
+- **One asset per viewer window** — the viewer loads a single glTF/terrain, so a
+  scene referencing several assets opens the first and says so in the report.
 
 ## Browser preview harness
 
@@ -171,8 +220,7 @@ Rust test.
 
 ## Not yet implemented (deliberately)
 
-- Forge3D process lifecycle, IPC adapter, workspace handoff — **Phase 3**
-- Render jobs, Forge3D render settings UI — **Phase 4**
+- Geometry export for primitives, render jobs, Forge3D render settings UI — **Phase 4**
 - Materials, textures, environments, relinking — **Phase 5**
 - Timeline, keyframes, frame export — **Phase 6**
 

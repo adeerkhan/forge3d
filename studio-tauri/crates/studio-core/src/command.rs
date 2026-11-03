@@ -12,7 +12,7 @@ use std::path::Path;
 use crate::ids::{new_id, AssetId, ObjectId};
 use crate::math::Transform;
 use crate::project::AssetKind;
-use crate::project::{Asset, Project, ViewportState};
+use crate::project::{Asset, Project, ViewportState, Workspace};
 use crate::scene::{validate_name, CameraObject, LightObject, MeshObject, Primitive, SceneObject};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -174,6 +174,12 @@ pub enum Command {
     /// the persisted project, so it goes through the same command path.
     SetViewport {
         viewport: ViewportState,
+    },
+
+    /// Switch the active workspace. Persisted view state, and undoable so a
+    /// mis-click cannot leave the project in a surprising workspace.
+    SetWorkspace {
+        workspace: Workspace,
     },
 
     /// Several commands applied in order as one undo step.
@@ -598,6 +604,17 @@ impl Command {
                 })
             }
 
+            Command::SetWorkspace { workspace } => {
+                let previous = project.workspace;
+                project.workspace = *workspace;
+                Ok(Outcome {
+                    inverse: Command::SetWorkspace {
+                        workspace: previous,
+                    },
+                    affected: Vec::new(),
+                })
+            }
+
             Command::Batch { commands } => {
                 let mut inverses = Vec::with_capacity(commands.len());
                 let mut affected = Vec::new();
@@ -635,7 +652,7 @@ impl Command {
             // original object is enough for an adapter to refresh the scene.
             Command::DuplicateObject { id, .. } => vec![*id],
             Command::CreatePrimitive { .. } | Command::ImportGltf { .. } => Vec::new(),
-            Command::SetViewport { .. } => Vec::new(),
+            Command::SetViewport { .. } | Command::SetWorkspace { .. } => Vec::new(),
             Command::AddAsset { .. } | Command::RemoveAsset { .. } => Vec::new(),
             Command::Batch { commands } => {
                 let mut ids = Vec::new();
@@ -695,6 +712,9 @@ impl Command {
             Command::AddAsset { asset } => format!("Import {}", asset.name),
             Command::RemoveAsset { .. } => "Remove asset".to_owned(),
             Command::SetViewport { .. } => "Viewport settings".to_owned(),
+            Command::SetWorkspace { workspace } => {
+                format!("Switch to {} workspace", workspace.label())
+            }
             Command::Batch { commands } => commands
                 .first()
                 .map(|command| command.label(project))

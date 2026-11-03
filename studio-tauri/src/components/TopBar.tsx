@@ -31,6 +31,7 @@ export function TopBar() {
   }, [menuOpen]);
 
   const project = state?.project;
+  const workspace = project?.workspace ?? "studio";
   const fileName = state?.path?.split(/[\\/]/).pop();
 
   return (
@@ -134,16 +135,22 @@ export function TopBar() {
       </div>
 
       <div className="workspaces" role="tablist" aria-label="Workspace">
-        <button type="button" role="tab" aria-selected="true" className="workspace-tab is-active">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspace === "studio"}
+          className={`workspace-tab ${workspace === "studio" ? "is-active" : ""}`}
+          onClick={() => void actions.setWorkspace("studio")}
+        >
           Studio
         </button>
         <button
           type="button"
           role="tab"
-          aria-selected="false"
-          className="workspace-tab"
-          disabled
-          title="The Forge3D workspace adapter lands in Phase 3"
+          aria-selected={workspace === "forge3d"}
+          className={`workspace-tab ${workspace === "forge3d" ? "is-active" : ""}`}
+          title="Hand the project to the Forge3D viewer"
+          onClick={() => void actions.setWorkspace("forge3d")}
         >
           Forge3D
         </button>

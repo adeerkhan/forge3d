@@ -42,7 +42,9 @@ export function SceneTree() {
     () => new Set(state?.project.selection ?? []),
     [state],
   );
-  const rows = useMemo(() => flatten(scene?.objects ?? []), [scene]);
+  // Computed, not memoised: the tree is small, and a bridge is free to return
+  // a snapshot whose object identity is reused. Correctness beats a micro-optimisation.
+  const rows = flatten(scene?.objects ?? []);
 
   if (!scene) return null;
 

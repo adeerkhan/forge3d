@@ -161,6 +161,77 @@ export interface MeshFilePayload {
   base64: string;
 }
 
+// ---------------------------------------------------------------- workspaces
+
+export type CapabilityLevel = "full" | "partial" | "unsupported";
+
+export interface ObjectCapability {
+  id: string;
+  name: string;
+  kind: string;
+  level: CapabilityLevel;
+  detail: string;
+}
+
+export interface CapabilityReport {
+  target: Workspace;
+  objects: ObjectCapability[];
+  degradations: string[];
+  supportsCameraSync: boolean;
+  hasRenderableContent: boolean;
+}
+
+export interface CameraSync {
+  eye: Vec3;
+  target: Vec3;
+  up: Vec3;
+  fovDeg: number;
+}
+
+export interface SunAngles {
+  azimuthDeg: number;
+  elevationDeg: number;
+  intensity: number;
+}
+
+export interface ForgeAsset {
+  id: string;
+  name: string;
+  path: string;
+  kind: AssetKind;
+}
+
+/** What the Forge3D workspace receives for one project revision. */
+export interface Handoff {
+  projectId: string;
+  sceneId: string;
+  revision: number;
+  target: Workspace;
+  idempotencyKey: string;
+  report: CapabilityReport;
+  camera: CameraSync | null;
+  assets: ForgeAsset[];
+  sun: SunAngles | null;
+}
+
+export interface EngineStatus {
+  available: boolean;
+  python: string;
+  packageVersion: string | null;
+  viewerBinary: string | null;
+  detail: string;
+}
+
+export interface Forge3dStatus {
+  running: boolean;
+  ready: boolean;
+  pid: number | null;
+  error: string | null;
+  lastHandoffKey: string | null;
+  payloadPath: string | null;
+  diagnostics: string[];
+}
+
 export type Command =
   | { type: "createObject"; object: SceneObject; index?: number | null }
   | { type: "createPrimitive"; primitive: Primitive; name?: string | null }
@@ -185,6 +256,7 @@ export type Command =
   | { type: "setPrimitive"; id: string; primitive: Primitive }
   | { type: "setActiveCamera"; id: string | null }
   | { type: "setViewport"; viewport: ViewportState }
+  | { type: "setWorkspace"; workspace: Workspace }
   | { type: "batch"; commands: Command[] };
 
 /** Active manipulation tool, Blender-style. */

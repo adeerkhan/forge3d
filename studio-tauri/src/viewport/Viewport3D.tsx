@@ -201,7 +201,7 @@ function disposeChildren(group: THREE.Group): void {
 }
 
 export function Viewport3D() {
-  const { state, actions, tool, space } = useSession();
+  const { state, actions, tool, space, cameraView } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<Runtime | null>(null);
@@ -210,6 +210,13 @@ export function Viewport3D() {
 
   const [quaternion, setQuaternion] = useState<Quaternion>([0, 0, 0, 1]);
   const [problem, setProblem] = useState<string | null>(null);
+  const savedView = useRef<{
+    position: THREE.Vector3;
+    quaternion: THREE.Quaternion;
+    target: THREE.Vector3;
+    fov: number;
+  } | null>(null);
+  const inCameraView = useRef(false);
 
   const readMesh = useCallback(
     async (path: string): Promise<ArrayBuffer> => {
@@ -429,6 +436,7 @@ export function Viewport3D() {
     }
 
     runtime.selection = project.selection;
+    const activeCameraId = project.scene.activeCamera;
     const live = new Map(project.scene.objects.map((object) => [object.id, object]));
     for (const [id, group] of runtime.objects) {
       if (live.has(id)) continue;
@@ -445,7 +453,7 @@ export function Viewport3D() {
         runtime.scene.add(group);
         runtime.objects.set(object.id, group);
       }
-      group.visible = object.visible;
+      group.visible = object.visible && !(cameraView && object.id === activeCameraId);
       applyTransform(group, object.transform);
 
       const signature = contentSignature(object);
@@ -487,6 +495,43 @@ export function Viewport3D() {
         group.add(buildCameraGizmo(object.kind));
       } else {
         group.add(buildLightGizmo(object.kind));
+      }
+    }
+
+    // Camera view: the render camera *is* the project's active camera, so an
+    // inspector edit moves the view immediately.
+    const activeCamera =
+      project.scene.objects.find(
+        (object) => object.id === project.scene.activeCamera && object.kind.type === "camera",
+      ) ?? project.scene.objects.find((object) => object.kind.type === "camera");
+
+    if (cameraView) {
+      if (activeCamera && activeCamera.kind.type === "camera") {
+        const transform = activeCamera.transform;
+        runtime.camera.position.set(
+          transform.translation.x,
+          transform.translation.y,
+          transform.translation.z,
+        );
+        runtime.camera.quaternion.setFromEuler(
+          new THREE.Euler(
+            transform.rotationDeg.x * DEG,
+            transform.rotationDeg.y * DEG,
+            transform.rotationDeg.z * DEG,
+            "ZYX",
+          ),
+        );
+        runtime.camera.fov = activeCamera.kind.fovDeg;
+        runtime.camera.near = activeCamera.kind.near;
+        runtime.camera.far = activeCamera.kind.far;
+        runtime.camera.updateProjectionMatrix();
+        runtime.orbit.enabled = false;
+        // Clear a previous camera warning without wiping an asset error.
+        setProblem((current) =>
+          current && current.startsWith("Camera view") ? null : current,
+        );
+      } else {
+        setProblem("Camera view needs a camera object in the scene.");
       }
     }
 
@@ -537,9 +582,41 @@ export function Viewport3D() {
       runtime.gizmo.setSpace(space);
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
-  }, [readMesh, space, state, tool]);
+  }, [cameraView, readMesh, space, state, tool]);
+
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+
+    if (cameraView && !inCameraView.current) {
+      savedView.current = {
+        position: runtime.camera.position.clone(),
+        quaternion: runtime.camera.quaternion.clone(),
+        target: runtime.orbit.target.clone(),
+        fov: runtime.camera.fov,
+      };
+      inCameraView.current = true;
+      runtime.orbit.enabled = false;
+    } else if (!cameraView && inCameraView.current) {
+      const saved = savedView.current;
+      if (saved) {
+        runtime.camera.position.copy(saved.position);
+        runtime.camera.quaternion.copy(saved.quaternion);
+        runtime.camera.fov = saved.fov;
+        runtime.camera.updateProjectionMatrix();
+        runtime.orbit.target.copy(saved.target);
+      }
+      inCameraView.current = false;
+      runtime.orbit.enabled = true;
+      runtime.orbit.update();
+      setProblem((current) =>
+        current && current.startsWith("Camera view") ? null : current,
+      );
+    }
+  }, [cameraView]);
 
   const viewAlong = useCallback((axis: Axis) => {
+    if (cameraView) return;
     const runtime = runtimeRef.current;
     if (!runtime) return;
     const direction =
@@ -566,9 +643,11 @@ export function Viewport3D() {
       <AxisGizmo quaternion={quaternion} onPick={viewAlong} />
       <div className="viewport-overlay viewport-overlay--bottom">
         <span className="viewport-hint">
-          {tool === "select"
-            ? "Click to select · drag to orbit · middle-drag to pan · scroll to zoom"
-            : `${tool[0].toUpperCase()}${tool.slice(1)} tool · drag the gizmo · G/R/S to switch`}
+          {cameraView
+            ? "Camera view · press 0 or the camera button to return to the free view"
+            : tool === "select"
+              ? "Click to select · drag to orbit · middle-drag to pan · scroll to zoom"
+              : `${tool[0].toUpperCase()}${tool.slice(1)} tool · drag the gizmo · G/R/S to switch`}
         </span>
         <span className="viewport-camera">
           {camera ? `Active camera: ${camera.name}` : "No active camera"}

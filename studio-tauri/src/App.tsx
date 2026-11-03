@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { EmptyState } from "./components/EmptyState";
+import { Forge3dWorkspace } from "./components/Forge3dWorkspace";
 import { Inspector } from "./components/Inspector";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { SceneTree } from "./components/SceneTree";
@@ -26,8 +27,14 @@ export default function App() {
               <SceneTree />
             </aside>
             <section className="workspace__center">
-              <RecoveryBanner />
-              <Viewport3D />
+              {state.project.workspace === "forge3d" ? (
+                <Forge3dWorkspace />
+              ) : (
+                <>
+                  <RecoveryBanner />
+                  <Viewport3D />
+                </>
+              )}
             </section>
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />
@@ -64,7 +71,7 @@ export default function App() {
 }
 
 function useKeyboardShortcuts() {
-  const { actions, setTool } = useSession();
+  const { actions, setTool, cameraView, setCameraView } = useSession();
 
   useEffect(() => {
     const isEditable = (target: EventTarget | null) => {
@@ -87,7 +94,13 @@ function useKeyboardShortcuts() {
 
       if (!mod) {
         if (event.key === "Escape") {
-          void actions.select([]);
+          if (cameraView) setCameraView(false);
+          else void actions.select([]);
+          return;
+        }
+        if (event.key === "0") {
+          // Blender's camera-view toggle; numpad 0 reports the same key.
+          setCameraView(!cameraView);
           return;
         }
         // Blender-style manipulation tools and object actions.
@@ -147,5 +160,5 @@ function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions]);
+  }, [actions, cameraView, setCameraView, setTool]);
 }

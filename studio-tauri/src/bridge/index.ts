@@ -12,6 +12,9 @@ import type {
   AutosaveStatus,
   Command,
   EditResult,
+  EngineStatus,
+  Forge3dStatus,
+  Handoff,
   Project,
   RecoveryEntry,
   SessionState,
@@ -38,6 +41,14 @@ export interface StudioBridge {
   discardRecovery(id: string): Promise<void>;
   /** Read a `.gltf`/`.glb` file for import. Desktop shell only. */
   readMeshFile(path: string): Promise<MeshFilePayload>;
+
+  // Forge3D workspace adapter
+  forge3dProbe(force?: boolean): Promise<EngineStatus>;
+  forge3dStatus(): Promise<Forge3dStatus>;
+  forge3dHandoff(): Promise<Handoff>;
+  forge3dLaunch(width?: number, height?: number): Promise<Forge3dStatus>;
+  forge3dSyncCamera(): Promise<Forge3dStatus>;
+  forge3dStop(): Promise<Forge3dStatus>;
 }
 
 export interface OpenResult {
