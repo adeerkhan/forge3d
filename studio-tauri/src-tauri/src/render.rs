@@ -355,10 +355,12 @@ impl RenderRequest {
             "quality": {
                 "samples": 1,
                 "shadows": true,
-                // Preview frames keep shadows and sky but skip POM; final frames
-                // add full parallax occlusion mapping.
-                "pom": final_quality,
+                // Interactive frames: full PBR + POM + sky + shadows (~150 ms).
+                // Final stills add ambient occlusion, which alone costs ~4.8 s.
+                "pom": true,
                 "sky": true,
+                "ambientOcclusion": final_quality,
+                "heightAo": final_quality,
             },
             "output": output,
         })

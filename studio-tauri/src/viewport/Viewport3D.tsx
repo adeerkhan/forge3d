@@ -190,12 +190,14 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
   return mesh;
 }
 
-function contentSignature(object: SceneObject): string {
+function contentSignature(object: SceneObject, terrainResolution: number): string {
   switch (object.kind.type) {
     case "mesh":
       return `mesh:${JSON.stringify(object.kind.source)}`;
     case "terrain":
-      return `terrain:${object.kind.asset}:${object.kind.zScale}`;
+      // The preview resolution is part of the identity: changing it must rebuild
+      // the mesh, which is exactly what used to be ignored.
+      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}`;
     case "camera":
       return `camera:${object.kind.fovDeg}`;
     case "light":
@@ -390,16 +392,30 @@ export function Viewport3D() {
     gizmo.addEventListener("objectChange", () => {
       for (const helper of runtime.helpers) helper.update();
     });
-    // Rendered mode follows the camera the only way this pipeline allows: one
-    // frame after the user stops moving (a frame costs seconds regardless of
-    // resolution, so continuous rendering is not possible).
+    // Rendered mode follows the camera. Viewport frames cost ~190 ms (the SSAO
+    // pass, which alone costs ~4.8 s, is reserved for final stills), so this is
+    // throttled live rendering rather than one frame per drag.
+    let lastRenderRequest = 0;
+    orbit.addEventListener("change", () => {
+      if (!modeRef.current) return;
+      const now = performance.now();
+      if (now - lastRenderRequest < 120) return;
+      lastRenderRequest = now;
+      const { width, height } = sizeRef.current;
+      void actionsRef.current.renderViewport(
+        Math.max(320, Math.round(width)),
+        Math.max(240, Math.round(height)),
+        "preview",
+      );
+    });
+
     orbit.addEventListener("end", () => {
       if (!modeRef.current) return;
       const { width, height } = sizeRef.current;
       void actionsRef.current.renderViewport(
         Math.max(320, Math.round(width)),
         Math.max(240, Math.round(height)),
-        "final",
+        "preview",
       );
     });
 
@@ -548,7 +564,7 @@ export function Viewport3D() {
       group.visible = object.visible && !(cameraView && object.id === activeCameraId);
       applyTransform(group, object.transform);
 
-      const signature = contentSignature(object);
+      const signature = contentSignature(object, terrainResolution);
       if (group.userData.signature === signature) continue;
       group.userData.signature = signature;
       disposeChildren(group);
@@ -701,7 +717,7 @@ export function Viewport3D() {
       runtime.gizmo.setSpace(space);
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
-  }, [cameraView, readMesh, readTerrain, space, state, tool]);
+  }, [cameraView, readMesh, readTerrain, space, state, terrainResolution, tool]);
 
   useEffect(() => {
     const runtime = runtimeRef.current;
@@ -810,7 +826,7 @@ export function Viewport3D() {
               {render.busy
                 ? "Rendering with the Forge3D terrain pipeline…"
                 : render.frame
-                  ? `${render.frame.width} × ${render.frame.height} · ${(render.frame.ms / 1000).toFixed(1)} s`
+                  ? `${render.frame.width} × ${render.frame.height} · ${(render.frame.ms / 1000).toFixed(2)} s`
                   : "No frame rendered yet"}
             </span>
             <button

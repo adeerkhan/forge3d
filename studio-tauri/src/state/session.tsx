@@ -345,7 +345,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const renderViewport = useCallback(
-    async (width: number, height: number, quality: "preview" | "final" = "final") => {
+    async (width: number, height: number, quality: "preview" | "final" = "preview") => {
       pendingRender.current = { width, height, quality };
       await pumpRender();
     },

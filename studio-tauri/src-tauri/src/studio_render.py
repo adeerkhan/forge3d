@@ -163,10 +163,13 @@ class StudioRenderer:
             sun_intensity=float(sun.get("intensity", 3.0)),
             ibl_enabled=True,
             exposure=1.35,
-            ao_weight=0.6,
+            # The SSAO pass costs ~4.8 s per frame by itself (measured); every
+            # other feature combined is ~150 ms. Viewport frames therefore skip
+            # it, and only a final still pays for it.
+            ao_weight=0.6 if quality.get("ambientOcclusion") else 0.0,
             pom=PomSettings(bool(quality.get("pom", True)), "Occlusion", 0.3, 8, 32, 4, False, False),
             detail=DetailSettings(enabled=False),
-            height_ao=HeightAoSettings(enabled=True),
+            height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
             aov=AovSettings(enabled=False),
             sky=SkySettings(enabled=bool(quality.get("sky", True))),
         )
