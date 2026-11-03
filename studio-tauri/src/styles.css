@@ -673,6 +673,12 @@ kbd {
   cursor: pointer;
 }
 
+.slider {
+  width: 100%;
+  accent-color: var(--accent);
+  height: 18px;
+}
+
 .triple {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

@@ -233,7 +233,8 @@ function TerrainEditor({
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
-  const { actions, terrainResolution, setTerrainResolution } = useSession();
+  const { actions, terrainResolution, setTerrainResolution, framingPercent, setFramingPercent } =
+    useSession();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -269,6 +270,19 @@ function TerrainEditor({
         }
       />
       <label className="field">
+        <span className="field-label">Framing · {framingPercent}%</span>
+        <input
+          className="slider"
+          type="range"
+          min={25}
+          max={300}
+          step={5}
+          value={framingPercent}
+          onChange={(event) => setFramingPercent(Number(event.target.value))}
+        />
+      </label>
+
+      <label className="field">
         <span className="field-label">Preview resolution</span>
         <select
           className="input input--select"
@@ -283,8 +297,9 @@ function TerrainEditor({
       </label>
 
       <p className="hint">
-        Solid draws this DEM as a sampled heightfield; the renderer always reads
-        the original GeoTIFF at full resolution, whatever the preview setting.
+        Framing drives both views: the solid camera and the Rendered frame share
+        it, so they show the terrain at the same size. Solid draws a sampled
+        heightfield; the renderer always reads the original GeoTIFF.
       </p>
     </Section>
   );

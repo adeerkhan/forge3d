@@ -19,7 +19,7 @@ use studio_core::workspace::Handoff;
 use studio_core::{AutosaveReport, Session, Workspace, AUTOSAVE_INTERVAL_SECONDS};
 
 use crate::forge3d::{EngineStatus, Forge3dState};
-use crate::render::{RenderFrame, RenderRequest, RenderState, RenderStatus};
+use crate::render::{RenderFrame, RenderRequest, RenderState, RenderStatus, RenderView};
 use crate::session::AppState;
 
 /// Edit result: what the command did, plus the new snapshot.
@@ -311,13 +311,15 @@ pub fn render_frame(
     width: Option<u32>,
     height: Option<u32>,
     quality: Option<String>,
+    view: Option<RenderView>,
 ) -> Result<RenderFrame, String> {
     let handoff = current_handoff(&state)?;
     let request = RenderRequest::from_handoff(
         &handoff,
         width.unwrap_or(960).clamp(64, 4096),
         height.unwrap_or(600).clamp(64, 4096),
-    )?;
+    )?
+    .with_view(view.as_ref());
     let python = forge.probe(false).python;
     let quality = quality.unwrap_or_else(|| "final".to_owned());
     render.render(&python, &request.dem, request.to_payload(&quality, None))

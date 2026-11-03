@@ -315,6 +315,16 @@ fn spawn_stderr(stderr: impl std::io::Read + Send + 'static, log: Arc<Mutex<VecD
     });
 }
 
+/// Camera override from the Studio viewport, so Rendered frames look like what
+/// the solid view shows instead of a different framing.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderView {
+    pub phi_deg: f64,
+    pub theta_deg: f64,
+    pub radius: f64,
+}
+
 /// Everything the shell needs for one frame, derived from the project.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -334,6 +344,17 @@ pub struct RenderRequest {
 }
 
 impl RenderRequest {
+    pub fn with_view(mut self, view: Option<&RenderView>) -> Self {
+        if let Some(view) = view {
+            if view.radius.is_finite() && view.radius > 0.0 {
+                self.phi_deg = view.phi_deg;
+                self.theta_deg = view.theta_deg;
+                self.radius = view.radius;
+            }
+        }
+        self
+    }
+
     pub fn to_payload(&self, quality: &str, output: Option<&str>) -> serde_json::Value {
         let final_quality = quality == "final";
         json!({

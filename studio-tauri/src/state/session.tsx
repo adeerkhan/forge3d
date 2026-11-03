@@ -18,6 +18,7 @@ import type {
   Command,
   EngineStatus,
   RenderFrame,
+  RenderView,
   ViewportMode,
   PrimitiveShape,
   RecoveryEntry,
@@ -61,6 +62,9 @@ interface SessionApi {
   /** Heightfield resolution used by the Solid terrain preview. */
   terrainResolution: number;
   setTerrainResolution(resolution: number): void;
+  /** How much of the viewport the terrain fills: 100% = the renderer's framing. */
+  framingPercent: number;
+  setFramingPercent(percent: number): void;
   /** Last embedded-renderer frame (Rendered viewport mode). */
   render: {
     frame: RenderFrame | null;
@@ -86,6 +90,7 @@ interface SessionApi {
       width: number,
       height: number,
       quality?: "preview" | "final",
+      view?: RenderView,
     ): Promise<void>;
     /** Render a full-resolution still and save it (dialog). */
     renderStill(): Promise<void>;
@@ -110,6 +115,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [cameraView, setCameraView] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [terrainResolution, setTerrainResolution] = useState(96);
+  const [framingPercent, setFramingPercent] = useState(100);
   const [render, setRender] = useState<{ frame: RenderFrame | null; busy: boolean; error: string | null }>({
     frame: null,
     busy: false,
@@ -315,9 +321,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // The renderer costs seconds per frame, so requests are serialised and only
   // the newest queued view matters: dragging the camera must not build a queue.
-  const pendingRender = useRef<{ width: number; height: number; quality: "preview" | "final" } | null>(
-    null,
-  );
+  const pendingRender = useRef<{
+    width: number;
+    height: number;
+    quality: "preview" | "final";
+    view?: RenderView;
+  } | null>(null);
   const renderInFlight = useRef(false);
 
   const pumpRender = useCallback(async () => {
@@ -329,7 +338,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         pendingRender.current = null;
         setRender((current) => ({ ...current, busy: true, error: null }));
         try {
-          const frame = await bridge.renderFrame(request.width, request.height, request.quality);
+          const frame = await bridge.renderFrame(
+            request.width,
+            request.height,
+            request.quality,
+            request.view,
+          );
           setRender({ frame, busy: false, error: null });
         } catch (cause) {
           setRender({
@@ -345,8 +359,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const renderViewport = useCallback(
-    async (width: number, height: number, quality: "preview" | "final" = "preview") => {
-      pendingRender.current = { width, height, quality };
+    async (
+      width: number,
+      height: number,
+      quality: "preview" | "final" = "preview",
+      view?: RenderView,
+    ) => {
+      pendingRender.current = { width, height, quality, view };
       await pumpRender();
     },
     [pumpRender],
@@ -574,6 +593,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     render,
     terrainResolution,
     setTerrainResolution,
+    framingPercent,
+    setFramingPercent,
     actions,
   };
 

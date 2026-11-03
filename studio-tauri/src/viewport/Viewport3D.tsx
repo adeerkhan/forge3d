@@ -14,7 +14,7 @@ import type {
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
-import type { TerrainPreview } from "../bridge/types";
+import type { RenderView, TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
 
 const DEG = Math.PI / 180;
@@ -141,6 +141,9 @@ function buildLightGizmo(light: LightObject): THREE.Group {
 
 const TERRAIN_VIEW_SIZE = 12;
 
+/** Orbit distance that makes the 12-unit terrain fill the viewport at 100%. */
+const BASE_ORBIT_DISTANCE = 18;
+
 /**
  * A displaced grid from a sampled DEM.
  *
@@ -257,7 +260,17 @@ function disposeChildren(group: THREE.Group): void {
 }
 
 export function Viewport3D() {
-  const { state, actions, tool, space, cameraView, render, terrainResolution } = useSession();
+  const {
+    state,
+    actions,
+    tool,
+    space,
+    cameraView,
+    render,
+    terrainResolution,
+    framingPercent,
+    setFramingPercent,
+  } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const runtimeRef = useRef<Runtime | null>(null);
@@ -318,6 +331,10 @@ export function Viewport3D() {
     }
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
+    // The renderer tone-maps (ACES, exposure 1.35); without this the solid view
+    // reads much brighter than the Rendered frame.
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.95;
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x101318);
@@ -339,10 +356,10 @@ export function Viewport3D() {
     gizmo.setSize(0.85);
     scene.add(gizmo.getHelper());
 
-    const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1b1f26, 0.65);
+    const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1b1f26, 0.32);
     const sun = new THREE.DirectionalLight(0xffffff, 3);
     sun.position.set(6, 9, 4);
-    const fill = new THREE.DirectionalLight(0x93a8c8, 0.35);
+    const fill = new THREE.DirectionalLight(0x93a8c8, 0.16);
     fill.position.set(-7, 4, -6);
     scene.add(hemi, sun, fill);
 
@@ -410,12 +427,19 @@ export function Viewport3D() {
     });
 
     orbit.addEventListener("end", () => {
+      // Scrolling changes the framing: keep the slider honest.
+      const distance = runtime.camera.position.distanceTo(runtime.orbit.target);
+      if (distance > 0.01) {
+        const percent = Math.round((BASE_ORBIT_DISTANCE / distance) * 100);
+        framingSetterRef.current(Math.min(300, Math.max(25, percent)));
+      }
       if (!modeRef.current) return;
       const { width, height } = sizeRef.current;
       void actionsRef.current.renderViewport(
         Math.max(320, Math.round(width)),
         Math.max(240, Math.round(height)),
         "preview",
+        currentRenderViewRef.current(),
       );
     });
 
@@ -683,7 +707,9 @@ export function Viewport3D() {
       runtime.sun.position.copy(direction.multiplyScalar(-12));
       const [r, g, b] = sunObject.kind.color;
       runtime.sun.color.setRGB(r, g, b, THREE.SRGBColorSpace);
-      runtime.sun.intensity = Math.max(0.15, sunObject.kind.intensity);
+      // The engine's lit-sun intensity and three's directional intensity do not
+      // share a scale; 0.85 keeps the solid view close to the Rendered frame.
+      runtime.sun.intensity = Math.max(0.1, sunObject.kind.intensity * 0.85);
     }
 
     runtime.grid.visible = project.viewport.gridVisible;
@@ -774,6 +800,52 @@ export function Viewport3D() {
   modeRef.current = renderedMode;
   const sizeRef = useRef(size);
   sizeRef.current = size;
+  const framingSetterRef = useRef(setFramingPercent);
+  framingSetterRef.current = setFramingPercent;
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
+  /**
+   * The solid view's camera expressed in the renderer's terms, so Rendered
+   * frames the scene exactly like the viewport (orientation included).
+   */
+  const currentRenderView = useCallback((): RenderView | undefined => {
+    const runtime = runtimeRef.current;
+    const project = stateRef.current?.project;
+    const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
+    if (!runtime || !terrain || terrain.kind.type !== "terrain") return undefined;
+    const span = terrain.kind.worldSpanXz;
+    if (!span) return undefined;
+
+    const offset = runtime.camera.position.clone().sub(runtime.orbit.target);
+    const distance = offset.length();
+    if (distance < 1e-4) return undefined;
+    const direction = offset.normalize();
+    const thetaDeg = (Math.acos(Math.min(1, Math.max(-1, direction.y))) * 180) / Math.PI;
+    const phiDeg = ((Math.atan2(direction.z, direction.x) * 180) / Math.PI + 360) % 360;
+    const radius = (distance / TERRAIN_VIEW_SIZE) * Math.max(span[0], span[1]);
+    return { phiDeg, thetaDeg, radius };
+  }, []);
+  const currentRenderViewRef = useRef(currentRenderView);
+  currentRenderViewRef.current = currentRenderView;
+
+  // The framing slider moves the solid camera; Rendered inherits it.
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime || !inCameraView.current) {
+      const percent = Math.min(300, Math.max(25, framingPercent));
+      const distance = BASE_ORBIT_DISTANCE * (100 / percent);
+      if (runtime) {
+        const offset = runtime.camera.position.clone().sub(runtime.orbit.target);
+        if (offset.length() > 1e-4) {
+          runtime.camera.position
+            .copy(runtime.orbit.target)
+            .add(offset.normalize().multiplyScalar(distance));
+          runtime.orbit.update();
+        }
+      }
+    }
+  }, [framingPercent]);
 
   // Entering Rendered mode renders once at the current viewport size; orbiting
   // in this mode does not re-render (each frame costs seconds), so the toolbar
@@ -789,6 +861,8 @@ export function Viewport3D() {
     void actions.renderViewport(
       Math.max(320, Math.round(size.width)),
       Math.max(240, Math.round(size.height)),
+      "preview",
+      currentRenderViewRef.current(),
     );
   }, [actions, render.busy, renderedMode, size.height, size.width]);
 

@@ -22,6 +22,7 @@ import type {
   ObjectKind,
   RenderFrame,
   RenderStatus,
+  RenderView,
   Primitive,
   Project,
   SceneObject,
@@ -561,7 +562,7 @@ export function createMockBridge(): StudioBridge {
         "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),
 
-    renderFrame: async (): Promise<RenderFrame> => {
+    renderFrame: async (_width: number, _height: number, _quality?: "preview" | "final", _view?: RenderView): Promise<RenderFrame> => {
       throw new Error(
         "Rendered mode runs the Forge3D pipeline, which needs the desktop shell",
       );

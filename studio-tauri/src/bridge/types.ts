@@ -268,6 +268,14 @@ export interface EngineStatus {
   detail: string;
 }
 
+/** Camera override from the viewport, so frames match the solid view. */
+export interface RenderView {
+  phiDeg: number;
+  thetaDeg: number;
+  /** Orbit distance in the renderer's terrain units (metres). */
+  radius: number;
+}
+
 export interface RenderFrame {
   width: number;
   height: number;

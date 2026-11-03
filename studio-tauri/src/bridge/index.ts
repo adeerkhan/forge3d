@@ -19,6 +19,7 @@ import type {
   MeshFilePayload,
   RenderFrame,
   RenderStatus,
+  RenderView,
   ShellInfo,
   TerrainPreview,
 } from "./types";
@@ -49,7 +50,12 @@ export interface StudioBridge {
   forge3dProbe(force?: boolean): Promise<EngineStatus>;
 
   // Embedded renderer (Rendered viewport mode)
-  renderFrame(width: number, height: number, quality?: "preview" | "final"): Promise<RenderFrame>;
+  renderFrame(
+    width: number,
+    height: number,
+    quality?: "preview" | "final",
+    view?: RenderView,
+  ): Promise<RenderFrame>;
   /** Render a full-resolution still and write it to `path`. */
   renderStill(path: string): Promise<RenderFrame>;
   renderStatus(): Promise<RenderStatus>;
