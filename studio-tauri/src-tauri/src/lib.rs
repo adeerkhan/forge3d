@@ -72,6 +72,7 @@ pub fn run() {
             commands::restore_recovery,
             commands::discard_recovery,
             commands::read_mesh_file,
+            commands::file_size,
             commands::terrain_preview,
             commands::import_terrain_dem,
             commands::read_image_asset,

@@ -33,11 +33,14 @@ pub const SCENE_PRESETS: [(&str, &str, &str, &str); 2] = [
 
 /// Bundled DEM used as the default scene. Overridable with `FORGE3D_STUDIO_DEM`.
 const DEFAULT_DEM_RELATIVE: &str = "assets/tif/Bryce_Canyon_1024.tif";
+/// NAIP orthophoto draped on the Bryce starter (the Bryce "material").
+const BRYCE_NAIP_RELATIVE: &str = "assets/tif/Bryce_Canyon_naip.tif";
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Probe program: reports the package version and whether the viewer binary
-/// resolves. Opening a window is not required.
+/// Probe program: reports the package version. The viewer binary is optional
+/// diagnostics only — rendering runs in-process (`studio_render.py`), so a
+/// missing `interactive_viewer` must not gate Rendered mode.
 const PROBE_SCRIPT: &str = r#"
 import json
 
@@ -52,14 +55,11 @@ def main():
         from forge3d._viewer_binary import find_viewer_binary
         import forge3d.viewer as viewer
         binary = find_viewer_binary(viewer.__file__)
+        detail = "engine ready (viewer binary present)"
     except Exception as exc:
-        print(json.dumps({
-            "ok": False,
-            "version": version,
-            "detail": "viewer binary unavailable: %s. Build it with: cargo build --release --bin interactive_viewer" % (exc,),
-        }))
-        return
-    print(json.dumps({"ok": True, "version": version, "viewer": binary, "detail": "engine and viewer present"}))
+        binary = None
+        detail = "engine ready (viewer binary not found — optional: %s)" % (exc,)
+    print(json.dumps({"ok": True, "version": version, "viewer": binary, "detail": detail}))
 
 main()
 "#;
@@ -279,6 +279,7 @@ impl Forge3dState {
             elevation_range: None,
             world_origin_xz: None,
             world_span_xz: None,
+            overlay: bryce_naip_overlay(relative),
         };
 
         let python = self.probe(false).python;
@@ -316,16 +317,52 @@ impl Forge3dState {
     }
 }
 
-/// Resolve a bundled DEM: `FORGE3D_STUDIO_DEM` overrides the default sample,
+/// The Bryce starter ships its NAIP orthophoto as the terrain's albedo. Only
+/// the untouched default Bryce scene gets it: an explicit `FORGE3D_STUDIO_DEM`
+/// override or another preset means the user brought their own DEM, and
+/// draping Bryce imagery on it would be wrong.
+fn bryce_naip_overlay(dem_relative: &str) -> Option<studio_core::TerrainSeedOverlay> {
+    if dem_relative != DEFAULT_DEM_RELATIVE {
+        return None;
+    }
+    if std::env::var_os("FORGE3D_STUDIO_DEM").is_some() {
+        return None;
+    }
+    let path = resolve_bundled(BRYCE_NAIP_RELATIVE)?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    if metadata.len() == 0 {
+        return None;
+    }
+    Some(studio_core::TerrainSeedOverlay {
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Bryce_Canyon_naip.tif".to_owned()),
+        path: path.to_string_lossy().into_owned(),
+        byte_size: metadata.len(),
+        opacity: 0.82,
+    })
+}
+
+/// Resolve a bundled file: `FORGE3D_STUDIO_DEM` overrides the default sample,
 /// otherwise the named file is searched from the executable and the working
 /// directory.
 fn resolve_dem(relative: &str) -> Option<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
     if relative == DEFAULT_DEM_RELATIVE {
         if let Some(path) = std::env::var_os("FORGE3D_STUDIO_DEM") {
-            candidates.push(PathBuf::from(path));
+            let candidate = PathBuf::from(path);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
+    resolve_bundled(relative)
+}
+
+/// Search the executable's and the working directory's ancestors for a file
+/// relative to the repo root (`assets/…`).
+fn resolve_bundled(relative: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         roots.extend(exe.ancestors().take(6).map(Path::to_path_buf));

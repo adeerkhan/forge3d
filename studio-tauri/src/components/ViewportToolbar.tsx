@@ -28,7 +28,7 @@ const PRIMITIVES: Array<{ shape: PrimitiveShape; label: string }> = [
 ];
 
 /** Tool strip floating over the viewport: the Blender-style tool palette. */
-export function ViewportToolbar() {
+export function ViewportToolbar({ onRender }: { onRender: () => void }) {
   const {
     state,
     actions,
@@ -143,6 +143,22 @@ export function ViewportToolbar() {
                 disabled={importing}
                 title={
                   importing
+                    ? "DEM import needs the desktop shell"
+                    : "Add the scene terrain from a GeoTIFF DEM — or replace the DEM if one exists"
+                }
+                onClick={() => {
+                  setAddOpen(false);
+                  void actions.importTerrainDem();
+                }}
+              >
+                DEM terrain (GeoTIFF)…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                disabled={importing}
+                title={
+                  importing
                     ? "glTF import needs the desktop shell"
                     : "Import a .gltf or .glb file"
                 }
@@ -211,8 +227,8 @@ export function ViewportToolbar() {
           type="button"
           className="tool-button tool-button--wide"
           disabled={render.busy}
-          title="Render the current view again"
-          onClick={() => void actions.renderViewport(960, 600)}
+          title="Render the current view again at the chosen size"
+          onClick={onRender}
         >
           {render.busy ? "Rendering…" : "Re-render"}
         </button>

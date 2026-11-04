@@ -10,8 +10,8 @@ Protocol (newline-delimited JSON):
   stdin  line n   {"id": 1, "width": 960, "height": 600,
                    "camera": {"phiDeg": .., "thetaDeg": .., "radius": ..,
                               "target": [x, y, z], "fovDeg": ..},
-                   "sun": {"azimuthDeg": .., "elevationDeg": .., "intensity": ..},
-                   "quality": {"samples": 1, "shadows": true, "pom": true},
+                   "sun": {"azimuthDeg": .., "elevationDeg": ..,
+                           "intensity": .., "color": [r, g, b]},
                    "output": "/optional/path.png"}
   stdout          {"event": "ready", "dem": "...", "span": [w, h]}
                   {"id": 1, "ok": true, "width": 960, "height": 600,
@@ -175,6 +175,24 @@ class StudioRenderer:
                 rgb[:, :, 1] = rgb[:, :, 0]
                 rgb[:, :, 2] = rgb[:, :, 0]
 
+            # The shell serializes OverlayRequest as camelCase ("preserveColors").
+            if overlay.get("preserve_colors", overlay.get("preserveColors")):
+                # Draped imagery (NAIP, land cover) keeps its source colours:
+                # 8-bit data passes through, 16-bit data is bit-shifted, and
+                # only nodata pixels become transparent.
+                peak = max(
+                    (float(np.ma.max(plane)) if plane.count() else 0.0) for plane in planes
+                )
+                if peak > 255.0:
+                    rgb *= 255.0 / 65535.0
+                rgba = np.concatenate(
+                    [np.clip(rgb, 0.0, 255.0).astype(np.uint8), np.where(valid, 255, 0).astype(np.uint8)[..., None]],
+                    axis=2,
+                )
+                return self.f3d.OverlayLayer.from_raster_rgba(
+                    rgba, strength=float(overlay.get("opacity", 0.82))
+                )
+
         flat = rgb.reshape(-1, 3)
         finite = np.isfinite(flat).all(axis=1)
         low, high = (
@@ -245,15 +263,24 @@ class StudioRenderer:
             cam_theta_deg=float(camera.get("thetaDeg", 45.0)),
             cam_target=(float(target[0]), float(target[1]), float(target[2])),
             fov_y_deg=float(camera.get("fovDeg", 45.0)),
-            clip=(10.0, 400000.0),
+            clip=(
+                # Near tracks the zoom: the fixed 10 m floor clipped close
+                # cameras' near terrain away (Solid draws it), and a free-float
+                # near would wreck depth precision against the 400 km far plane.
+                min(10.0, max(radius * 0.001, 0.01)),
+                400000.0,
+            ),
             domain=self.range,
             overlays=overlays,
-            albedo_mode="colormap",
+            albedo_mode="material",
             hue_variation_strength=0.0,
             colormap_strength=1.0,
             light_azimuth_deg=float(sun.get("azimuthDeg", 135.0)),
             light_elevation_deg=float(sun.get("elevationDeg", 35.0)),
             sun_intensity=float(sun.get("intensity", 3.0)),
+            # The starter sun's colour; the shell sends the scene's light
+            # colour so Rendered matches the Solid view's lighting hue.
+            sun_color=tuple(float(c) for c in sun.get("color", (1.0, 0.97, 0.92))),
             ibl_enabled=True,
             exposure=float(request.get("exposure", 1.35)),
             # The SSAO pass costs ~4.8 s per frame by itself (measured); every
@@ -264,10 +291,22 @@ class StudioRenderer:
             detail=DetailSettings(enabled=False),
             height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
             aov=AovSettings(enabled=False),
-            sky=SkySettings(enabled=bool(quality.get("sky", True))),
+            sky=SkySettings(enabled=bool(quality.get("sky", True)), aerial_perspective=False),
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))
+        # The camera orbits far outside the 4000 m default max_distance
+        # (6+ km away), so every fragment beyond it faded to unshadowed —
+        # the entire terrain rendered without a single shadow.
+        settings.shadows.max_distance = 30000.0
         settings.shadows.technique = "PCF"
+        # The bias defaults (0.0005/0.001/0.0002 in NORMALIZED depth) were
+        # sized for small scenes; over this engine's ~6 km light box they eat
+        # ~10 m of world depth and swallow every shadow. Keep them near zero so
+        # cast shadows survive, with just enough constant/normal bias to keep
+        # heightmap interpolation off acne.
+        settings.shadows.depth_bias = 0.00005
+        settings.shadows.slope_scale_bias = 0.0001
+        settings.shadows.normal_bias = 0.00001
 
         params = f3d.TerrainRenderParams(settings)
         frame = self.renderer.render_terrain_pbr_pom(

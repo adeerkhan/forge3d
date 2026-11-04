@@ -107,9 +107,9 @@ pub struct CameraSync {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainCamera {
-    /// Azimuth around +Y (degrees).
+    /// Azimuth east → north in the engine's geographic frame (degrees).
     pub phi_deg: f32,
-    /// Polar angle down from +Y (0 = straight above, 90 = horizon).
+    /// Polar angle down from vertical (0 = straight above, 90 = horizon).
     pub theta_deg: f32,
     pub fov_deg: f32,
     /// Distance in the viewer's terrain world units (metres for georeferenced
@@ -150,11 +150,15 @@ pub struct TerrainOverlayHandoff {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SunAngles {
-    /// Degrees clockwise from +Z, [0, 360).
+    /// Degrees from east toward south (the engine's terrain world, +Y south),
+    /// [0, 360).
     pub azimuth_deg: f32,
     /// Degrees above the horizon, [-90, 90].
     pub elevation_deg: f32,
     pub intensity: f32,
+    /// Linear RGB colour of the directional light — the renders read it, so a
+    /// colour edit must not diverge between the Solid view and the renderer.
+    pub color: [f32; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -253,9 +257,9 @@ pub fn capability_report(project: &Project, target: Workspace) -> CapabilityRepo
 
             (ObjectKind::Light(light), Workspace::Forge3d) => match light.kind {
                 LightKind::Directional => (
-                    CapabilityLevel::Partial,
-                    "Sun azimuth and elevation transfer; shadows and colour are not exposed \
-                     by the viewer IPC."
+                    CapabilityLevel::Full,
+                    "Sun direction, intensity, and colour transfer to the embedded \
+                     renderer; shadows follow the project's render settings."
                         .to_owned(),
                 ),
                 LightKind::Point => {
@@ -382,12 +386,19 @@ pub fn sun_angles(project: &Project) -> Option<SunAngles> {
         return None;
     };
     // The object's local -Z is where the light travels, so the sun sits the
-    // opposite way. The model's default (-50°, 30°) therefore means "50° up,
-    // 30° around", which is exactly how the viewer reads `lit_sun`.
+    // opposite way: rotation (-50°, 30°, 0°) puts it 50° above the horizon.
     let forward = light_direction(project, light.kind);
     let toward_sun = Vec3::new(-forward.x, -forward.y, -forward.z);
     let elevation_deg = toward_sun.y.clamp(-1.0, 1.0).asin().to_degrees();
-    let mut azimuth_deg = toward_sun.x.atan2(toward_sun.z).to_degrees();
+    // The engine decodes `light_azimuth_deg` as
+    // direction = (cos el · cos az, cos el · sin az, sin el) in the terrain
+    // world (+X east, +Y SOUTH for mesh geometry, +Z up) — azimuth runs east
+    // → south. The Solid view is Y-up with north at -Z, so its +Z axis is
+    // south: atan2(z, x) in Solid axes IS that angle. The old atan2(x, z)
+    // rotated the rendered sun 90° away from the Solid one (the starter light
+    // handed the engine 30° instead of 60°, i.e. northeast instead of
+    // southeast).
+    let mut azimuth_deg = toward_sun.z.atan2(toward_sun.x).to_degrees();
     if azimuth_deg < 0.0 {
         azimuth_deg += 360.0;
     }
@@ -395,6 +406,7 @@ pub fn sun_angles(project: &Project) -> Option<SunAngles> {
         azimuth_deg,
         elevation_deg,
         intensity: light.intensity,
+        color: light.color,
     })
 }
 
@@ -482,7 +494,13 @@ pub fn terrain_camera(project: &Project) -> Option<TerrainCamera> {
     }
     let up = offset.y / length;
     let theta_deg = up.clamp(-1.0, 1.0).acos().to_degrees();
-    let mut phi_deg = offset.z.atan2(offset.x).to_degrees();
+    // The engine's north-mode orbit reads phi in the geographic frame
+    // (+X east, +Y north, +Z up): phi runs east → north, while the Solid
+    // view's +Z axis is south — so the north component is -z. The old
+    // atan2(z, x) mirrored the fallback azimuth by ~100° for the starter
+    // scene and disagreed with the viewport's live view, which already
+    // maps -z → north.
+    let mut phi_deg = (-offset.z).atan2(offset.x).to_degrees();
     if phi_deg < 0.0 {
         phi_deg += 360.0;
     }
@@ -570,7 +588,9 @@ mod tests {
             .unwrap();
         assert_eq!(mesh.level, CapabilityLevel::Partial);
         assert!(mesh.detail.contains("Primitive geometry"));
-        assert_eq!(report.count(CapabilityLevel::Partial), 2); // mesh + directional sun
+        // Only the mesh row is partial now: primitives still don't reach the
+        // renderer, while direction, intensity, and colour of the sun all do.
+        assert_eq!(report.count(CapabilityLevel::Partial), 1);
         assert!(report.has_renderable_content);
         // One note for the primitive geometry, one for Studio-only materials.
         assert!(report
@@ -659,11 +679,52 @@ mod tests {
     fn sun_angles_match_the_light_rotation() {
         let project = Project::new("Sun");
         let sun = sun_angles(&project).expect("starter scene has a sun");
-        // The starter sun uses rotation (-50°, 30°, 0°); the model means
-        // "50° above the horizon, 30° around", which is the viewer's convention.
+        // Rotation (-50°, 30°, 0°): 50° above the horizon; the horizontal
+        // toward-sun component is east 0.321, south 0.557, and the engine's
+        // azimuth (east → south) is atan2(0.557, 0.321) = 60°. The old
+        // atan2(east, south) = 30° put the rendered sun 90° off the Solid one.
         assert!((sun.elevation_deg - 50.0).abs() < 0.5, "{sun:?}");
-        assert!((sun.azimuth_deg - 30.0).abs() < 0.5, "{sun:?}");
+        assert!((sun.azimuth_deg - 60.0).abs() < 0.5, "{sun:?}");
         assert!((sun.intensity - 3.0).abs() < 1e-4);
+        // The renderer receives the light's colour too — Solid and Rendered
+        // must agree on it.
+        assert_eq!(sun.color, [1.0, 0.97, 0.92], "{sun:?}");
+    }
+
+    #[test]
+    fn handoff_sun_angles_rebuild_the_solid_view_sun_vector() {
+        // The decode contract: the engine turns (azimuth, elevation) into
+        // direction = (cos el · cos az, cos el · sin az, sin el) in the terrain
+        // world (+X east, +Y south, +Z up). The Solid view's toward-sun vector
+        // is (east, up, south); after the axis transposition the handoff's
+        // numbers must reproduce it exactly — this is the regression that let
+        // the rendered sun sit 90° away from the Solid one.
+        let project = Project::new("Sun");
+        let sun = sun_angles(&project).expect("starter scene has a sun");
+        let (az, el) = (sun.azimuth_deg.to_radians(), sun.elevation_deg.to_radians());
+        let engine = [
+            el.cos() * az.cos(), // east
+            el.cos() * az.sin(), // south (world +Y)
+            el.sin(),            // up
+        ];
+
+        let light = project
+            .scene
+            .objects
+            .iter()
+            .find(|object| {
+                matches!(&object.kind, ObjectKind::Light(light) if light.kind == LightKind::Directional)
+            })
+            .expect("starter scene has a directional light");
+        let forward = light.transform.forward();
+        // Solid toward-sun = -forward, axes (east, up, south) → engine axes.
+        let expected = [-forward.x, -forward.z, -forward.y];
+        for (index, (got, want)) in engine.iter().zip(expected).enumerate() {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "axis {index}: engine {got} vs solid-mapped {want}"
+            );
+        }
     }
 
     #[test]

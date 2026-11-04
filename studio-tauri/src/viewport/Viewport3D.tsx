@@ -16,6 +16,8 @@ import { useSession } from "../state/session-context";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
 import type { Material, TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
+import { viewStore } from "./viewStore";
+import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
 const ACCENT = 0xf0a94a;
@@ -140,8 +142,6 @@ function buildLightGizmo(light: LightObject): THREE.Group {
   group.userData.owned = true;
   return group;
 }
-
-const TERRAIN_VIEW_SIZE = 12;
 
 /**
  * A displaced grid from a sampled DEM.
@@ -518,6 +518,43 @@ export function Viewport3D() {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointerup", onPointerUp);
 
+    /**
+     * Publish the Solid camera in the renderer's frame every frame, so a
+     * render reproduces the view on screen instead of a canned framing.
+     * The axis/scale/datum math lives in `viewMath` (unit-tested);
+     * camera view aims 10 viewport units ahead, free view aims at the
+     * orbit target — any point on the view axis frames the same picture,
+     * since the mapping is a similarity transform.
+     */
+    const updateViewStore = () => {
+      const project = stateRef.current?.project;
+      const object = project?.scene.objects.find(
+        (candidate) => candidate.kind.type === "terrain",
+      );
+      if (!object || object.kind.type !== "terrain") {
+        viewStore.current = null;
+        return;
+      }
+      const aim = cameraViewRef.current
+        ? camera.position
+            .clone()
+            .add(
+              new THREE.Vector3(0, 0, -1)
+                .applyQuaternion(camera.quaternion)
+                .multiplyScalar(10),
+            )
+        : orbit.target;
+      viewStore.current = computeRenderView({
+        camera: [camera.position.x, camera.position.y, camera.position.z],
+        aim: [aim.x, aim.y, aim.z],
+        fovDeg: camera.fov,
+        spanXz: object.kind.worldSpanXz,
+        dimensions: object.kind.dimensions,
+        elevationRange: object.kind.elevationRange,
+        zScale: object.kind.zScale,
+      });
+    };
+
     let frame = 0;
     let lastQuaternion: Quaternion = [0, 0, 0, 1];
     const tick = () => {
@@ -526,6 +563,7 @@ export function Viewport3D() {
       // overwrite the camera-view quaternion every frame. While looking through
       // the project camera, the model owns the view.
       if (!inCameraView.current) orbit.update();
+      updateViewStore();
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
       if (
@@ -777,7 +815,13 @@ export function Viewport3D() {
       project.selection.length === 1
         ? project.scene.objects.find((object) => object.id === project.selection[0])
         : undefined;
-    const editable = single && !single.locked && single.visible ? runtime.objects.get(single.id) : undefined;
+    // Terrain carries a measured georeferenced footprint: no gizmo (and the
+    // SetTransform command rejects it anyway) — moving it would only desync
+    // the Solid view from the renderer, which always draws the DEM centred.
+    const editable =
+      single && !single.locked && single.visible && single.kind.type !== "terrain"
+        ? runtime.objects.get(single.id)
+        : undefined;
     if (tool === "select" || !editable) {
       runtime.gizmo.detach();
     } else {
@@ -838,20 +882,44 @@ export function Viewport3D() {
 
   const mode = state?.project.viewport.mode ?? "solid";
 
-  /** Frame size per quality: material preview renders smaller (it is a look-dev
-   *  pass, not the final image). */
+  /** Viewport render resolution per mode. Options: 1×/2×/4× the viewport,
+   *  the DEM's own pixel size (so Material and Rendered can be compared at
+   *  identical, native resolution), or the project's output size. Material
+   *  keeps its own scale so the two modes can be set independently. */
+  type RenderScale = "0.5" | "1" | "2" | "4" | "project" | "dem";
+  const [renderScale, setRenderScale] = useState<RenderScale>("1");
+  const [materialScale, setMaterialScale] = useState<RenderScale>("0.5");
+
+  const terrainObject = state?.project.scene.objects.find((object) => object.kind.type === "terrain");
+  const demDims = terrainObject?.kind.type === "terrain" ? terrainObject.kind.dimensions : null;
+
+  /** Frame size for one quality tier: material uses its own scale selector;
+   *  everything else uses the rendered-mode one. No hidden multipliers — what
+   *  the selector shows is the size the engine renders. */
   const requestSize = useCallback(
-    (quality: "preview" | "material" | "final") =>
-      quality === "material"
-        ? {
-            width: Math.round(Math.max(320, size.width) * 0.65),
-            height: Math.round(Math.max(240, size.height) * 0.65),
-          }
-        : {
-            width: Math.max(320, Math.round(size.width)),
-            height: Math.max(240, Math.round(size.height)),
-          },
-    [size.height, size.width],
+    (quality: "preview" | "material" | "final") => {
+      const scale: RenderScale = quality === "material" ? materialScale : renderScale;
+      const base =
+        scale === "project"
+          ? { width: state?.project.render.width ?? 1920, height: state?.project.render.height ?? 1080 }
+          : scale === "dem" && demDims
+            ? { width: demDims[0], height: demDims[1] }
+            : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
+      const factor = scale === "project" || scale === "dem" ? 1 : Number(scale);
+      return {
+        width: Math.min(4096, Math.max(320, Math.round(base.width * factor))),
+        height: Math.min(4096, Math.max(240, Math.round(base.height * factor))),
+      };
+    },
+    [
+      demDims,
+      materialScale,
+      renderScale,
+      size.height,
+      size.width,
+      state?.project.render.height,
+      state?.project.render.width,
+    ],
   );
   // Material preview and Rendered both show rendered frames; only the quality
   // preset differs.
@@ -860,6 +928,8 @@ export function Viewport3D() {
     mode === "material" ? "material" : "preview";
   const modeRef = useRef(renderedMode);
   modeRef.current = renderedMode;
+  const cameraViewRef = useRef(cameraView);
+  cameraViewRef.current = cameraView;
   const renderQualityRef = useRef(renderQuality);
   renderQualityRef.current = renderQuality;
   const requestSizeRef = useRef(requestSize);
@@ -956,12 +1026,40 @@ export function Viewport3D() {
     }
     if (renderedOnce.current || render.busy) return;
     renderedOnce.current = true;
-    void actions.renderViewport(
-      Math.max(320, Math.round(size.width)),
-      Math.max(240, Math.round(size.height)),
-      "preview",
-    );
-  }, [actions, render.busy, renderedMode, size.height, size.width]);
+    const target = requestSizeRef.current(renderQualityRef.current);
+    void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+  }, [actions, render.busy, renderedMode, render.error, size.height, size.width]);
+
+  // Scene edits (sun, exposure, overlay, z-scale, transforms…) re-render the
+  // frame after a short pause, so the Rendered view reflects the project
+  // instead of a stale PNG until someone presses Re-render. Debounced and
+  // serialised in the session, so dragging a slider still costs one frame.
+  const revision = state?.revision ?? -1;
+  const revisionRef = useRef(revision);
+  useEffect(() => {
+    const previous = revisionRef.current;
+    revisionRef.current = revision;
+    if (!renderedMode || revision === previous || previous === -1) return;
+    const timer = window.setTimeout(() => {
+      const target = requestSizeRef.current(renderQualityRef.current);
+      void actionsRef.current.renderViewport(target.width, target.height, renderQualityRef.current);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [revision, renderedMode]);
+
+  // Changing either mode's render scale asks for a frame at the new size
+  // right away.
+  useEffect(() => {
+    if (!renderedMode) return;
+    const timer = window.setTimeout(() => {
+      const target = requestSizeRef.current(renderQualityRef.current);
+      void actionsRef.current.renderViewport(target.width, target.height, renderQualityRef.current);
+    }, 50);
+    return () => window.clearTimeout(timer);
+    // Only the scales themselves; size/mode changes already flow through the
+    // effects above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderScale, materialScale]);
 
   const scene = state?.project.scene;
   const camera = scene?.objects.find((object) => object.id === scene.activeCamera);
@@ -1000,23 +1098,54 @@ export function Viewport3D() {
                   ? `${render.frame.width} × ${render.frame.height} · ${(render.frame.ms / 1000).toFixed(2)} s`
                   : "No frame rendered yet"}
             </span>
+            <label className="viewport-rendered__scale">
+              <span>Size</span>
+              <select
+                className="input input--select"
+                value={renderQuality === "material" ? materialScale : renderScale}
+                title="Material and Rendered keep independent sizes; DEM renders at the DEM's own pixels so both modes can be compared 1:1"
+                onChange={(event) => {
+                  const value = event.target.value as RenderScale;
+                  if (renderQuality === "material") setMaterialScale(value);
+                  else setRenderScale(value);
+                }}
+              >
+                {renderQuality === "material" && <option value="0.5">½× viewport</option>}
+                <option value="1">1× viewport</option>
+                {renderQuality !== "material" && (
+                  <>
+                    <option value="2">2× viewport</option>
+                    <option value="4">4× viewport</option>
+                  </>
+                )}
+                {demDims && (
+                  <option value="dem">DEM ({demDims[0]} × {demDims[1]})</option>
+                )}
+                <option value="project">
+                  Project ({state?.project.render.width ?? 1920} × {state?.project.render.height ?? 1080})
+                </option>
+              </select>
+            </label>
             <button
               type="button"
               className="button button--small"
               disabled={render.busy}
-              onClick={() =>
-                void actions.renderViewport(
-                  Math.max(320, Math.round(size.width)),
-                  Math.max(240, Math.round(size.height)),
-                )
-              }
+              onClick={() => {
+                const target = requestSizeRef.current(renderQualityRef.current);
+                void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+              }}
             >
               {render.busy ? "Rendering…" : "Re-render"}
             </button>
           </div>
         </div>
       )}
-      <ViewportToolbar />
+      <ViewportToolbar
+        onRender={() => {
+          const target = requestSizeRef.current(renderQualityRef.current);
+          void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+        }}
+      />
       <AxisGizmo quaternion={quaternion} onPick={viewAlong} />
       <div className="viewport-overlay viewport-overlay--bottom">
         <span className="viewport-hint">

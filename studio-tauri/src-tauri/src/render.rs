@@ -326,6 +326,14 @@ pub struct RenderView {
     pub phi_deg: f64,
     pub theta_deg: f64,
     pub radius: f64,
+    /// Aim point in the renderer's mesh frame: metres, terrain centred on the
+    /// origin, Z up. Optional so older shells keep working; when absent the
+    /// handoff's framing stands.
+    #[serde(default)]
+    pub target: Option<[f64; 3]>,
+    /// Vertical field of view in degrees.
+    #[serde(default)]
+    pub fov_deg: Option<f64>,
 }
 
 /// Everything the shell needs for one frame, derived from the project.
@@ -343,6 +351,8 @@ pub struct RenderRequest {
     pub sun_azimuth_deg: f64,
     pub sun_elevation_deg: f64,
     pub sun_intensity: f64,
+    /// Linear RGB colour of the scene's directional light.
+    pub sun_color: [f64; 3],
     pub z_scale: f64,
     pub overlay: Option<OverlayRequest>,
     pub exposure: f64,
@@ -373,6 +383,16 @@ impl RenderRequest {
                 self.theta_deg = view.theta_deg;
                 self.radius = view.radius;
             }
+            if let Some(target) = view.target {
+                if target.iter().all(|component| component.is_finite()) {
+                    self.target = target;
+                }
+            }
+            if let Some(fov_deg) = view.fov_deg {
+                if fov_deg.is_finite() && (1.0..=179.0).contains(&fov_deg) {
+                    self.fov_deg = fov_deg;
+                }
+            }
         }
         self
     }
@@ -395,14 +415,17 @@ impl RenderRequest {
                 "azimuthDeg": self.sun_azimuth_deg,
                 "elevationDeg": self.sun_elevation_deg,
                 "intensity": self.sun_intensity,
+                "color": self.sun_color,
             },
             "quality": {
                 "samples": 1,
-                // Material preview: lit terrain + overlay, no shadows or POM.
+                // Material preview: lit terrain + overlay, no shadows or POM,
+                // and no sky background — the flat dark backdrop is what makes
+                // it read as a look-dev pass instead of the beauty frame.
                 // Quality presets; the project settings can only *add* cost.
                 "shadows": !material && self.shadows,
                 "pom": !material,
-                "sky": true,
+                "sky": !material,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
                 "heightAo": final_quality && self.ambient_occlusion,
             },
@@ -432,7 +455,6 @@ impl RenderRequest {
         let span = terrain
             .world_span_xz
             .ok_or_else(|| "the DEM footprint is unknown (open the project again)".to_owned())?;
-        let elevation = terrain.elevation_range.unwrap_or([0.0, 0.0]);
 
         Ok(Self {
             width,
@@ -444,11 +466,11 @@ impl RenderRequest {
             // the viewport; fall back to the viewer's framing only when the
             // project cannot say (no camera distance available).
             radius: camera.radius.unwrap_or_else(|| span[0].max(span[1]) * 1.5),
-            // The renderer builds the terrain mesh centred on the origin, so the
-            // orbit target is the origin at mid-elevation — not the DEM's corner
-            // in map coordinates. Aiming at (span/2, span/2) looked past the mesh
-            // and produced frames of pure sky.
-            target: [0.0, 0.0, f64::from(elevation[0] + elevation[1]) * 0.5],
+            // The terrain mesh is vertically centred on Z=0 in the render world
+            // (the shader centres it "so the camera at origin can see it"), so
+            // the fallback aim is the mesh centre — aiming at absolute
+            // mid-elevation framed empty sky for high-altitude DEMs.
+            target: [0.0, 0.0, 0.0],
             fov_deg: f64::from(camera.fov_deg),
             sun_azimuth_deg: handoff
                 .sun
@@ -462,6 +484,16 @@ impl RenderRequest {
                 .sun
                 .map(|sun| f64::from(sun.intensity))
                 .unwrap_or(3.0),
+            sun_color: handoff
+                .sun
+                .map(|sun| {
+                    [
+                        f64::from(sun.color[0]),
+                        f64::from(sun.color[1]),
+                        f64::from(sun.color[2]),
+                    ]
+                })
+                .unwrap_or([1.0, 0.97, 0.92]),
             z_scale: f64::from(terrain.z_scale),
             overlay: terrain.overlay.as_ref().map(|overlay| OverlayRequest {
                 path: overlay.path.clone(),

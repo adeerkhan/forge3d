@@ -307,6 +307,14 @@ export interface RenderView {
   thetaDeg: number;
   /** Orbit distance in the renderer's terrain units (metres). */
   radius: number;
+  /**
+   * Aim point in the renderer's mesh frame: metres, terrain centred on the
+   * origin, Z up. The viewport maps its camera onto this frame before
+   * rendering, so the frame matches what the user is looking at.
+   */
+  target: [number, number, number];
+  /** Vertical field of view, degrees. */
+  fovDeg: number;
 }
 
 export interface RenderFrame {

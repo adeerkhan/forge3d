@@ -47,9 +47,12 @@ export interface StudioBridge {
   readMeshFile(path: string): Promise<MeshFilePayload>;
   /** Read a PNG/JPEG for a viewport texture. */
   readImageAsset(path: string): Promise<MeshFilePayload>;
+  /** Size of a file on disk — asset registration validates non-empty files. */
+  fileSize(path: string): Promise<number>;
   /** Sample a DEM into a heightfield for the Studio viewport. */
   terrainPreview(path: string, resolution?: number): Promise<TerrainPreview>;
-  /** Replace the scene terrain's DEM with a raster the user picked. */
+  /** Replace the scene terrain's DEM with a raster the user picked — or add
+   *  the terrain when the scene has none yet. */
   importTerrainDem(path: string): Promise<SessionState>;
   /** Attach (`path`) or clear (`null`) a raster overlay on the terrain. */
   setTerrainOverlay(path: string | null, opacity?: number): Promise<SessionState>;
@@ -65,7 +68,7 @@ export interface StudioBridge {
     view?: RenderView,
   ): Promise<RenderFrame>;
   /** Render a full-resolution still; without a path it goes to renders/. */
-  renderStill(path?: string | null): Promise<RenderFrame>;
+  renderStill(path?: string | null, view?: RenderView): Promise<RenderFrame>;
   renderStatus(): Promise<RenderStatus>;
   renderStop(): Promise<RenderStatus>;
 }

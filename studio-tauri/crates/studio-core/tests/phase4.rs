@@ -3,11 +3,13 @@
 //! The Studio default project is a DEM, not a cube, so these tests pin the
 //! starter scene, the capability report, and the orbit camera the viewer needs.
 
+use studio_core::command::Command;
+use studio_core::editor::Editor;
 use studio_core::persist::{from_json, save_atomic};
 use studio_core::project::{AssetKind, Project, TerrainSeed, SCHEMA_VERSION, UNTITLED};
 use studio_core::scene::ObjectKind;
 use studio_core::workspace::{capability_report, handoff, terrain_camera, CapabilityLevel};
-use studio_core::Workspace;
+use studio_core::{Transform, Workspace};
 
 fn seed() -> TerrainSeed {
     TerrainSeed {
@@ -21,6 +23,19 @@ fn seed() -> TerrainSeed {
         elevation_range: Some([2099.23, 2553.58]),
         world_origin_xz: Some([395_998.5, -4_165_574.5]),
         world_span_xz: Some([4000.0, 3800.0]),
+        overlay: None,
+    }
+}
+
+fn naip_seed() -> TerrainSeed {
+    TerrainSeed {
+        overlay: Some(studio_core::TerrainSeedOverlay {
+            name: "Bryce_Canyon_naip.tif".to_owned(),
+            path: "/data/Bryce_Canyon_naip.tif".to_owned(),
+            byte_size: 28_000_000,
+            opacity: 0.82,
+        }),
+        ..seed()
     }
 }
 
@@ -54,6 +69,91 @@ fn the_starter_scene_is_the_terrain_when_a_dem_is_available() {
 }
 
 #[test]
+fn the_bryce_starter_ships_with_the_naip_albedo() {
+    let project = Project::starter("Bryce", Some(naip_seed()));
+
+    assert_eq!(project.assets.len(), 2);
+    let albedo = project
+        .assets
+        .iter()
+        .find(|asset| asset.kind == AssetKind::Orthophoto)
+        .expect("the NAIP asset is registered");
+    assert_eq!(albedo.name, "Bryce_Canyon_naip.tif");
+
+    let terrain = project.terrain_object().expect("terrain object");
+    let overlay = terrain
+        .terrain()
+        .expect("terrain payload")
+        .overlay
+        .expect("the starter albedo is draped on the terrain");
+    assert_eq!(overlay.asset, albedo.id);
+    assert!((overlay.opacity - 0.82).abs() < f32::EPSILON);
+    assert!(overlay.preserve_colors);
+    project
+        .validate()
+        .expect("terrain starter with albedo is valid");
+}
+
+#[test]
+fn a_scene_holds_exactly_one_terrain() {
+    let mut editor = Editor::new(Project::starter("Bryce", Some(seed())));
+    let terrain_id = editor
+        .project()
+        .terrain_object()
+        .expect("starter terrain")
+        .id;
+
+    let error = editor
+        .apply(Command::DuplicateObject {
+            id: terrain_id,
+            name: None,
+        })
+        .expect_err("duplicating the terrain must be rejected")
+        .to_string();
+    assert!(error.contains("one terrain"), "{error}");
+    assert_eq!(
+        editor
+            .project()
+            .scene
+            .objects
+            .iter()
+            .filter(|object| object.is_terrain())
+            .count(),
+        1,
+        "the rejected duplicate must not leave a second terrain behind"
+    );
+}
+
+#[test]
+fn terrain_transform_edits_are_rejected() {
+    // The renderer always draws the DEM centred at the origin; moving the
+    // Solid-view copy would desync the two views instead of moving the render.
+    let mut editor = Editor::new(Project::starter("Bryce", Some(seed())));
+    let terrain_id = editor
+        .project()
+        .terrain_object()
+        .expect("starter terrain")
+        .id;
+    let mut transform = Transform::default();
+    transform.translation.x = 12.0;
+
+    let error = editor
+        .apply(Command::SetTransform {
+            id: terrain_id,
+            transform,
+        })
+        .expect_err("moving terrain must be rejected")
+        .to_string();
+    assert!(error.contains("georeferenced"), "{error}");
+    let terrain = editor.project().scene.object(terrain_id).expect("terrain");
+    assert_eq!(
+        terrain.transform,
+        Transform::default(),
+        "the rejected edit must leave the transform untouched"
+    );
+}
+
+#[test]
 fn terrain_is_fully_supported_by_forge3d() {
     let project = Project::starter("Bryce", Some(seed()));
     let report = capability_report(&project, Workspace::Forge3d);
@@ -82,10 +182,13 @@ fn the_handoff_carries_the_dem_and_an_orbit_camera() {
     assert!((terrain.z_scale - 1.0).abs() < f32::EPSILON);
 
     // The terrain starter frames the scene from (11, 7.5, 13): 66.2° down from
-    // vertical and 49.8° around, which the viewer reads as phi/theta.
+    // vertical; east 11 / south 13 → azimuth 310.2° in the engine's
+    // geographic orbit frame (east → north). The old atan2(z, x) reported
+    // 49.8° — mirrored by ~100°, and disagreeing with the viewport's live
+    // view, which already maps south = -z.
     let orbit = plan.terrain_camera.expect("terrain orbit camera");
     assert!((orbit.theta_deg - 66.2).abs() < 0.5, "{orbit:?}");
-    assert!((orbit.phi_deg - 49.8).abs() < 0.5, "{orbit:?}");
+    assert!((orbit.phi_deg - 310.2).abs() < 0.5, "{orbit:?}");
     assert!((orbit.fov_deg - 45.0).abs() < 1e-4);
 
     // Framing reproduced from the viewer's own formula: a georeferenced DEM
@@ -106,31 +209,31 @@ fn the_handoff_carries_the_dem_and_an_orbit_camera() {
 }
 
 #[test]
-fn the_orbit_camera_matches_the_viewer_convention() {
-    // Viewer: eye = target + r*(sinθcosφ, cosθ, sinθsinφ). Reconstruct the eye
-    // from the reported angles and check it points back at the camera position.
+fn the_orbit_camera_matches_the_engine_north_mode_convention() {
+    // The engine's north-mode orbit: eye = target + r·(sinθ·cosφ, sinθ·sinφ,
+    // cosθ) in the geographic frame (+X east, +Y north, +Z up). Reconstruct
+    // that direction from the reported angles and compare with the Solid
+    // camera transposed into the same frame (the Solid +Z axis is south, so
+    // north = -z). The old test rebuilt the dropped viewer's Y-up convention
+    // and pinned the mirrored azimuth.
     let project = Project::starter("Bryce", Some(seed()));
     let orbit = terrain_camera(&project).unwrap();
     let theta: f32 = orbit.theta_deg.to_radians();
     let phi: f32 = orbit.phi_deg.to_radians();
     let direction = [
-        theta.sin() * phi.cos(),
-        theta.cos(),
-        theta.sin() * phi.sin(),
+        theta.sin() * phi.cos(), // east
+        theta.sin() * phi.sin(), // north
+        theta.cos(),             // up
     ];
 
     let camera = project.scene.camera().unwrap();
     let eye = camera.transform.translation;
     let length = (eye.x * eye.x + eye.y * eye.y + eye.z * eye.z).sqrt();
-    for (axis, component) in ["x", "y", "z"].iter().zip(direction) {
-        let expected = match *axis {
-            "x" => eye.x,
-            "y" => eye.y,
-            _ => eye.z,
-        } / length;
+    let expected = [eye.x / length, -eye.z / length, eye.y / length];
+    for (index, (component, want)) in direction.iter().zip(expected).enumerate() {
         assert!(
-            (component - expected).abs() < 1e-3,
-            "{axis}: {component} vs {expected}"
+            (component - want).abs() < 1e-3,
+            "axis {index}: engine {component} vs solid-mapped {want}"
         );
     }
 }

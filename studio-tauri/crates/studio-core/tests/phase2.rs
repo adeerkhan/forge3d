@@ -12,7 +12,10 @@ use studio_core::editor::Editor;
 use studio_core::ids;
 use studio_core::persist::{from_json, load, save_atomic};
 use studio_core::project::{Asset, AssetKind, Project, SCHEMA_VERSION, UNTITLED};
-use studio_core::scene::{MeshObject, MeshSource, ObjectKind, Primitive, SceneObject};
+use studio_core::scene::{
+    MeshObject, MeshSource, ObjectKind, Primitive, SceneObject, TerrainObject,
+};
+use studio_core::Transform;
 
 fn cube_id(editor: &Editor) -> uuid::Uuid {
     editor
@@ -232,6 +235,73 @@ fn unused_assets_can_be_removed_and_restored() {
 
     editor.undo().unwrap();
     assert_eq!(editor.project().assets, vec![asset]);
+}
+
+#[test]
+fn relinking_an_asset_revalidates_the_file_size() {
+    // AddAsset rejects empty files; relinking must hold the same invariant or
+    // autosave (which validates the whole project) fails long afterwards.
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    let asset = Asset {
+        id: ids::new_id(),
+        name: "albedo.png".to_owned(),
+        path: "/a/albedo.png".to_owned(),
+        kind: AssetKind::Orthophoto,
+        byte_size: 12,
+    };
+    editor
+        .apply(Command::AddAsset {
+            asset: asset.clone(),
+        })
+        .unwrap();
+
+    let error = editor
+        .apply(Command::SetAssetPath {
+            id: asset.id,
+            path: "/b/albedo.png".to_owned(),
+            byte_size: 0,
+        })
+        .expect_err("a size of 0 reads as an empty file")
+        .to_string();
+    assert!(error.contains("asset file is empty"), "{error}");
+    assert_eq!(
+        editor.project().assets[0].path,
+        "/a/albedo.png",
+        "the rejected relink must leave the asset untouched"
+    );
+
+    editor
+        .apply(Command::SetAssetPath {
+            id: asset.id,
+            path: "/b/albedo.png".to_owned(),
+            byte_size: 99,
+        })
+        .unwrap();
+    assert_eq!(editor.project().assets[0].byte_size, 99);
+}
+
+#[test]
+fn creating_a_terrain_requires_its_dem_asset() {
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    let object = SceneObject {
+        id: ids::new_id(),
+        name: "Terrain".to_owned(),
+        parent: None,
+        transform: Transform::default(),
+        visible: true,
+        locked: false,
+        kind: ObjectKind::Terrain(TerrainObject::new(ids::new_id())),
+    };
+
+    let error = editor
+        .apply(Command::CreateObject {
+            object,
+            index: None,
+        })
+        .expect_err("a terrain referencing a missing asset must be rejected")
+        .to_string();
+    assert!(error.contains("does not exist"), "{error}");
+    assert!(editor.project().terrain_object().is_none());
 }
 
 #[test]

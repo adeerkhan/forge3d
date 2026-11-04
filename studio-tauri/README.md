@@ -38,11 +38,12 @@ sync, diagnostics).
 | Separate viewer window | — | removed: rendering lives in the viewport |
 | Camera + sun transfer | `RenderRequest::from_handoff` | done |
 | Diagnostics + idempotent handoff | `forge3d.rs`, `workspace.rs` | done |
-| **Phase 4 (in progress)** — terrain-first default scene | `Project::starter`, `TerrainSeed` | done |
+| **Phase 4** — terrain-first default scene | `Project::starter`, `TerrainSeed` | done |
 | DEM heightfield preview in Studio | `terrain_preview`, `buildTerrainMesh` | done |
-| Viewer launch verified end-to-end | bridge smoke + PNG snapshot | done |
+| Embedded renderer service (viewport frames + stills) | `studio_render.py`, `render.rs` | done |
 | **Rendered viewport mode (embedded)** | `studio_render.py`, `render.rs` | done |
-| Render still to disk, render settings UI | — | next |
+| Render size control (viewport / DEM native / project) | `Viewport3D.tsx` render bar | done |
+| Render still to disk (+ JSON sidecar), render settings UI | `render_still`, `RenderSettingsEditor` | done |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -166,7 +167,8 @@ npx tsc --noEmit               # UI types
 | Click the corner gizmo | Snap the view to an axis |
 
 The tool strip also holds **Global/Local** axis orientation and the **Add** menu
-(cube, sphere, plane, import glTF/GLB).
+(cube, sphere, plane, DEM terrain from a GeoTIFF — which also works from an
+empty scene — and import glTF/GLB).
 
 ## Solid and Rendered modes (Phase 4)
 
@@ -180,17 +182,37 @@ The Studio viewport has two modes, toggled in the viewport toolbar:
 Implementation: `src-tauri/src/render.rs` keeps one Python process alive
 (`studio_render.py`) — session, renderer, and a generated neutral sky HDR are
 built once, because shader compilation and IBL prefiltering dominate start-up.
-Each frame is a JSON request (camera, sun, size) answered with a base64 PNG. A
-960 × 600 frame takes roughly 5 s on the RTX 5060; that is why Rendered mode
-renders on demand (and on entering the mode) rather than every orbit tick.
+Each frame is a JSON request (camera, sun, size) answered with a base64 PNG.
+Frames are requested on demand and coalesced: entering the mode, orbiting
+(throttled), and every scene edit (sun, exposure, overlay — debounced) trigger at
+most one queued frame. The frame's **Size** control in the render bar picks the
+resolution — 1×/2×/4× the viewport, the DEM's own pixels (`DEM (1024 × 1024)`),
+or the project's output size. **Material** mode keeps its **own** Size control
+(½×, 1×, DEM, Project) and renders without sky, shadows, or POM against a dark
+backdrop: a look-dev pass whose size you can match to Rendered exactly for a 1:1
+comparison. The top-bar **Render** button opens a save dialog defaulting to
+`<project>/renders/<name>-<timestamp>.png` with a JSON sidecar describing every
+setting that produced it.
 
 ## The default scene is a DEM (Phase 4)
 
 `File → New project` opens a Bryce Canyon scene, not a cube: the shell resolves
 `assets/tif/Bryce_Canyon_1024.tif` (or `FORGE3D_STUDIO_DEM`), samples it for the
 viewport, and stores its pixel size, georeferenced footprint, and elevation range
-on the terrain object. Studio draws a 96×96 heightfield preview; Forge3D receives
+on the terrain object. The Bryce starter also ships its NAIP orthophoto
+(`assets/tif/Bryce_Canyon_naip.tif`) draped as the terrain's albedo (overlay,
+0.82 opacity, source colours preserved) whenever the file exists — that is the
+"Bryce material". Studio draws a 96×96 heightfield preview; Forge3D receives
 the original GeoTIFF.
+
+Rendered frames use the camera you are looking through. The viewport maps its
+camera onto the renderer's frame (east = +X, north = −Z in the viewport; +X/+Y/+Z
+east/north/up in the renderer, terrain centred on the origin) and passes
+`{phiDeg, thetaDeg, radius, target, fovDeg}` with every render request, so what
+you see in Solid is what the engine draws. Pressing `End` captures the view into
+the active camera object, which is what camera view (`0`) shows. When no viewport
+camera is available (e.g. the shell renders without one), the fallback frames the
+terrain at `radius = 1.5·max(span)` aimed at the mesh centre.
 
 Two things were needed to make the viewer agree with Studio, both of which look
 like "nothing happened" if you get them wrong:
@@ -222,32 +244,32 @@ the render handoff.
   assets). Self-contained `.glb` works; a `.gltf` that references external
   `.bin`/texture files fails with an explicit message, because the webview
   cannot read neighbouring files.
-- **Imported meshes are transform-editable only.** Materials, node selection
-  within an asset, and relinking arrive in Phase 5.
+- **Imported meshes are transform-editable and relinkable only.** Solid draws
+  them with their glTF materials; picking nodes inside an asset arrives in
+  Phase 5, and meshes do not reach Rendered at all yet (see Primitives below).
 - **No shadows or PBR environment** in the solid viewport; it is a modelling
   view, not the Forge3D render (Phase 4).
-- **The viewer needs a built binary.** `interactive_viewer` must exist (repo
-  `target/release`, an installed console script, `PATH`, or
-  `FORGE3D_VIEWER_BINARY`); the probe reports the exact build command when it is
-  missing. The engine package must also be importable by that interpreter
-  (`FORGE3D_STUDIO_PYTHON` overrides the choice).
-- **The Phase 3 process path is not yet exercised on this machine.** The shell
-  needs the webkit development packages to compile at all, so the launch/probe
-  code is written and reviewed but unbuilt here; the Rust core side (capability
-  report, camera/sun handoff, idempotency) is fully tested.
-- **One asset per viewer window** — the viewer loads a single glTF/terrain, so a
-  scene referencing several assets opens the first and says so in the report.
+- **The engine probe needs only an importable `forge3d`.** Rendering runs
+  in-process (`studio_render.py`), so no viewer binary is required; the probe
+  still looks for `interactive_viewer` and reports what it finds as optional
+  diagnostics in the status-bar tooltip. `FORGE3D_STUDIO_PYTHON` overrides the
+  interpreter choice.
 - **Primitives still do not reach Forge3D.** The Phase 4 default scene is terrain
   precisely because that path is complete; exporting primitive meshes as glTF is
   the remaining piece of Rendered mode.
-- **Country-scale framing exceeds the renderer's view range.** View coordinates
-  are clamped to ±65,536 units, so a 353 km DEM (Switzerland) cannot be framed in
-  one shot; the gallery's Swiss example is an 18 km close-up for that reason.
-  Wide maps need either a scaled scene or an engine-side normalisation
-  (`experiments/swiss-land-cover.py` reproduces the case).
-- **Overlays are not in the UI yet.** The engine drapes raster overlays with
-  preserved colours (proven in the experiment above), but Studio has no overlay
-  asset/panel; that is the natural next cartography feature.
+- **Country-scale DEMs render through a scale budget.** The studio renderer
+  scales any DEM into a 30 000-unit world, so wide maps frame correctly
+  (verified end-to-end with Switzerland, 353 km — its relief is only ~1 % of
+  the span at Vertical scale 1, so raise the slider to read the Alps). The
+  older ±65 536 view-coordinate clamp no longer bites in this path
+  (`experiments/swiss-land-cover.py` documents the engine-level case).
+- **Raster overlays are the terrain's albedo.** The engine has no other terrain
+  material override; a draped raster (the Bryce NAIP orthophoto) is how the
+  surface gets imagery. The inspector shows it under the terrain's **Material**
+  section — `Add albedo raster…` / `Replace…` / `Remove` — alongside what the
+  engine actually uses (`MaterialSet.terrain_default()`, four triplanar layers,
+  no texture maps shipped in this checkout, so the default is flat colours until
+  an albedo is attached or maps appear in `assets/materials/`).
 
 ## Browser preview harness
 
@@ -259,12 +281,15 @@ Rust test.
 
 ## Not yet implemented (deliberately)
 
-- Geometry export for primitives, render jobs, Forge3D render settings UI — **Phase 4**
-- Materials, textures, environments, relinking — **Phase 5**
+- Geometry export for primitives — Rendered still draws terrain only
+- Shared material library, environments/IBL controls, glTF node selection — **Phase 5**
+- Render queue and cancellation — **Phase 7**
 - Timeline, keyframes, frame export — **Phase 6**
 
-The top bar's Forge3D tab and Render button are present but disabled, with a
-tooltip naming the phase that enables them — they are not fake controls.
+Relinking, the material inspector (terrain albedo, mesh base colour and
+texture), and the render settings UI already shipped; there is no Forge3D
+workspace tab (Phase 3 was dropped) — the top-bar **Render** button renders to
+a chosen path with a JSON sidecar.
 
 ## Regenerating the app icon
 

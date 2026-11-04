@@ -1,0 +1,44 @@
+name: Studio Tauri
+
+# The desktop shell is a separate package: nothing else in ci.yml builds it,
+# so fmt, TypeScript, and the studio-core suite would otherwise only ever run
+# on whichever machine happened to type `npm run build`.
+on:
+  pull_request:
+    paths:
+      - "studio-tauri/**"
+      - ".github/workflows/studio-tauri.yml"
+  push:
+    branches: [main]
+    paths:
+      - "studio-tauri/**"
+      - ".github/workflows/studio-tauri.yml"
+
+jobs:
+  studio-tauri:
+    name: fmt · tsc · studio-core tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Frontend types
+        run: |
+          npm ci
+          npx tsc --noEmit
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Rust formatting
+        run: cargo fmt --check
+
+      - name: studio-core tests
+        run: cargo test -p studio-core

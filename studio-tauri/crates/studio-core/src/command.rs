@@ -281,6 +281,14 @@ impl Command {
                         return Err(CommandError::AssetNotFound { id: asset });
                     }
                 }
+                // Terrain references must resolve too — CreateObject already
+                // guards mesh assets; a dangling DEM would fail validation
+                // later (autosave) instead of at the door.
+                if let Some(asset) = object.terrain().map(|terrain| terrain.asset) {
+                    if project.asset(asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: asset });
+                    }
+                }
                 let len = project.scene.objects.len();
                 let index = index.unwrap_or(len);
                 if index > len {
@@ -338,6 +346,20 @@ impl Command {
                 transform
                     .validate()
                     .map_err(|reason| CommandError::invalid("transform", reason))?;
+                // Terrain carries a measured georeferenced footprint; moving or
+                // scaling it only desyncs the Solid view from the renderer,
+                // which always draws the DEM centred at the origin.
+                if project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?
+                    .is_terrain()
+                {
+                    return Err(CommandError::invalid(
+                        "transform",
+                        "terrain position is fixed (the DEM is georeferenced)",
+                    ));
+                }
                 let object = project
                     .scene
                     .object_mut(*id)
@@ -625,8 +647,16 @@ impl Command {
                     .ok_or(CommandError::AssetNotFound { id: *id })?;
                 let previous = project.assets[index].path.clone();
                 let previous_size = project.assets[index].byte_size;
-                project.assets[index].path = path.clone();
-                project.assets[index].byte_size = *byte_size;
+                let mut candidate = project.assets[index].clone();
+                candidate.path = path.clone();
+                candidate.byte_size = *byte_size;
+                // Relinking re-runs the same invariant as AddAsset: a size of
+                // 0 means "empty file" and would fail autosave (which
+                // validates) long after this command succeeded.
+                candidate
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("asset", reason))?;
+                project.assets[index] = candidate;
                 Ok(Outcome {
                     inverse: Command::SetAssetPath {
                         id: *id,
@@ -715,6 +745,14 @@ impl Command {
                     }
                     None => project.scene.unique_name(&copy.name),
                 };
+                // A scene holds one terrain (the renderer reads the first and
+                // silently ignores the rest); replacing the DEM is Change DEM.
+                if copy.is_terrain() {
+                    return Err(CommandError::invalid(
+                        "terrain",
+                        "a scene holds one terrain; use Change DEM to replace it",
+                    ));
+                }
                 // A duplicated camera must not silently take over rendering.
                 let copy_id = copy.id;
                 project.scene.objects.insert(index + 1, copy);

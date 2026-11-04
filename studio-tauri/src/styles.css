@@ -673,45 +673,6 @@ kbd {
   cursor: pointer;
 }
 
-.material-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.material-list li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-  border-radius: var(--radius);
-  background: var(--bg-panel-alt);
-}
-
-.material-swatch {
-  width: 14px;
-  height: 14px;
-  border-radius: 3px;
-  border: 1px solid var(--border-strong);
-  flex: none;
-}
-
-.material-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.material-meta {
-  color: var(--text-dim);
-  font-size: 10.5px;
-}
-
 .inline-actions {
   display: flex;
   gap: 6px;
@@ -971,6 +932,20 @@ kbd {
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--text-dim);
+}
+
+.viewport-rendered__scale {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.viewport-rendered__scale .input--select {
+  height: 24px;
+  font-size: 11px;
+  padding: 0 6px;
 }
 
 /* Floating tool strip (Blender-style palette) */

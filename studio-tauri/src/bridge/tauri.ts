@@ -60,6 +60,8 @@ export const tauriBridge: StudioBridge = {
 
   readImageAsset: (path) => invoke<MeshFilePayload>("read_image_asset", { path }),
 
+  fileSize: (path) => invoke<number>("file_size", { path }),
+
   terrainPreview: (path, resolution) =>
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
@@ -78,7 +80,8 @@ export const tauriBridge: StudioBridge = {
       view: view ?? null,
     }),
 
-  renderStill: (path) => invoke<RenderFrame>("render_still", { path: path ?? null }),
+  renderStill: (path, view) =>
+    invoke<RenderFrame>("render_still", { path: path ?? null, view: view ?? null }),
 
   renderStatus: () => invoke<RenderStatus>("render_status"),
 

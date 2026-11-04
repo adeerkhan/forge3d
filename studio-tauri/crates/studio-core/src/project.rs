@@ -14,7 +14,7 @@ use crate::math::{Transform, Vec3};
 use crate::now_unix_ms;
 use crate::scene::{
     validate_name, CameraObject, LightKind, LightObject, MeshObject, ObjectKind, Primitive, Scene,
-    SceneObject, TerrainObject,
+    SceneObject, TerrainObject, TerrainOverlay,
 };
 
 /// Width of the terrain in the Studio viewport's scene units.
@@ -158,6 +158,23 @@ impl Project {
             terrain =
                 terrain.with_dem_info(dimensions, range, seed.world_origin_xz, seed.world_span_xz);
         }
+        // The starter albedo (the Bryce NAIP image) is attached as an overlay:
+        // it is how the engine drapes imagery on terrain.
+        if let Some(raster) = seed.overlay.clone() {
+            let id = new_id();
+            project.assets.push(Asset {
+                id,
+                name: raster.name,
+                path: raster.path,
+                kind: AssetKind::Orthophoto,
+                byte_size: raster.byte_size,
+            });
+            terrain.overlay = Some(TerrainOverlay {
+                asset: id,
+                opacity: raster.opacity.clamp(0.0, 1.0),
+                preserve_colors: true,
+            });
+        }
         project.assets.push(asset);
         project.scene.objects.retain(|object| !object.is_mesh());
         project.scene.objects.insert(
@@ -241,6 +258,11 @@ impl Project {
             .filter(|object| {
                 object.mesh().and_then(MeshObject::asset_id) == Some(id)
                     || object.terrain().map(|terrain| terrain.asset) == Some(id)
+                    || object
+                        .terrain()
+                        .and_then(|terrain| terrain.overlay)
+                        .map(|overlay| overlay.asset)
+                        == Some(id)
                     || object.mesh().and_then(|mesh| mesh.material.texture) == Some(id)
             })
             .count()
@@ -423,6 +445,23 @@ impl ViewportMode {
     }
 }
 
+/// An orthophoto the shell resolved on disk, draped on the starter terrain
+/// (the Bryce Canyon sample ships its NAIP image).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainSeedOverlay {
+    pub name: String,
+    pub path: String,
+    pub byte_size: u64,
+    /// 0..=1; defaults to the gallery's 0.82 when absent.
+    #[serde(default = "default_overlay_opacity")]
+    pub opacity: f32,
+}
+
+fn default_overlay_opacity() -> f32 {
+    0.82
+}
+
 /// A DEM the shell resolved on disk, used to seed a new project.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -433,6 +472,9 @@ pub struct TerrainSeed {
     pub name: String,
     pub path: String,
     pub byte_size: u64,
+    /// Optional albedo raster draped on the terrain, attached as an overlay.
+    #[serde(default)]
+    pub overlay: Option<TerrainSeedOverlay>,
     /// Measured DEM size, when the shell sampled it.
     #[serde(default)]
     pub dimensions: Option<[u32; 2]>,

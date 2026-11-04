@@ -330,7 +330,8 @@ pub fn forge3d_probe(forge: State<'_, Forge3dState>, force: Option<bool>) -> Eng
 
 /// Render the current scene at `width` × `height` through the embedded
 /// Forge3D pipeline (the same one the golden tests certify).
-/// Replace the scene terrain's DEM with a raster the user picked.
+/// Replace the scene terrain's DEM with a raster the user picked; on an empty
+/// scene, create the terrain (so the Add menu can start from a DEM too).
 #[tauri::command]
 pub fn import_terrain_dem(
     forge: State<'_, Forge3dState>,
@@ -345,15 +346,21 @@ pub fn import_terrain_dem(
     let snapshot = session
         .state()
         .ok_or_else(|| "no project is open".to_owned())?;
-    let terrain = snapshot
-        .project
-        .terrain_object()
-        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
 
     let pair_f64 = |key: &str| -> Option<[f64; 2]> {
         let values = info.get(key)?.as_array()?;
         Some([values.first()?.as_f64()?, values.get(1)?.as_f64()?])
     };
+    let dimensions = info
+        .get("width")
+        .and_then(|value| value.as_u64())
+        .zip(info.get("height").and_then(|value| value.as_u64()))
+        .map(|(width, height)| [width as u32, height as u32]);
+    let elevation_range = info
+        .get("minElevation")
+        .and_then(|value| value.as_f64())
+        .zip(info.get("maxElevation").and_then(|value| value.as_f64()))
+        .map(|(low, high)| [low as f32, high as f32]);
     let asset = studio_core::Asset {
         id: studio_core::ids::new_id(),
         name: std::path::Path::new(&path)
@@ -365,34 +372,65 @@ pub fn import_terrain_dem(
         byte_size: metadata.len(),
     };
 
+    let mut commands = vec![Command::AddAsset {
+        asset: asset.clone(),
+    }];
+    match snapshot.project.terrain_object() {
+        Some(terrain) => commands.push(Command::SetTerrainDem {
+            id: terrain.id,
+            asset: asset.id,
+            dimensions,
+            elevation_range,
+            world_origin_xz: pair_f64("originXz"),
+            world_span_xz: pair_f64("spanXz"),
+        }),
+        None => {
+            let mut terrain = studio_core::TerrainObject::new(asset.id);
+            if let (Some(dimensions), Some(elevation_range)) = (dimensions, elevation_range) {
+                terrain = terrain.with_dem_info(
+                    dimensions,
+                    elevation_range,
+                    pair_f64("originXz"),
+                    pair_f64("spanXz"),
+                );
+            }
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .filter(|stem| !stem.trim().is_empty())
+                .unwrap_or_else(|| "Terrain".to_owned());
+            commands.push(Command::CreateObject {
+                object: studio_core::SceneObject {
+                    id: studio_core::ids::new_id(),
+                    name,
+                    parent: None,
+                    transform: studio_core::Transform::default(),
+                    visible: true,
+                    locked: false,
+                    kind: studio_core::ObjectKind::Terrain(terrain),
+                },
+                index: Some(0),
+            });
+        }
+    };
+
     session
-        .apply(Command::Batch {
-            commands: vec![
-                Command::AddAsset {
-                    asset: asset.clone(),
-                },
-                Command::SetTerrainDem {
-                    id: terrain.id,
-                    asset: asset.id,
-                    dimensions: info
-                        .get("width")
-                        .and_then(|value| value.as_u64())
-                        .zip(info.get("height").and_then(|value| value.as_u64()))
-                        .map(|(width, height)| [width as u32, height as u32]),
-                    elevation_range: info
-                        .get("minElevation")
-                        .and_then(|value| value.as_f64())
-                        .zip(info.get("maxElevation").and_then(|value| value.as_f64()))
-                        .map(|(low, high)| [low as f32, high as f32]),
-                    world_origin_xz: pair_f64("originXz"),
-                    world_span_xz: pair_f64("spanXz"),
-                },
-            ],
-        })
+        .apply(Command::Batch { commands })
         .map_err(|error| error.to_string())?;
     session
         .state()
         .ok_or_else(|| "no project is open".to_owned())
+}
+
+/// Size of a file on disk. The webview cannot stat, and asset registration
+/// validates that files are non-empty (`byte_size == 0` reads as "empty file").
+#[tauri::command]
+pub fn file_size(path: String) -> Result<u64, String> {
+    let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+    if metadata.is_dir() {
+        return Err(format!("{path} is a directory, not a file"));
+    }
+    Ok(metadata.len())
 }
 
 /// Attach (or clear) a raster overlay on the scene terrain.
@@ -531,6 +569,7 @@ pub fn render_still(
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
     path: Option<String>,
+    view: Option<RenderView>,
 ) -> Result<RenderFrame, String> {
     let (handoff, settings, project_name, project_path) = {
         let session = lock(&state)?;
@@ -580,7 +619,8 @@ pub fn render_still(
     }
 
     let request = RenderRequest::from_handoff(&handoff, settings.width, settings.height)?
-        .with_settings(&settings);
+        .with_settings(&settings)
+        .with_view(view.as_ref());
     let python = forge.probe(false).python;
     let mut frame = render.render(
         &python,
@@ -608,6 +648,7 @@ pub fn render_still(
             "azimuthDeg": request.sun_azimuth_deg,
             "elevationDeg": request.sun_elevation_deg,
             "intensity": request.sun_intensity,
+            "color": request.sun_color,
         },
         "terrain": {
             "dem": request.dem,

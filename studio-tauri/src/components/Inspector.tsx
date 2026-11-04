@@ -56,6 +56,13 @@ function TransformEditor({
           <NumberField label="Z" value={transform.scale.z} step={0.05} disabled={disabled} onCommit={axis("scale", "z")} />
         </div>
         <span className="group-label">Scale</span>
+        {object.kind.type === "terrain" && (
+          <p className="hint">
+            Terrain is georeferenced — its position and rotation are fixed so
+            the Solid view and the renderer frame the same ground. Use Vertical
+            scale (Terrain section) for relief.
+          </p>
+        )}
       </Section>
 
       <Section title="Object">
@@ -202,10 +209,14 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
         <select
           className="input input--select"
           value={light.kind}
+          title="Both views light with a directional sun; point lights arrive with Phase 5 lighting"
           onChange={(event) => commit({ ...light, kind: event.target.value as LightKind })}
         >
           <option value="directional">Directional</option>
-          <option value="point">Point</option>
+          {/* Neither the Solid view nor the renderer implements point lights;
+              creating one would silently diverge the two (renders fall back
+              to the default sun). Kept selectable *from* for legacy scenes. */}
+          <option value="point" disabled>Point — unsupported</option>
         </select>
       </label>
       <NumberField
@@ -225,59 +236,6 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
-/**
- * Materials overview. Materials live on mesh objects in Phase 5 (no shared
- * library yet), so this lists every mesh with its swatch and lets you jump to
- * the object that owns it.
- */
-function MaterialsPanel() {
-  const { state, actions } = useSession();
-  const meshes = (state?.project.scene.objects ?? []).filter(
-    (object) => object.kind.type === "mesh",
-  );
-  if (meshes.length === 0) {
-    return (
-      <Section title="Materials">
-        <p className="hint">
-          No mesh objects yet. Add one from the viewport's Add menu to give it a
-          material.
-        </p>
-      </Section>
-    );
-  }
-  return (
-    <Section title="Materials">
-      <ul className="material-list">
-        {meshes.map((object) => {
-          if (object.kind.type !== "mesh") return null;
-          const [r, g, b] = object.kind.material.baseColor;
-          const swatch = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
-          return (
-            <li key={object.id}>
-              <span className="material-swatch" style={{ background: swatch }} />
-              <span className="material-name">{object.name}</span>
-              <span className="mono material-meta">
-                {object.kind.material.texture ? "textured" : `r ${object.kind.material.roughness.toFixed(2)}`}
-              </span>
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => void actions.select([object.id])}
-              >
-                Edit
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-      <p className="hint">
-        Select a mesh to edit its material on the right. Materials are Studio-only
-        until the Forge3D pipeline gains a material path.
-      </p>
-    </Section>
-  );
-}
-
 function AssetsPanel() {
   const { state, actions } = useSession();
   const project = state?.project;
@@ -292,7 +250,9 @@ function AssetsPanel() {
                 (object.kind.source.type === "gltf"
                   ? object.kind.source.asset === asset.id
                   : object.kind.material.texture === asset.id)) ||
-              (object.kind.type === "terrain" && object.kind.asset === asset.id),
+              (object.kind.type === "terrain" &&
+                (object.kind.asset === asset.id ||
+                  object.kind.overlay?.asset === asset.id)),
           ).length;
           return (
             <li key={asset.id}>
@@ -473,10 +433,27 @@ function TerrainEditor({
         </button>
       </div>
 
-      <Section title="Overlay">
+      <Section title="Material">
         <div className="readout readout--compact">
-          <dt>Raster</dt>
-          <dd>{overlayAsset?.name ?? "none"}</dd>
+          <dt>Engine set</dt>
+          <dd>terrain_default()</dd>
+          <dt>Layers</dt>
+          <dd>rock · grass · dirt · snow</dd>
+          <dt>Texture maps</dt>
+          <dd>none found — flat layer colours</dd>
+        </div>
+        <p className="hint">
+          The engine shades terrain from four triplanar PBR layers and resolves
+          their rock/grass/dirt/snow maps from{" "}
+          <span className="mono">assets/materials/</span> (or{" "}
+          <span className="mono">FORGE3D_MATERIAL_DIR</span>). This checkout
+          ships none, so the default renders flat. Attach an albedo raster to
+          give the surface imagery — new Bryce projects come with the NAIP
+          orthophoto already attached.
+        </p>
+        <div className="readout readout--compact">
+          <dt>Albedo raster</dt>
+          <dd>{overlayAsset?.name ?? "none — engine default"}</dd>
         </div>
         {terrain.overlay && (
           <label className="field">
@@ -502,7 +479,7 @@ function TerrainEditor({
             className="button button--small"
             onClick={() => void actions.importTerrainOverlay()}
           >
-            {terrain.overlay ? "Replace overlay…" : "Add overlay…"}
+            {terrain.overlay ? "Replace albedo raster…" : "Add albedo raster…"}
           </button>
           {terrain.overlay && (
             <button
@@ -515,16 +492,19 @@ function TerrainEditor({
           )}
         </div>
         <p className="hint">
-          Land cover or orthophoto draped on the DEM. Colours are composited after
-          lighting, so categorical palettes survive.
+          The albedo raster is draped over the DEM and composited after
+          lighting, so categorical palettes survive. This is also what the
+          Forge3D renderer consumes; the engine has no other material
+          override for terrain.
         </p>
       </Section>
 
       <p className="hint">
         The slider is the heightfield detail the Solid view builds from this DEM
         (32 = blocky, 512 = close to the source grid). The renderer always reads
-        the original GeoTIFF, so Rendered is unaffected by this setting — press
-        End to put the renderer's camera where your viewport is looking.
+        the original GeoTIFF, so Rendered is unaffected by this setting — and
+        every render uses the camera you are looking through, so orbit and press
+        Re-render to see it from there.
       </p>
     </Section>
   );
@@ -548,8 +528,9 @@ function ImportedMesh({ asset }: { object: SceneObject; asset: Asset | undefined
         </dd>
       </div>
       <p className="hint">
-        Imported meshes are moved, rotated, and scaled like any other object.
-        Material overrides and asset relinking arrive in Phase 5.
+        Imported meshes are moved, rotated, and scaled like any other object;
+        Solid draws the file's own materials. A Studio-side material override
+        arrives with Phase 5 — asset relinking lives in the Assets panel.
       </p>
     </Section>
   );
@@ -602,7 +583,6 @@ export function Inspector() {
             </div>
           </Section>
           <RenderSettingsEditor />
-          <MaterialsPanel />
           <AssetsPanel />
           <p className="hint">Select an object to edit its properties.</p>
         </div>
@@ -674,12 +654,19 @@ export function Inspector() {
           </div>
         </Section>
 
-        <TransformEditor object={object} transform={object.transform} disabled={locked} />
+        <TransformEditor
+          object={object}
+          transform={object.transform}
+          disabled={locked || object.kind.type === "terrain"}
+        />
 
         {meshSource?.type === "primitive" && (
           <MeshEditor object={object} primitive={meshSource.primitive} />
         )}
-        {object.kind.type === "mesh" && (
+        {/* A Studio material only reaches primitives today (the glTF loader
+            draws the file's own materials), so showing the editor for glTF
+            assets would be a control that does nothing — Phase 5 owns it. */}
+        {object.kind.type === "mesh" && meshSource?.type === "primitive" && (
           <MaterialEditor object={object} material={object.kind.material} />
         )}
         {meshSource?.type === "gltf" && (

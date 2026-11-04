@@ -78,6 +78,17 @@ function starterProject(name: string, preset: string = "bryce"): Project {
     kind: "dem" as const,
     byteSize: preset === "swiss" ? 50_000_000 : 3_321_356,
   };
+  // Mirrors the desktop starter: the Bryce scene ships the NAIP albedo.
+  const naipAsset =
+    preset === "swiss"
+      ? null
+      : {
+          id: newId(),
+          name: "Bryce_Canyon_naip.tif",
+          path: "/preview/Bryce_Canyon_naip.tif",
+          kind: "orthophoto" as const,
+          byteSize: 28_000_000,
+        };
   const cube = primitiveObject("Cube", { type: "cube", size: 2 });
   const terrain: SceneObject = {
     id: newId(),
@@ -95,7 +106,9 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       worldOriginXz: preset === "swiss" ? [0, 0] : [395_998.5, -4_165_574.5],
       worldSpanXz: preset === "swiss" ? [352_427, 225_653] : [4000, 3800],
       elevationRange: preset === "swiss" ? [189, 4220] : [2099.23, 2553.58],
-      overlay: null,
+      overlay: naipAsset
+        ? { asset: naipAsset.id, opacity: 0.82, preserveColors: true }
+        : null,
     },
   };
   const camera: SceneObject = {
@@ -142,7 +155,12 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       objects: preset === "empty" ? [cube, camera, light] : [terrain, camera, light],
       activeCamera: camera.id,
     },
-    assets: preset === "empty" ? [] : [demAsset],
+    assets:
+      preset === "empty"
+        ? []
+        : naipAsset
+          ? [demAsset, naipAsset]
+          : [demAsset],
     selection: [],
     workspace: "studio",
     viewport: { mode: "solid", gridVisible: true },
@@ -276,9 +294,13 @@ export function createMockBridge(): StudioBridge {
     })();
 
     switch (command.type) {
-      case "setTransform":
-        find(command.id).transform = structuredClone(command.transform);
+      case "setTransform": {
+        const object = find(command.id);
+        if (object.kind.type === "terrain")
+          throw new Error("terrain position is fixed (the DEM is georeferenced)");
+        object.transform = structuredClone(command.transform);
         return { label, affected: [command.id] };
+      }
 
       case "renameObject": {
         if (!command.name.trim()) throw new Error("object name must not be empty");
@@ -338,6 +360,11 @@ export function createMockBridge(): StudioBridge {
         const source = command.object.kind.type === "mesh" ? command.object.kind.source : null;
         if (source?.type === "gltf" && !requireProject().assets.some((a) => a.id === source.asset))
           throw new Error("asset does not exist");
+        if (command.object.kind.type === "terrain") {
+          const terrainAsset = command.object.kind.asset;
+          if (!requireProject().assets.some((a) => a.id === terrainAsset))
+            throw new Error("asset does not exist");
+        }
         const index = command.index ?? scene.objects.length;
         scene.objects.splice(index, 0, structuredClone(command.object));
         return { label, affected: [command.object.id] };
@@ -359,6 +386,8 @@ export function createMockBridge(): StudioBridge {
         const index = scene.objects.findIndex((o) => o.id === command.id);
         if (index < 0) throw new Error("object does not exist");
         const source = scene.objects[index];
+        if (source.kind.type === "terrain")
+          throw new Error("a scene holds one terrain; use Change DEM to replace it");
         const copy: SceneObject = {
           ...structuredClone(source),
           id: newId(),
@@ -427,6 +456,8 @@ export function createMockBridge(): StudioBridge {
       case "setAssetPath": {
         const asset = requireProject().assets.find((entry) => entry.id === command.id);
         if (!asset) throw new Error("asset does not exist");
+        // Mirror the core: relink re-runs the non-empty invariant.
+        validateAsset({ ...asset, path: command.path, byteSize: command.byteSize });
         asset.path = command.path;
         asset.byteSize = command.byteSize;
         return { label, affected: [] };
@@ -611,6 +642,10 @@ export function createMockBridge(): StudioBridge {
       throw new Error("textures need the desktop shell");
     },
 
+    // The harness has no filesystem: a nonzero placeholder keeps asset
+    // validation (`byte_size > 0`) usable; real sizes come from the shell.
+    fileSize: async (): Promise<number> => 1,
+
     readMeshFile: async (): Promise<MeshFilePayload> => {
       throw new Error(
         "glTF import needs the desktop shell: the browser preview cannot read files",
@@ -671,7 +706,7 @@ export function createMockBridge(): StudioBridge {
       );
     },
 
-    renderStill: async (_path?: string | null): Promise<RenderFrame> => {
+    renderStill: async (_path?: string | null, _view?: RenderView): Promise<RenderFrame> => {
       throw new Error("Rendered mode needs the desktop shell");
     },
 

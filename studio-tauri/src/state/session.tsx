@@ -8,6 +8,7 @@ import {
 } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 
+import { viewStore } from "../viewport/viewStore";
 import { bridge } from "../bridge/env";
 import { SessionContext, type SessionApi } from "./session-context";
 import { base64ToArrayBuffer, inspectGltf, putAssetBytes } from "../viewport/assets";
@@ -23,6 +24,7 @@ import type {
   RecoveryEntry,
   SessionState,
   ShellInfo,
+  RenderView,
   Tool,
   ToolSpace,
 } from "../bridge/types";
@@ -273,6 +275,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     width: number;
     height: number;
     quality: "preview" | "material" | "final";
+    /** The viewport camera at the moment the frame was requested. */
+    view: RenderView | undefined;
   } | null>(null);
   const renderInFlight = useRef(false);
 
@@ -285,7 +289,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         pendingRender.current = null;
         setRender((current) => ({ ...current, busy: true, error: null }));
         try {
-          const frame = await bridge.renderFrame(request.width, request.height, request.quality);
+          const frame = await bridge.renderFrame(request.width, request.height, request.quality, request.view);
           setRender({ frame, busy: false, error: null });
         } catch (cause) {
           setRender({
@@ -302,7 +306,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const renderViewport = useCallback(
     async (width: number, height: number, quality: "preview" | "material" | "final" = "preview") => {
-      pendingRender.current = { width, height, quality };
+      pendingRender.current = { width, height, quality, view: viewStore.current ?? undefined };
       await pumpRender();
     },
     [pumpRender],
@@ -326,16 +330,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       });
       const path = typeof picked === "string" ? picked : null;
       if (!path) return;
-      const metadata = { byteSize: 0 };
+      // Asset registration rejects empty files (`byte_size == 0` reads as
+      // "empty"), so stat the real size up front — the webview cannot.
+      const byteSize = await bridge.fileSize(path);
       const asset = {
         id: crypto.randomUUID(),
         name: path.split(/[\\/]/).pop() ?? "texture.png",
         path,
         kind: "orthophoto" as const,
-        byteSize: metadata.byteSize,
+        byteSize,
       };
-      // The shell fills the real size on the next save; registration is enough
-      // for the viewport to load the file.
       const applied = await applyCommand({
         type: "batch",
         commands: [
@@ -370,7 +374,13 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         const picked = await openDialog({ multiple: false });
         const path = typeof picked === "string" ? picked : null;
         if (!path) return;
-        await applyCommand({ type: "setAssetPath", id: assetId, path, byteSize: 0 });
+        // Same non-empty invariant as AddAsset: stat, don't guess.
+        await applyCommand({
+          type: "setAssetPath",
+          id: assetId,
+          path,
+          byteSize: await bridge.fileSize(path),
+        });
         flash("Asset relinked");
       } catch (cause) {
         fail(cause);
@@ -389,7 +399,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!path) return;
       setBusy(true);
       setState(await bridge.importTerrainDem(path));
-      flash(`DEM replaced with ${path.split(/[\\/]/).pop()}`);
+      flash(`Terrain DEM set to ${path.split(/[\\/]/).pop()}`);
     } catch (cause) {
       fail(cause);
     } finally {
@@ -453,7 +463,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const renderStillTo = useCallback(async (path: string | null) => {
     setRender((current) => ({ ...current, busy: true, error: null }));
     try {
-      const frame = await bridge.renderStill(path);
+      const frame = await bridge.renderStill(path, viewStore.current ?? undefined);
       setRender({ frame, busy: false, error: null });
       flash(frame.path ? `Saved ${frame.path}` : "Rendered");
     } catch (cause) {
@@ -540,9 +550,29 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
 
       async renderStill() {
-        // Default destination: <project>/renders/<name>-<timestamp>.png with a
-        // JSON sidecar, so a render can always be traced to its settings.
-        await renderStillTo(null);
+        // The still goes where the user points the save dialog; the folder
+        // defaults to <project>/renders/<name>-<timestamp>.png so a render
+        // can always be traced to its settings (JSON sidecar next to it).
+        if (!state) return;
+        if (bridge.kind !== "tauri") {
+          await renderStillTo(null);
+          return;
+        }
+        const name = (state.project.name || "untitled").replace(/[^A-Za-z0-9-_]+/g, "-");
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const slash = Math.max(
+          state.path?.lastIndexOf("/") ?? -1,
+          state.path?.lastIndexOf("\\") ?? -1,
+        );
+        const dir = state.path && slash > 0 ? state.path.slice(0, slash) : null;
+        const picked = await saveDialog({
+          defaultPath: dir
+            ? `${dir}/renders/${name}-${stamp}.png`
+            : `${name}-${stamp}.png`,
+          filters: [{ name: "PNG image", extensions: ["png"] }],
+        });
+        if (!picked) return;
+        await renderStillTo(picked);
       },
 
       async saveProject(saveAs = false) {

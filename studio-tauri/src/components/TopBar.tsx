@@ -156,7 +156,7 @@ export function TopBar() {
           type="button"
           className="button button--render"
           disabled={!state || busy}
-          title="Render a full-resolution still with the Forge3D pipeline"
+          title="Render a full-resolution still — choose where to save it"
           onClick={() => void actions.renderStill()}
         >
           Render
