@@ -446,21 +446,21 @@ export function Viewport3D() {
       const now = performance.now();
       if (now - lastRenderRequest < 120) return;
       lastRenderRequest = now;
-      const { width, height } = sizeRef.current;
+      const target = requestSizeRef.current(renderQualityRef.current);
       void actionsRef.current.renderViewport(
-        Math.max(320, Math.round(width)),
-        Math.max(240, Math.round(height)),
-        renderQuality,
+        target.width,
+        target.height,
+        renderQualityRef.current,
       );
     });
 
     orbit.addEventListener("end", () => {
       if (!modeRef.current) return;
-      const { width, height } = sizeRef.current;
+      const target = requestSizeRef.current(renderQualityRef.current);
       void actionsRef.current.renderViewport(
-        Math.max(320, Math.round(width)),
-        Math.max(240, Math.round(height)),
-        renderQuality,
+        target.width,
+        target.height,
+        renderQualityRef.current,
       );
     });
 
@@ -702,6 +702,7 @@ export function Viewport3D() {
     if (cameraView) {
       if (activeCamera && activeCamera.kind.type === "camera") {
         const transform = activeCamera.transform;
+        runtime.camera.up.set(0, 1, 0);
         runtime.camera.position.set(
           transform.translation.x,
           transform.translation.y,
@@ -716,8 +717,11 @@ export function Viewport3D() {
           ),
         );
         runtime.camera.fov = activeCamera.kind.fovDeg;
-        runtime.camera.near = activeCamera.kind.near;
-        runtime.camera.far = activeCamera.kind.far;
+        // Keep the projection usable even if the stored values are odd: a huge
+        // near plane or a far plane behind the camera renders a black frame.
+        const distance = runtime.camera.position.length();
+        runtime.camera.near = Math.max(0.01, Math.min(activeCamera.kind.near, distance * 0.1));
+        runtime.camera.far = Math.max(activeCamera.kind.far, distance * 8);
         runtime.camera.updateProjectionMatrix();
         runtime.orbit.enabled = false;
         // Clear a previous camera warning without wiping an asset error.
@@ -833,12 +837,33 @@ export function Viewport3D() {
   }, []);
 
   const mode = state?.project.viewport.mode ?? "solid";
+
+  /** Frame size per quality: material preview renders smaller (it is a look-dev
+   *  pass, not the final image). */
+  const requestSize = useCallback(
+    (quality: "preview" | "material" | "final") =>
+      quality === "material"
+        ? {
+            width: Math.round(Math.max(320, size.width) * 0.65),
+            height: Math.round(Math.max(240, size.height) * 0.65),
+          }
+        : {
+            width: Math.max(320, Math.round(size.width)),
+            height: Math.max(240, Math.round(size.height)),
+          },
+    [size.height, size.width],
+  );
   // Material preview and Rendered both show rendered frames; only the quality
   // preset differs.
   const renderedMode = mode === "rendered" || mode === "material";
-  const renderQuality = mode === "material" ? "material" : "preview";
+  const renderQuality: "preview" | "material" | "final" =
+    mode === "material" ? "material" : "preview";
   const modeRef = useRef(renderedMode);
   modeRef.current = renderedMode;
+  const renderQualityRef = useRef(renderQuality);
+  renderQualityRef.current = renderQuality;
+  const requestSizeRef = useRef(requestSize);
+  requestSizeRef.current = requestSize;
   const sizeRef = useRef(size);
   sizeRef.current = size;
   const stateRef = useRef(state);
@@ -850,10 +875,12 @@ export function Viewport3D() {
   const cameraTransformFromView = useCallback((): Transform | null => {
     const runtime = runtimeRef.current;
     if (!runtime) return null;
-    const aim = new THREE.Object3D();
+    // `Object3D.lookAt` aims +Z at the target; only cameras and lights aim -Z.
+    // Using a plain Object3D made the captured camera face away from the scene,
+    // which is why camera view went black.
+    const aim = new THREE.PerspectiveCamera();
     aim.position.copy(runtime.camera.position);
-    // The renderer's terrain camera is an orbit around the scene centre, so the
-    // captured camera must look there; otherwise no render can match it.
+    aim.up.set(0, 1, 0);
     aim.lookAt(0, 0, 0);
     const euler = new THREE.Euler().setFromQuaternion(aim.quaternion, "ZYX");
     return {

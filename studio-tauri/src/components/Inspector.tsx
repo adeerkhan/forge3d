@@ -225,6 +225,59 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
+/**
+ * Materials overview. Materials live on mesh objects in Phase 5 (no shared
+ * library yet), so this lists every mesh with its swatch and lets you jump to
+ * the object that owns it.
+ */
+function MaterialsPanel() {
+  const { state, actions } = useSession();
+  const meshes = (state?.project.scene.objects ?? []).filter(
+    (object) => object.kind.type === "mesh",
+  );
+  if (meshes.length === 0) {
+    return (
+      <Section title="Materials">
+        <p className="hint">
+          No mesh objects yet. Add one from the viewport's Add menu to give it a
+          material.
+        </p>
+      </Section>
+    );
+  }
+  return (
+    <Section title="Materials">
+      <ul className="material-list">
+        {meshes.map((object) => {
+          if (object.kind.type !== "mesh") return null;
+          const [r, g, b] = object.kind.material.baseColor;
+          const swatch = `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+          return (
+            <li key={object.id}>
+              <span className="material-swatch" style={{ background: swatch }} />
+              <span className="material-name">{object.name}</span>
+              <span className="mono material-meta">
+                {object.kind.material.texture ? "textured" : `r ${object.kind.material.roughness.toFixed(2)}`}
+              </span>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => void actions.select([object.id])}
+              >
+                Edit
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="hint">
+        Select a mesh to edit its material on the right. Materials are Studio-only
+        until the Forge3D pipeline gains a material path.
+      </p>
+    </Section>
+  );
+}
+
 function AssetsPanel() {
   const { state, actions } = useSession();
   const project = state?.project;
@@ -549,6 +602,7 @@ export function Inspector() {
             </div>
           </Section>
           <RenderSettingsEditor />
+          <MaterialsPanel />
           <AssetsPanel />
           <p className="hint">Select an object to edit its properties.</p>
         </div>
