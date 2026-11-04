@@ -10,6 +10,7 @@
 
 import type {
   AutosaveStatus,
+  CapabilityTable,
   Command,
   EditResult,
   EngineStatus,
@@ -28,6 +29,9 @@ import type {
 export interface StudioBridge {
   readonly kind: "tauri" | "mock";
   info(): Promise<ShellInfo>;
+  /** Per-parameter capability table; `null` in the browser preview (the mock
+   *  has no shell — the Rust table is covered by studio-core tests). */
+  capabilityTable(): Promise<CapabilityTable | null>;
   state(): Promise<SessionState | null>;
   newProject(name?: string | null, preset?: string | null): Promise<SessionState>;
   scenePresets(): Promise<ScenePreset[]>;
@@ -47,6 +51,9 @@ export interface StudioBridge {
   readMeshFile(path: string): Promise<MeshFilePayload>;
   /** Read a PNG/JPEG for a viewport texture. */
   readImageAsset(path: string): Promise<MeshFilePayload>;
+  /** Decoded, downsampled PNG of a raster overlay — the Solid viewport
+   *  drapes this on the terrain (the webview cannot decode GeoTIFF). */
+  rasterPreview(path: string, width?: number): Promise<MeshFilePayload>;
   /** Size of a file on disk — asset registration validates non-empty files. */
   fileSize(path: string): Promise<number>;
   /** Sample a DEM into a heightfield for the Studio viewport. */

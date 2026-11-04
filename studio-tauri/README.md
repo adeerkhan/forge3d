@@ -44,6 +44,14 @@ sync, diagnostics).
 | **Rendered viewport mode (embedded)** | `studio_render.py`, `render.rs` | done |
 | Render size control (viewport / DEM native / project) | `Viewport3D.tsx` render bar | done |
 | Render still to disk (+ JSON sidecar), render settings UI | `render_still`, `RenderSettingsEditor` | done |
+| **Phase 5** — capability-tagged material/light/camera parameters | `workspace.rs` table → `capability_table` → Inspector badges | done |
+| Material inspector (terrain albedo + engine summary, mesh base colour/texture) | `Inspector.tsx` | done |
+| Texture asset management (attach, replace, remove; non-empty invariant) | `session.tsx`, `commands.rs` | done |
+| Environment/IBL controls (sky background, environment intensity) | `RenderSettings`, `RenderSettingsEditor` | done |
+| Basic lights & camera properties (direction/intensity/colour, fov/clip) | `Inspector.tsx`, `render.rs` | done |
+| Asset relinking and dependency counts | `Inspector.tsx`, `command.rs` | done |
+| Solid-view albedo drape (raster → PNG via engine python) | `raster_preview`, `Viewport3D.tsx` | done |
+| glTF node selection (model field exists: `MeshSource::Gltf.node`) | — | pending |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -265,11 +273,13 @@ the render handoff.
   (`experiments/swiss-land-cover.py` documents the engine-level case).
 - **Raster overlays are the terrain's albedo.** The engine has no other terrain
   material override; a draped raster (the Bryce NAIP orthophoto) is how the
-  surface gets imagery. The inspector shows it under the terrain's **Material**
-  section — `Add albedo raster…` / `Replace…` / `Remove` — alongside what the
-  engine actually uses (`MaterialSet.terrain_default()`, four triplanar layers,
-  no texture maps shipped in this checkout, so the default is flat colours until
-  an albedo is attached or maps appear in `assets/materials/`).
+  surface gets imagery — Solid, Material, and Rendered all drape it (Solid
+  decodes the raster through the shell's `raster_preview`). The inspector
+  shows it under the terrain's **Material** section — `Add albedo raster…` /
+  `Replace…` / `Remove` — alongside what the engine actually uses
+  (`MaterialSet.terrain_default()`, four triplanar layers, no texture maps
+  shipped in this checkout, so the default is flat colours until an albedo is
+  attached or maps appear in `assets/materials/`).
 
 ## Browser preview harness
 
@@ -282,7 +292,7 @@ Rust test.
 ## Not yet implemented (deliberately)
 
 - Geometry export for primitives — Rendered still draws terrain only
-- Shared material library, environments/IBL controls, glTF node selection — **Phase 5**
+- Shared material library and glTF node selection — **Phase 5** (environment/IBL controls, capability badges, and the Solid albedo drape shipped)
 - Render queue and cancellation — **Phase 7**
 - Timeline, keyframes, frame export — **Phase 6**
 

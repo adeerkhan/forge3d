@@ -300,6 +300,13 @@ pub fn terrain_preview(
     crate::forge3d::sample_terrain(&python, &path, resolution.unwrap_or(96))
 }
 
+/// Per-parameter capability table: what each material/light/camera parameter
+/// actually reaches in the current renderers (studio-core is the one source).
+#[tauri::command]
+pub fn capability_table() -> studio_core::CapabilityTable {
+    studio_core::parameter_capabilities()
+}
+
 /// Cheap health check used by the UI on boot; also proves the bridge works.
 #[tauri::command]
 pub fn shell_info() -> ShellInfo {
@@ -525,6 +532,31 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
     })
 }
 
+/// Decoded, downsampled PNG of a raster overlay for the Solid viewport's
+/// terrain drape — the webview cannot decode GeoTIFF, so the engine python
+/// does it and hands back a PNG the canvas can display.
+#[tauri::command]
+pub fn raster_preview(
+    forge: State<'_, Forge3dState>,
+    path: String,
+    width: Option<u32>,
+) -> Result<MeshFilePayload, String> {
+    let python = forge.probe(false).python;
+    let width = width.unwrap_or(2048).clamp(64, 4096);
+    let bytes = crate::forge3d::raster_preview_png(&python, &path, width)?;
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "overlay".to_owned());
+    Ok(MeshFilePayload {
+        path,
+        name,
+        kind: studio_core::AssetKind::Orthophoto,
+        byte_size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
 #[tauri::command]
 pub fn render_frame(
     render: State<'_, RenderState>,
@@ -637,6 +669,8 @@ pub fn render_still(
         "exposure": request.exposure,
         "shadows": request.shadows,
         "ambientOcclusion": request.ambient_occlusion,
+        "sky": request.sky,
+        "iblIntensity": request.ibl_intensity,
         "camera": {
             "phiDeg": request.phi_deg,
             "thetaDeg": request.theta_deg,

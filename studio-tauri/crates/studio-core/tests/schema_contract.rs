@@ -53,7 +53,15 @@ fn project_document_key_shape_is_stable() {
     assert_eq!(value["viewport"]["mode"], "solid");
     expect_keys(
         &value["render"],
-        &["width", "height", "exposure", "shadows", "ambientOcclusion"],
+        &[
+            "width",
+            "height",
+            "exposure",
+            "shadows",
+            "ambientOcclusion",
+            "sky",
+            "iblIntensity",
+        ],
     );
 }
 

@@ -302,3 +302,44 @@ fn extension_constant_matches_saved_file_names() {
     save_atomic(&path, &Project::new(UNTITLED)).unwrap();
     assert!(Path::new(&path).exists());
 }
+
+#[test]
+fn materials_and_environment_settings_survive_save_and_reopen() {
+    // Phase 5 exit criterion: materials and render configuration persist and
+    // reload predictably — one mesh material edit plus the environment knobs.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("phase5.studio3d");
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    let cube = ids_of_kind(editor.project(), "mesh")[0];
+
+    editor
+        .apply(Command::SetMeshMaterial {
+            id: cube,
+            material: studio_core::Material {
+                base_color: [0.9, 0.1, 0.1],
+                roughness: 0.33,
+                metallic: 0.5,
+                texture: None,
+            },
+        })
+        .unwrap();
+    let mut render = editor.project().render;
+    render.sky = false;
+    render.ibl_intensity = 0.4;
+    editor.apply(Command::SetRenderSettings { render }).unwrap();
+
+    save_atomic(&path, editor.project()).unwrap();
+    let reloaded = load(&path).unwrap();
+
+    let mesh = reloaded
+        .scene
+        .objects
+        .iter()
+        .find(|object| object.id == cube)
+        .expect("cube survives");
+    let material = mesh.mesh().expect("mesh kind").material;
+    assert_eq!(material.base_color, [0.9, 0.1, 0.1]);
+    assert!((material.roughness - 0.33).abs() < 1e-6);
+    assert!(!reloaded.render.sky, "sky setting persists");
+    assert!((reloaded.render.ibl_intensity - 0.4).abs() < 1e-6);
+}

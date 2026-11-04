@@ -76,6 +76,7 @@ pub fn run() {
             commands::terrain_preview,
             commands::import_terrain_dem,
             commands::read_image_asset,
+            commands::raster_preview,
             commands::set_terrain_overlay,
             commands::forge3d_probe,
             commands::render_frame,
@@ -83,6 +84,7 @@ pub fn run() {
             commands::render_status,
             commands::render_stop,
             commands::shell_info,
+            commands::capability_table,
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Forge3D Studio");

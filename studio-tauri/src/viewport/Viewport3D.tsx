@@ -197,9 +197,10 @@ function contentSignature(object: SceneObject, terrainResolution: number): strin
     case "mesh":
       return `mesh:${JSON.stringify(object.kind.source)}:${JSON.stringify(object.kind.material)}`;
     case "terrain":
-      // The preview resolution is part of the identity: changing it must rebuild
-      // the mesh, which is exactly what used to be ignored.
-      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}`;
+      // Preview resolution AND the draped albedo are part of the identity:
+      // changing either must rebuild (and re-drape) the mesh, which is exactly
+      // what used to be ignored.
+      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}:${object.kind.overlay?.asset ?? "none"}:${object.kind.overlay?.opacity ?? ""}`;
     case "camera":
       return `camera:${object.kind.fovDeg}`;
     case "light":
@@ -303,6 +304,38 @@ export function Viewport3D() {
                   texture.colorSpace = THREE.SRGBColorSpace;
                   texture.wrapS = THREE.RepeatWrapping;
                   texture.wrapT = THREE.RepeatWrapping;
+                  resolve(texture);
+                },
+                undefined,
+                reject,
+              );
+            }),
+        );
+      cache.set(path, pending);
+      pending.catch(() => cache.delete(path));
+    }
+    return pending;
+  }, []);
+
+  /** Decoded drape texture for a terrain overlay (shell-side GeoTIFF decode;
+   *  cached by path — opacity is applied on the material, not the texture). */
+  const overlayTextureCache = useRef(new Map<string, Promise<THREE.Texture>>());
+  const loadOverlayTexture = useCallback((path: string): Promise<THREE.Texture> => {
+    const cache = overlayTextureCache.current;
+    let pending = cache.get(path);
+    if (!pending) {
+      pending = bridge
+        .rasterPreview(path, 2048)
+        .then(
+          (payload) =>
+            new Promise<THREE.Texture>((resolve, reject) => {
+              const loader = new THREE.TextureLoader();
+              loader.load(
+                `data:image/png;base64,${payload.base64}`,
+                (texture) => {
+                  texture.colorSpace = THREE.SRGBColorSpace;
+                  texture.wrapS = THREE.ClampToEdgeWrapping;
+                  texture.wrapT = THREE.ClampToEdgeWrapping;
                   resolve(texture);
                 },
                 undefined,
@@ -677,7 +710,7 @@ export function Viewport3D() {
           const asset = project.assets.find((entry) => entry.id === source.asset);
           if (!asset) {
             setProblem(
-              `Object "${object.name}" references a missing asset. Relinking arrives in Phase 5.`,
+              `Object "${object.name}" references a missing asset — relink it in the Assets panel.`,
             );
             continue;
           }
@@ -704,10 +737,14 @@ export function Viewport3D() {
         const asset = project.assets.find((entry) => entry.id === terrainKind.asset);
         if (!asset) {
           setProblem(
-            `Object "${object.name}" references a missing DEM. Relinking arrives in Phase 5.`,
+            `Object "${object.name}" references a missing DEM — relink it in the Assets panel.`,
           );
           continue;
         }
+        const overlay = terrainKind.overlay ?? null;
+        const overlayAsset = overlay
+          ? project.assets.find((entry) => entry.id === overlay.asset)
+          : undefined;
         group.add(buildLoadingPlaceholder());
         const expected = signature;
         const zScale = terrainKind.zScale;
@@ -715,8 +752,30 @@ export function Viewport3D() {
           .then((preview) => {
             if (group.userData.signature !== expected) return;
             disposeChildren(group);
-            group.add(buildTerrainMesh(preview, zScale));
+            const mesh = buildTerrainMesh(preview, zScale);
+            group.add(mesh);
             setProblem(null);
+            // Drape the albedo like Material/Rendered do, so all three views
+            // show the same ground. The shell decodes the raster; the browser
+            // preview has no file access and keeps the elevation ramp.
+            if (overlay && overlayAsset?.path && bridge.kind === "tauri") {
+              loadOverlayTexture(overlayAsset.path)
+                .then((texture) => {
+                  if (group.userData.signature !== expected) return;
+                  const material = mesh.material as THREE.MeshStandardMaterial;
+                  material.map = texture;
+                  material.vertexColors = false;
+                  material.color.setRGB(1, 1, 1);
+                  material.transparent = overlay.opacity < 1;
+                  material.opacity = overlay.opacity;
+                  material.needsUpdate = true;
+                })
+                .catch((cause) => {
+                  setProblem(
+                    `Could not drape ${overlayAsset.name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+                  );
+                });
+            }
           })
           .catch((cause) => {
             setProblem(

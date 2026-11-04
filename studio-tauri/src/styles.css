@@ -794,6 +794,21 @@ kbd {
   color: var(--vp-camera);
 }
 
+/* Per-parameter capability badges (Inspector). */
+.capability-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.capability-badges .badge {
+  background: var(--bg-panel-alt);
+  color: var(--text-dim);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
 .multi-list {
   list-style: none;
   margin: 0;

@@ -251,6 +251,12 @@ class StudioRenderer:
             float(raw_target[2]) * self.scale,
         ]
 
+        # The shader's u_ibl.intensity comes from the IBL object itself
+        # (prepare_ibl_bind_group reads env_maps.intensity), not from
+        # TerrainRenderParams — set it here so the project's Environment
+        # intensity actually reaches the frame.
+        self.ibl.intensity = float(request.get("iblIntensity", 1.0))
+
         settings = make_terrain_params_config(
             size_px=(width, height),
             render_scale=1.0,
@@ -282,6 +288,7 @@ class StudioRenderer:
             # colour so Rendered matches the Solid view's lighting hue.
             sun_color=tuple(float(c) for c in sun.get("color", (1.0, 0.97, 0.92))),
             ibl_enabled=True,
+            ibl_intensity=float(request.get("iblIntensity", 1.0)),
             exposure=float(request.get("exposure", 1.35)),
             # The SSAO pass costs ~4.8 s per frame by itself (measured); every
             # other feature combined is ~150 ms. Viewport frames therefore skip

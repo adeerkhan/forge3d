@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use serde::Serialize;
 
 /// Bundled DEMs offered as starter scenes. `id` is what the UI sends back.
@@ -418,6 +419,105 @@ pub fn sample_terrain(
             .to_owned());
     }
     Ok(value)
+}
+
+/// Decoded raster preview for the Solid viewport's terrain drape: a
+/// downsampled RGBA PNG, colour handling mirroring
+/// `studio_render.build_overlay`'s preserve-colours path so Solid and
+/// Rendered drape the same pixels. The webview cannot decode GeoTIFF, hence
+/// the engine-python round trip.
+const RASTER_PREVIEW_SCRIPT: &str = r#"
+import base64, io, json, sys
+
+path = sys.argv[1]
+width = max(64, min(4096, int(sys.argv[2])))
+try:
+    import numpy as np
+    import rasterio
+    from PIL import Image
+    from rasterio.enums import Resampling
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": "raster preview needs the engine python: %s" % (exc,)}))
+    raise SystemExit(0)
+
+try:
+    with rasterio.open(path) as src:
+        bands = min(3, src.count)
+        height = max(1, int(round(width * src.height / max(1, src.width))))
+        planes = [
+            src.read(b + 1, out_shape=(height, width), resampling=Resampling.average, masked=True)
+            for b in range(bands)
+        ]
+    rgb = np.zeros((height, width, 3), dtype=np.float32)
+    for index in range(bands):
+        rgb[:, :, index] = np.clip(np.asarray(planes[index].filled(0.0), dtype=np.float32), 0.0, None)
+    if bands == 1:
+        rgb[:, :, 1] = rgb[:, :, 0]
+        rgb[:, :, 2] = rgb[:, :, 0]
+    # Preserve-colours contract (matches the renderer): 8-bit passes through,
+    # wider integers are bit-shifted down to display range.
+    peak = max((float(np.ma.max(plane)) if plane.count() else 0.0) for plane in planes)
+    if peak > 255.0:
+        rgb *= 255.0 / 65535.0
+    valid = np.ones((height, width), dtype=bool)
+    for index in range(bands):
+        valid &= ~np.ma.getmaskarray(planes[index])
+    rgba = np.concatenate(
+        [np.clip(rgb, 0.0, 255.0).astype(np.uint8), np.where(valid, 255, 0).astype(np.uint8)[..., None]],
+        axis=2,
+    )
+    buffer = io.BytesIO()
+    Image.fromarray(rgba, "RGBA").save(buffer, format="PNG")
+    print(json.dumps({"ok": True, "png": base64.b64encode(buffer.getvalue()).decode("ascii")}))
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": str(exc)}))
+    raise SystemExit(0)
+"#;
+
+/// Decode a raster into a downsampled PNG for the Solid viewport's drape.
+pub fn raster_preview_png(python: &str, path: &str, width: u32) -> Result<Vec<u8>, String> {
+    let mut command = Command::new(python);
+    command
+        .arg("-c")
+        .arg(RASTER_PREVIEW_SCRIPT)
+        .arg(path)
+        .arg(width.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(extra) = python_path_entries() {
+        command.env("PYTHONPATH", extra);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not run {python}: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| {
+            format!(
+                "the raster preview produced no output: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("the raster preview returned invalid JSON: {error}"))?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return Err(value
+            .get("detail")
+            .and_then(|detail| detail.as_str())
+            .unwrap_or("the raster could not be decoded")
+            .to_owned());
+    }
+    let png = value
+        .get("png")
+        .and_then(|png| png.as_str())
+        .ok_or_else(|| "the raster preview returned no image".to_owned())?;
+    base64::engine::general_purpose::STANDARD
+        .decode(png)
+        .map_err(|error| format!("invalid preview image: {error}"))
 }
 
 /// Interpreter candidates, most specific first.

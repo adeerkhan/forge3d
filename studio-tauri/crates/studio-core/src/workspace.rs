@@ -353,6 +353,112 @@ pub fn capability_report(project: &Project, target: Workspace) -> CapabilityRepo
     }
 }
 
+/// One material/light/camera parameter and what currently drives it: the
+/// per-parameter half of the capability story, so the Inspector can show
+/// parity limits next to the field they constrain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParameterCapability {
+    pub parameter: String,
+    pub level: CapabilityLevel,
+    pub detail: String,
+}
+
+/// What every editable rendering parameter actually reaches today.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CapabilityTable {
+    pub light: Vec<ParameterCapability>,
+    pub mesh_material: Vec<ParameterCapability>,
+    pub terrain_material: Vec<ParameterCapability>,
+    pub camera: Vec<ParameterCapability>,
+}
+
+/// The parameter-level capability table (single source of truth; the
+/// Inspector fetches it through the shell).
+pub fn parameter_capabilities() -> CapabilityTable {
+    let parameter = |parameter: &str, level: CapabilityLevel, detail: &str| ParameterCapability {
+        parameter: parameter.to_owned(),
+        level,
+        detail: detail.to_owned(),
+    };
+    CapabilityTable {
+        light: vec![
+            parameter(
+                "direction",
+                CapabilityLevel::Full,
+                "Solid, Material, Rendered, and stills all read the scene's directional sun.",
+            ),
+            parameter(
+                "intensity",
+                CapabilityLevel::Full,
+                "Sun intensity flows into every render; re-renders follow the edit.",
+            ),
+            parameter(
+                "colour",
+                CapabilityLevel::Full,
+                "The light colour reaches the renderer's direct lighting.",
+            ),
+            parameter(
+                "point type",
+                CapabilityLevel::Unsupported,
+                "Neither view implements point lights — the option is disabled in the inspector.",
+            ),
+        ],
+        mesh_material: vec![
+            parameter(
+                "base colour",
+                CapabilityLevel::Partial,
+                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+            ),
+            parameter(
+                "roughness",
+                CapabilityLevel::Partial,
+                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+            ),
+            parameter(
+                "metallic",
+                CapabilityLevel::Partial,
+                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+            ),
+            parameter(
+                "texture",
+                CapabilityLevel::Partial,
+                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+            ),
+        ],
+        terrain_material: vec![
+            parameter(
+                "albedo raster (overlay)",
+                CapabilityLevel::Full,
+                "Draped in Solid, Material, and Rendered; composited after lighting so categorical palettes survive.",
+            ),
+            parameter(
+                "engine material set",
+                CapabilityLevel::Partial,
+                "Material and Rendered shade with terrain_default's four layers; Solid shows the drape over an elevation ramp.",
+            ),
+            parameter(
+                "texture maps",
+                CapabilityLevel::Unsupported,
+                "None ship in this checkout: the engine resolves rock/grass/dirt/snow from assets/materials/ or FORGE3D_MATERIAL_DIR, so the layers render flat colours until maps appear.",
+            ),
+        ],
+        camera: vec![
+            parameter(
+                "field of view",
+                CapabilityLevel::Full,
+                "Solid and every render frame use the active camera's FOV.",
+            ),
+            parameter(
+                "near / far",
+                CapabilityLevel::Partial,
+                "Solid projection only — Rendered derives its clip planes from the frame.",
+            ),
+        ],
+    }
+}
+
 /// The project's active camera in viewer terms.
 pub fn camera_sync(project: &Project) -> Option<CameraSync> {
     let object = project.scene.camera()?;
@@ -724,6 +830,58 @@ mod tests {
                 (got - want).abs() < 1e-3,
                 "axis {index}: engine {got} vs solid-mapped {want}"
             );
+        }
+    }
+
+    #[test]
+    fn parameter_capabilities_pin_parity_limits() {
+        let table = parameter_capabilities();
+        // Direction, intensity, and colour transfer; point lights don't exist
+        // in either view.
+        assert_eq!(table.light.len(), 4);
+        let point = table
+            .light
+            .iter()
+            .find(|row| row.parameter == "point type")
+            .expect("point-type row");
+        assert_eq!(point.level, CapabilityLevel::Unsupported);
+        for row in table
+            .light
+            .iter()
+            .filter(|row| row.parameter != "point type")
+        {
+            assert_eq!(row.level, CapabilityLevel::Full, "{}", row.parameter);
+        }
+        // Mesh materials stay Solid-only until geometry reaches the renderer.
+        assert!(!table.mesh_material.is_empty());
+        assert!(table
+            .mesh_material
+            .iter()
+            .all(|row| row.level == CapabilityLevel::Partial));
+        // The terrain drape reaches every view.
+        let drape = table
+            .terrain_material
+            .iter()
+            .find(|row| row.parameter.starts_with("albedo"))
+            .expect("albedo row");
+        assert_eq!(drape.level, CapabilityLevel::Full);
+        // Camera near/far stay Solid-only: Rendered derives its clip planes
+        // from the frame.
+        let clip = table
+            .camera
+            .iter()
+            .find(|row| row.parameter.contains("near"))
+            .expect("near/far row");
+        assert_eq!(clip.level, CapabilityLevel::Partial);
+        // Every row explains itself — the Inspector badges show it on hover.
+        for row in table
+            .light
+            .iter()
+            .chain(&table.mesh_material)
+            .chain(&table.terrain_material)
+            .chain(&table.camera)
+        {
+            assert!(!row.detail.trim().is_empty(), "{}", row.parameter);
         }
     }
 

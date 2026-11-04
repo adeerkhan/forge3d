@@ -170,6 +170,8 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       exposure: 1.35,
       shadows: true,
       ambientOcclusion: false,
+      sky: true,
+      iblIntensity: 1,
     },
   };
 }
@@ -509,6 +511,10 @@ export function createMockBridge(): StudioBridge {
       phase: "Phase 2 — preview harness (no Rust shell)",
     }),
 
+    // Static table lives in studio-core (Rust-tested); the preview shows no
+    // badges rather than duplicating it in TypeScript.
+    capabilityTable: async () => null,
+
     state: async () => (project ? state() : null),
 
     scenePresets: async (): Promise<ScenePreset[]> => [
@@ -640,6 +646,10 @@ export function createMockBridge(): StudioBridge {
 
     readImageAsset: async (): Promise<MeshFilePayload> => {
       throw new Error("textures need the desktop shell");
+    },
+
+    rasterPreview: async (): Promise<MeshFilePayload> => {
+      throw new Error("raster drapes need the desktop shell");
     },
 
     // The harness has no filesystem: a nonzero placeholder keeps asset

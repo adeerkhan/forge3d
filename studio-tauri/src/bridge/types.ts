@@ -116,6 +116,11 @@ export interface RenderSettings {
   exposure: number;
   shadows: boolean;
   ambientOcclusion: boolean;
+  /** Sky background in preview and still frames (Material mode always drops
+   *  it — the look-dev backdrop). */
+  sky: boolean;
+  /** Environment/IBL intensity multiplier; 0 turns the environment light off. */
+  iblIntensity: number;
 }
 
 /** Studio-side material. The terrain renderer does not consume it. */
@@ -216,6 +221,21 @@ export interface CapabilityReport {
   hasRenderableContent: boolean;
 }
 
+/** One material/light/camera parameter and what currently drives it. */
+export interface ParameterCapability {
+  parameter: string;
+  level: CapabilityLevel;
+  detail: string;
+}
+
+/** Per-parameter capability table (studio-core is the single source). */
+export interface CapabilityTable {
+  light: ParameterCapability[];
+  meshMaterial: ParameterCapability[];
+  terrainMaterial: ParameterCapability[];
+  camera: ParameterCapability[];
+}
+
 export interface CameraSync {
   eye: Vec3;
   target: Vec3;
@@ -227,6 +247,8 @@ export interface SunAngles {
   azimuthDeg: number;
   elevationDeg: number;
   intensity: number;
+  /** Linear RGB colour of the directional light. */
+  color: [number, number, number];
 }
 
 export interface ForgeAsset {

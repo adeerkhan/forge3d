@@ -358,6 +358,10 @@ pub struct RenderRequest {
     pub exposure: f64,
     pub shadows: bool,
     pub ambient_occlusion: bool,
+    /// Render the sky background; Material mode drops it regardless (look-dev).
+    pub sky: bool,
+    /// Environment/IBL intensity multiplier (0 = environment light off).
+    pub ibl_intensity: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -373,6 +377,8 @@ impl RenderRequest {
         self.exposure = f64::from(settings.exposure);
         self.shadows = settings.shadows;
         self.ambient_occlusion = settings.ambient_occlusion;
+        self.sky = settings.sky;
+        self.ibl_intensity = f64::from(settings.ibl_intensity);
         self
     }
 
@@ -422,10 +428,11 @@ impl RenderRequest {
                 // Material preview: lit terrain + overlay, no shadows or POM,
                 // and no sky background — the flat dark backdrop is what makes
                 // it read as a look-dev pass instead of the beauty frame.
-                // Quality presets; the project settings can only *add* cost.
+                // Quality presets; the project settings can only *add* cost —
+                // except the sky, which the project can turn off for Rendered.
                 "shadows": !material && self.shadows,
                 "pom": !material,
-                "sky": !material,
+                "sky": !material && self.sky,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
                 "heightAo": final_quality && self.ambient_occlusion,
             },
@@ -433,6 +440,7 @@ impl RenderRequest {
             "exposure": self.exposure,
             "shadows": self.shadows,
             "ambientOcclusion": self.ambient_occlusion,
+            "iblIntensity": self.ibl_intensity,
             "output": output,
         })
     }
@@ -503,6 +511,8 @@ impl RenderRequest {
             exposure: 1.35,
             shadows: true,
             ambient_occlusion: false,
+            sky: true,
+            ibl_intensity: 1.0,
         })
     }
 }

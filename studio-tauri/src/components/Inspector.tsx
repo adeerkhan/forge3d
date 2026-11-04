@@ -1,6 +1,10 @@
+import { useEffect, useState } from "react";
 import type {
   Asset,
+  CapabilityLevel,
+  CapabilityTable,
   Material,
+  ParameterCapability,
   CameraObject,
   LightKind,
   LightObject,
@@ -9,8 +13,54 @@ import type {
   Transform,
 } from "../bridge/types";
 import { objectKindLabel } from "../bridge/types";
+import { bridge } from "../bridge/env";
 import { useSession } from "../state/session-context";
 import { NumberField, Section, TextField, Toggle } from "./fields";
+
+// ---------------------------------------------------------------- capability
+
+let capabilityTablePromise: Promise<CapabilityTable | null> | null = null;
+
+/** The shell's static capability table, fetched once per app run. */
+function useCapabilities(): CapabilityTable | null {
+  const [table, setTable] = useState<CapabilityTable | null>(null);
+  useEffect(() => {
+    capabilityTablePromise ??= bridge.capabilityTable().catch(() => null);
+    let live = true;
+    void capabilityTablePromise.then((value) => {
+      if (live) setTable(value);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return table;
+}
+
+const LEVEL_GLYPH: Record<CapabilityLevel, string> = {
+  full: "✓",
+  partial: "~",
+  unsupported: "✗",
+};
+
+/** Per-parameter support badges: glyph = level, hover = what it drives.
+ *  Phase 5's "capability-tagged parameters", straight from studio-core. */
+function CapabilityBadges({ rows }: { rows: ParameterCapability[] | undefined }) {
+  if (!rows || rows.length === 0) return null;
+  return (
+    <div className="capability-badges">
+      {rows.map((row) => (
+        <span
+          key={row.parameter}
+          className="badge"
+          title={`${LEVEL_GLYPH[row.level]} ${row.level} — ${row.detail}`}
+        >
+          {LEVEL_GLYPH[row.level]} {row.parameter}
+        </span>
+      ))}
+    </div>
+  );
+}
 
 function TransformEditor({
   object,
@@ -144,6 +194,7 @@ function CameraEditor({
   active: boolean;
 }) {
   const { actions } = useSession();
+  const caps = useCapabilities();
   const commit = (next: CameraObject) =>
     void actions.apply({ type: "setCamera", id: object.id, camera: next });
 
@@ -187,12 +238,14 @@ function CameraEditor({
           onCommit={(far) => commit({ ...camera, far })}
         />
       </div>
+      <CapabilityBadges rows={caps?.camera} />
     </Section>
   );
 }
 
 function LightEditor({ object, light }: { object: SceneObject; light: LightObject }) {
   const { actions } = useSession();
+  const caps = useCapabilities();
   const commit = (next: LightObject) =>
     void actions.apply({ type: "setLight", id: object.id, light: next });
 
@@ -232,6 +285,7 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
         <NumberField label="B" value={light.color[2]} step={0.02} min={0} max={1} onCommit={channel(2)} />
       </div>
       <span className="group-label">Colour (linear RGB)</span>
+      <CapabilityBadges rows={caps?.light} />
     </Section>
   );
 }
@@ -297,9 +351,24 @@ function RenderSettingsEditor() {
         checked={render.ambientOcclusion}
         onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
       />
+      <Toggle
+        label="Sky background"
+        checked={render.sky}
+        onChange={(sky) => commit({ sky })}
+      />
+      <NumberField
+        label="Environment / IBL intensity"
+        value={render.iblIntensity}
+        step={0.05}
+        min={0}
+        max={4}
+        onCommit={(iblIntensity) => commit({ iblIntensity })}
+      />
       <p className="hint">
         Settings are stored with the project and applied to both the Rendered
-        viewport and the Render button.
+        viewport and the Render button. Material mode always renders without
+        sky or shadows (look-dev); lower the environment intensity to let the
+        sun dominate the frame.
       </p>
     </Section>
   );
@@ -307,6 +376,7 @@ function RenderSettingsEditor() {
 
 function MaterialEditor({ object, material }: { object: SceneObject; material: Material }) {
   const { actions, state } = useSession();
+  const caps = useCapabilities();
   const texture = material.texture
     ? state?.project.assets.find((asset) => asset.id === material.texture)
     : undefined;
@@ -351,6 +421,7 @@ function MaterialEditor({ object, material }: { object: SceneObject; material: M
           </button>
         )}
       </div>
+      <CapabilityBadges rows={caps?.meshMaterial} />
       <p className="hint">
         Studio renders this material; the Forge3D terrain pipeline does not
         consume it, and the capability report says so.
@@ -369,6 +440,7 @@ function TerrainEditor({
   asset: Asset | undefined;
 }) {
   const { actions, terrainResolution, setTerrainResolution, state } = useSession();
+  const caps = useCapabilities();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -491,6 +563,7 @@ function TerrainEditor({
             </button>
           )}
         </div>
+        <CapabilityBadges rows={caps?.terrainMaterial} />
         <p className="hint">
           The albedo raster is draped over the DEM and composited after
           lighting, so categorical palettes survive. This is also what the

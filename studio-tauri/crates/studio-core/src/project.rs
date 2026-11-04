@@ -356,20 +356,6 @@ impl Project {
                         ));
                     }
                 }
-                if let Some(overlay) = terrain.overlay {
-                    let Some(asset) = self.asset(overlay.asset) else {
-                        return Err(format!(
-                            "object {:?} references missing overlay asset {}",
-                            object.name, overlay.asset
-                        ));
-                    };
-                    if !asset.kind.is_raster() {
-                        return Err(format!(
-                            "object {:?} uses asset {:?} as an overlay, but it is {:?}",
-                            object.name, asset.name, asset.kind
-                        ));
-                    }
-                }
                 if let Some(albedo) = terrain.albedo {
                     if !asset_ids.contains(&albedo) {
                         return Err(format!(
@@ -400,6 +386,11 @@ impl Project {
         }
         if !self.render.exposure.is_finite() || !(0.05..=8.0).contains(&self.render.exposure) {
             return Err("render exposure must be between 0.05 and 8".to_owned());
+        }
+        if !self.render.ibl_intensity.is_finite()
+            || !(0.0..=4.0).contains(&self.render.ibl_intensity)
+        {
+            return Err("environment/IBL intensity must be between 0 and 4".to_owned());
         }
 
         Ok(())
@@ -520,6 +511,13 @@ pub struct RenderSettings {
     /// deliberate choice for finals rather than the interactive default.
     #[serde(default)]
     pub ambient_occlusion: bool,
+    /// Render the sky background (Material mode always drops it — look-dev).
+    #[serde(default = "default_true")]
+    pub sky: bool,
+    /// Environment/IBL intensity multiplier: the environment light's
+    /// brightness relative to the sun (0 = environment light off).
+    #[serde(default = "default_ibl_intensity")]
+    pub ibl_intensity: f32,
 }
 
 fn default_exposure() -> f32 {
@@ -530,6 +528,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_ibl_intensity() -> f32 {
+    1.0
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -538,6 +540,8 @@ impl Default for RenderSettings {
             exposure: default_exposure(),
             shadows: true,
             ambient_occlusion: false,
+            sky: true,
+            ibl_intensity: default_ibl_intensity(),
         }
     }
 }

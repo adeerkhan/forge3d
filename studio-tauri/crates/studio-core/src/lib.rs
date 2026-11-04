@@ -59,8 +59,8 @@ pub use scene::{
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 pub use workspace::{
-    capability_report, handoff, CameraSync, CapabilityLevel, CapabilityReport, Handoff,
-    ObjectCapability, SunAngles,
+    capability_report, handoff, parameter_capabilities, CameraSync, CapabilityLevel,
+    CapabilityReport, CapabilityTable, Handoff, ObjectCapability, ParameterCapability, SunAngles,
 };
 
 /// Wall-clock milliseconds since the Unix epoch.

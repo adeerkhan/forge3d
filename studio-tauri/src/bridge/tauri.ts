@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { StudioBridge } from "./index";
 import type {
   AutosaveStatus,
+  CapabilityTable,
   EditResult,
   EngineStatus,
   MeshFilePayload,
@@ -20,6 +21,8 @@ export const tauriBridge: StudioBridge = {
   kind: "tauri",
 
   info: () => invoke<ShellInfo>("shell_info"),
+
+  capabilityTable: () => invoke<CapabilityTable | null>("capability_table"),
 
   state: () => invoke<SessionState | null>("project_state"),
 
@@ -59,6 +62,9 @@ export const tauriBridge: StudioBridge = {
   readMeshFile: (path) => invoke<MeshFilePayload>("read_mesh_file", { path }),
 
   readImageAsset: (path) => invoke<MeshFilePayload>("read_image_asset", { path }),
+
+  rasterPreview: (path, width) =>
+    invoke<MeshFilePayload>("raster_preview", { path, width: width ?? null }),
 
   fileSize: (path) => invoke<number>("file_size", { path }),
 
