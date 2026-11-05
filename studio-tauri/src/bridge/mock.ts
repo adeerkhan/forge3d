@@ -264,6 +264,8 @@ export function createMockBridge(): StudioBridge {
           return "Terrain overlay";
         case "setMeshMaterial":
           return `Material of ${find(command.id).name}`;
+        case "setGltfNode":
+          return `Select node of ${find(command.id).name}`;
         case "setRenderSettings":
           return "Render settings";
         case "setAssetPath":
@@ -448,6 +450,17 @@ export function createMockBridge(): StudioBridge {
         const object = find(command.id);
         if (object.kind.type !== "mesh") throw new Error("object is not a mesh");
         object.kind.material = structuredClone(command.material);
+        return { label, affected: [command.id] };
+      }
+
+      case "setGltfNode": {
+        const object = find(command.id);
+        if (object.kind.type !== "mesh") throw new Error("object is not a mesh");
+        if (object.kind.source.type !== "gltf")
+          throw new Error("object is not an imported glTF mesh");
+        if (command.node !== null && !command.node.trim())
+          throw new Error("node must not be empty");
+        object.kind.source.node = command.node;
         return { label, affected: [command.id] };
       }
 

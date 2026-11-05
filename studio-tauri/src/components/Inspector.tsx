@@ -14,6 +14,7 @@ import type {
 } from "../bridge/types";
 import { objectKindLabel } from "../bridge/types";
 import { bridge } from "../bridge/env";
+import { base64ToArrayBuffer, listGltfNodes } from "../viewport/assets";
 import { useSession } from "../state/session-context";
 import { NumberField, Section, TextField, Toggle } from "./fields";
 
@@ -262,7 +263,7 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
         <select
           className="input input--select"
           value={light.kind}
-          title="Both views light with a directional sun; point lights arrive with Phase 5 lighting"
+          title="Both views light with a directional sun; point lights are not implemented in either view"
           onChange={(event) => commit({ ...light, kind: event.target.value as LightKind })}
         >
           <option value="directional">Directional</option>
@@ -583,7 +584,39 @@ function TerrainEditor({
   );
 }
 
-function ImportedMesh({ asset }: { object: SceneObject; asset: Asset | undefined }) {
+function ImportedMesh({ object, asset }: { object: SceneObject; asset: Asset | undefined }) {
+  const { actions } = useSession();
+  const [nodes, setNodes] = useState<string[] | null>(null);
+  const [nodeError, setNodeError] = useState<string | null>(null);
+  const source = object.kind.type === "mesh" ? object.kind.source : null;
+  const current = source?.type === "gltf" ? source.node : null;
+
+  // Node names come from the file itself (parse through the shell, cached by
+  // path in assets.ts) — they are derived data, never stored in the project.
+  useEffect(() => {
+    if (bridge.kind !== "tauri" || !asset?.path) {
+      setNodes(null);
+      return;
+    }
+    let live = true;
+    setNodeError(null);
+    listGltfNodes(asset.path, (path) =>
+      bridge.readMeshFile(path).then((payload) => base64ToArrayBuffer(payload.base64)),
+    )
+      .then((names) => {
+        if (live) setNodes(names);
+      })
+      .catch((cause) => {
+        if (live) {
+          setNodes([]);
+          setNodeError(cause instanceof Error ? cause.message : String(cause));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [asset?.path]);
+
   return (
     <Section title="Mesh">
       <div className="readout">
@@ -600,10 +633,40 @@ function ImportedMesh({ asset }: { object: SceneObject; asset: Asset | undefined
           {asset ? `${(asset.byteSize / 1024).toFixed(1)} KB` : "—"}
         </dd>
       </div>
+      {nodes && nodes.length > 0 && (
+        <label className="field">
+          <span className="field-label">Node</span>
+          <select
+            className="input input--select"
+            value={current ?? ""}
+            title="Draw the whole file, or only the selected node's subtree"
+            onChange={(event) =>
+              void actions.apply({
+                type: "setGltfNode",
+                id: object.id,
+                node: event.target.value || null,
+              })
+            }
+          >
+            <option value="">Whole file</option>
+            {current && !nodes.includes(current) && (
+              <option value={current}>{current} (missing)</option>
+            )}
+            {nodes.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {nodeError && <p className="hint">{nodeError}</p>}
       <p className="hint">
         Imported meshes are moved, rotated, and scaled like any other object;
-        Solid draws the file's own materials. A Studio-side material override
-        arrives with Phase 5 — asset relinking lives in the Assets panel.
+        Solid draws the file's own materials — Node picks which part of the
+        file this object shows. A Studio-side material override for glTF
+        assets is not implemented yet; asset relinking lives in the Assets
+        panel.
       </p>
     </Section>
   );
@@ -738,7 +801,8 @@ export function Inspector() {
         )}
         {/* A Studio material only reaches primitives today (the glTF loader
             draws the file's own materials), so showing the editor for glTF
-            assets would be a control that does nothing — Phase 5 owns it. */}
+            assets would be a control that does nothing — the shared material
+            library owns it (README "not yet implemented"). */}
         {object.kind.type === "mesh" && meshSource?.type === "primitive" && (
           <MaterialEditor object={object} material={object.kind.material} />
         )}

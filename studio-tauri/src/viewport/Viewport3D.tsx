@@ -716,7 +716,7 @@ export function Viewport3D() {
           }
           group.add(buildLoadingPlaceholder());
           const expected = signature;
-          loadAssetScene(asset.path, readMesh)
+          loadAssetScene(asset.path, readMesh, source.node)
             .then((loaded) => {
               if (group.userData.signature !== expected) {
                 disposeTree(loaded);

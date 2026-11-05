@@ -477,3 +477,82 @@ fn empty_imports_are_refused() {
     assert!(editor.project().assets.is_empty());
     assert_eq!(editor.project().scene.objects.len(), 3);
 }
+
+#[test]
+fn selecting_a_gltf_node_updates_the_source_and_is_reversible() {
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    let applied = editor
+        .apply(Command::ImportGltf {
+            name: "duck.glb".to_owned(),
+            path: "/models/duck.glb".to_owned(),
+            kind: AssetKind::Glb,
+            byte_size: 4096,
+            node: None,
+        })
+        .unwrap();
+    let id = applied.affected[0];
+
+    let source_node = |editor: &Editor| -> Option<String> {
+        let object = editor.project().scene.object(id).expect("imported object");
+        let mesh = object.mesh().expect("mesh object");
+        match &mesh.source {
+            MeshSource::Gltf { node, .. } => node.clone(),
+            other => panic!("expected gltf source, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        source_node(&editor),
+        None,
+        "import starts with the whole file"
+    );
+
+    editor
+        .apply(Command::SetGltfNode {
+            id,
+            node: Some("Body".to_owned()),
+        })
+        .unwrap();
+    assert_eq!(source_node(&editor).as_deref(), Some("Body"));
+
+    editor.undo().unwrap();
+    assert_eq!(
+        source_node(&editor),
+        None,
+        "undo restores the whole-file choice"
+    );
+    editor.redo().unwrap();
+    assert_eq!(source_node(&editor).as_deref(), Some("Body"));
+
+    editor
+        .apply(Command::SetGltfNode { id, node: None })
+        .unwrap();
+    assert_eq!(
+        source_node(&editor),
+        None,
+        "clearing returns to the whole file"
+    );
+
+    // Guards: a primitive has no nodes, and empty names are rejected.
+    let cube = cube_id(&editor);
+    let error = editor
+        .apply(Command::SetGltfNode {
+            id: cube,
+            node: Some("Body".to_owned()),
+        })
+        .expect_err("a primitive has no nodes")
+        .to_string();
+    assert!(error.contains("not an imported glTF mesh"), "{error}");
+    let error = editor
+        .apply(Command::SetGltfNode {
+            id,
+            node: Some("  ".to_owned()),
+        })
+        .expect_err("empty node names are rejected")
+        .to_string();
+    assert!(error.contains("empty"), "{error}");
+    assert_eq!(
+        source_node(&editor),
+        None,
+        "a rejected set leaves the source alone"
+    );
+}

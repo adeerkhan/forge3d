@@ -169,6 +169,14 @@ pub enum Command {
         material: crate::scene::Material,
     },
 
+    /// Pick which node inside an imported glTF asset the object draws
+    /// (`None` = the whole file).
+    SetGltfNode {
+        id: ObjectId,
+        #[serde(default)]
+        node: Option<String>,
+    },
+
     /// Attach, change, or remove a terrain's draped overlay.
     SetTerrainOverlay {
         id: ObjectId,
@@ -693,6 +701,45 @@ impl Command {
                 })
             }
 
+            Command::SetGltfNode { id, node } => {
+                if let Some(name) = node.as_deref() {
+                    if name.trim().is_empty() {
+                        return Err(CommandError::invalid("node", "must not be empty"));
+                    }
+                }
+                let previous = {
+                    let object = project
+                        .scene
+                        .object(*id)
+                        .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                    let Some(mesh) = object.mesh() else {
+                        return Err(CommandError::NotAMesh { id: *id });
+                    };
+                    let crate::scene::MeshSource::Gltf { node: existing, .. } = &mesh.source else {
+                        return Err(CommandError::invalid(
+                            "node",
+                            "object is not an imported glTF mesh",
+                        ));
+                    };
+                    existing.clone()
+                };
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Mesh(mesh) = &mut object.kind {
+                        if let crate::scene::MeshSource::Gltf { node: slot, .. } = &mut mesh.source
+                        {
+                            *slot = node.clone();
+                        }
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetGltfNode {
+                        id: *id,
+                        node: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
             Command::SetTerrainOverlay { id, overlay } => {
                 let object = project
                     .scene
@@ -918,7 +965,8 @@ impl Command {
             | Command::SetTerrainZScale { id, .. }
             | Command::SetTerrainOverlay { id, .. }
             | Command::SetTerrainDem { id, .. }
-            | Command::SetMeshMaterial { id, .. } => vec![*id],
+            | Command::SetMeshMaterial { id, .. }
+            | Command::SetGltfNode { id, .. } => vec![*id],
             Command::SetRenderSettings { .. } | Command::SetAssetPath { .. } => Vec::new(),
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
@@ -974,6 +1022,7 @@ impl Command {
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),
+            Command::SetGltfNode { id, .. } => format!("Select node of {}", name_of(id)),
             Command::SetAssetPath { id, .. } => {
                 format!("Relink asset {}", crate::ids::short_id(id))
             }

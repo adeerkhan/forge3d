@@ -51,7 +51,7 @@ sync, diagnostics).
 | Basic lights & camera properties (direction/intensity/colour, fov/clip) | `Inspector.tsx`, `render.rs` | done |
 | Asset relinking and dependency counts | `Inspector.tsx`, `command.rs` | done |
 | Solid-view albedo drape (raster → PNG via engine python) | `raster_preview`, `Viewport3D.tsx` | done |
-| glTF node selection (model field exists: `MeshSource::Gltf.node`) | — | pending |
+| glTF node selection (`SetGltfNode`, runtime-derived node names, Inspector picker) | `assets.ts`, `command.rs`, `Inspector.tsx` | done |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -248,13 +248,13 @@ the render handoff.
 
 ## Known limitations
 
-- **glTF import reads the file whole** and is capped at 32 MB (Phase 5 streams
-  assets). Self-contained `.glb` works; a `.gltf` that references external
-  `.bin`/texture files fails with an explicit message, because the webview
-  cannot read neighbouring files.
-- **Imported meshes are transform-editable and relinkable only.** Solid draws
-  them with their glTF materials; picking nodes inside an asset arrives in
-  Phase 5, and meshes do not reach Rendered at all yet (see Primitives below).
+- **glTF import reads the file whole** and is capped at 32 MB (streamed asset
+  loading is not implemented). Self-contained `.glb` works; a `.gltf` that
+  references external `.bin`/texture files fails with an explicit message,
+  because the webview cannot read neighbouring files.
+- **Imported meshes are transform-editable, relinkable, and node-selectable.**
+  Solid draws them with their glTF materials; meshes do not reach Rendered at
+  all yet (see Primitives below).
 - **No shadows or PBR environment** in the solid viewport; it is a modelling
   view, not the Forge3D render (Phase 4).
 - **The engine probe needs only an importable `forge3d`.** Rendering runs
@@ -292,7 +292,7 @@ Rust test.
 ## Not yet implemented (deliberately)
 
 - Geometry export for primitives — Rendered still draws terrain only
-- Shared material library and glTF node selection — **Phase 5** (environment/IBL controls, capability badges, and the Solid albedo drape shipped)
+- Shared material library — **Phase 5** (environment/IBL controls, capability badges, the Solid albedo drape, and glTF node selection shipped)
 - Render queue and cancellation — **Phase 7**
 - Timeline, keyframes, frame export — **Phase 6**
 

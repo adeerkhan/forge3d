@@ -547,7 +547,8 @@ impl Default for RenderSettings {
 }
 
 /// An imported source file. The project stores a reference, never the bytes:
-/// the viewport reads the file when it needs it, and Phase 5 adds relinking.
+/// the viewport reads the file when it needs it, and the Assets panel can
+/// relink it when the file moves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {

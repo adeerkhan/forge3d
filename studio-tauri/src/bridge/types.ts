@@ -389,6 +389,7 @@ export type Command =
   | { type: "setLight"; id: string; light: LightObject }
   | { type: "setPrimitive"; id: string; primitive: Primitive }
   | { type: "setMeshMaterial"; id: string; material: Material }
+  | { type: "setGltfNode"; id: string; node: string | null }
   | { type: "setRenderSettings"; render: RenderSettings }
   | { type: "setAssetPath"; id: string; path: string; byteSize: number }
   | { type: "setTerrainZScale"; id: string; zScale: number }
