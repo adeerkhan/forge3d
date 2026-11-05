@@ -68,7 +68,16 @@ impl CommandError {
 /// New values only: the previous values are read from the model during
 /// [`Command::apply`], which is what makes an inverse exact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+// `rename_all` renames the *variants*; `rename_all_fields` is what actually
+// makes struct-variant fields (`z_scale`, `byte_size`, `frame_rate`) arrive as
+// the camelCase the TypeScript bridge sends. Without it the mock and the Rust
+// tests (which build Command values directly) stay green while the real Tauri
+// IPC rejects the payload — see tests/wire_shapes.rs.
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Command {
     /// Insert an object (already built, with a stable id) at `index`
     /// (end of the list when omitted).
