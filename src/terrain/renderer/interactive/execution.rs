@@ -352,6 +352,7 @@ impl TerrainScene {
             &ibl,
             media::ibl_mean_radiance(env_maps),
             env_maps.hdr_image().map(AsRef::as_ref),
+            env_maps.hdr_image(),
             env_maps.intensity.max(0.0),
             &curve_view,
             &targets,

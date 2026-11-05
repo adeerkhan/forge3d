@@ -1103,6 +1103,7 @@ impl TerrainScene {
         let sky_texture = self.render_sky_texture(
             &mut encoder,
             decoded,
+            env_maps.hdr_image(),
             camera_view,
             camera_proj,
             camera_eye,

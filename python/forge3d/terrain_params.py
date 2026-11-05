@@ -1446,7 +1446,7 @@ class SkySettings:
     sky_exposure: float = 1.0     # Sky brightness adjustment
     
     def __post_init__(self) -> None:
-        valid_models = ("hosek-wilkie", "preetham", "approximate", "aether")
+        valid_models = ("hosek-wilkie", "preetham", "approximate", "aether", "hdri")
         if self.model not in valid_models:
             raise ValueError(f"model must be one of {valid_models}")
 

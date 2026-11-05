@@ -581,6 +581,7 @@ impl TerrainScene {
             materials,
             ibl_bind_group,
             media_environment_radiance: media::ibl_mean_radiance(env_maps),
+            hdri_image: env_maps.hdr_image().cloned(),
             height_curve_lut_uploaded,
             hdr_aov_pipeline,
             hdr_background_blit_pipeline,
@@ -738,6 +739,7 @@ impl TerrainScene {
             let sky_texture = self.render_sky_texture(
                 &mut encoder,
                 &state.decoded,
+                state.hdri_image.as_ref(),
                 view,
                 jittered_proj,
                 eye,

@@ -396,6 +396,23 @@ pub(crate) fn sky_module() -> String {
     assemble_parts(&sky_parts())
 }
 
+/// HDRI sky module: `sky_hdri.wgsl` over the determinism prelude.
+///
+/// Deliberately a separate file from `sky.wgsl`: the analytic models' source
+/// hash and golden frames stay untouched, and the HDRI path only exists when a
+/// project environment map is bound.
+pub(crate) fn sky_hdri_parts() -> Vec<SourcePart> {
+    det_and(
+        "src/shaders/sky_hdri.wgsl",
+        include_str!("shaders/sky_hdri.wgsl"),
+    )
+    .to_vec()
+}
+
+pub(crate) fn sky_hdri() -> String {
+    assemble_parts(&sky_hdri_parts())
+}
+
 /// Display-only AETHER resolve. Atmosphere evaluation itself stays linear HDR
 /// and reaches the existing tonemap operator unchanged through this assembly.
 pub(crate) fn aether_blit_parts() -> &'static [SourcePart] {
@@ -1111,6 +1128,7 @@ pub(crate) fn det_raster_parts() -> Vec<SourcePart> {
 pub(crate) fn deterministic_module_parts() -> Vec<(&'static str, Vec<SourcePart>)> {
     let mut modules: Vec<(&'static str, Vec<SourcePart>)> = vec![
         ("aether_sky", aether_sky_parts().to_vec()),
+        ("sky_hdri", sky_hdri_parts()),
         ("aether_blit", aether_blit_parts().to_vec()),
         ("prometheus_aerial", prometheus_aerial_parts().to_vec()),
         ("terrain", terrain_parts().to_vec()),
@@ -1157,6 +1175,7 @@ mod tests {
         vec![
             ("hybrid_kernel", hybrid_kernel()),
             ("aether_sky", aether_sky()),
+            ("sky_hdri", sky_hdri()),
             ("aether_blit", aether_blit()),
             ("prometheus_aerial", prometheus_aerial()),
             ("terrain", terrain()),

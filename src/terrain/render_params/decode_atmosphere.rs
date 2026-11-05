@@ -97,9 +97,12 @@ pub(super) fn parse_sky_settings(params: &Bound<'_, PyAny>) -> PyResult<SkySetti
         "hosek-wilkie" | "hosek_wilkie" | "hosekwilkie" => 1,
         "approximate" | "legacy" => 2,
         "aether" => 3,
+        // Project HDRI as the visible sky (Studio's Rendered backdrop). The
+        // image itself travels with the IBL, so no path is decoded here.
+        "hdri" => 4,
         _ => {
             return Err(PyValueError::new_err(format!(
-            "sky.model must be preetham, hosek-wilkie, approximate, or aether; got {model_name:?}"
+            "sky.model must be preetham, hosek-wilkie, approximate, aether, or hdri; got {model_name:?}"
         )))
         }
     };

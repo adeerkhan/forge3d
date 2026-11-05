@@ -185,6 +185,9 @@ impl CartographyDepth {
             ibl,
             media_environment_radiance,
             media_environment,
+            // Depth capture does not need the visible sky; the analytic
+            // fallback is used when the frame carries an HDRI model.
+            None,
             media_environment_intensity,
             curve,
             targets,

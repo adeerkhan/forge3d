@@ -270,6 +270,7 @@ class StudioRenderer:
         sun = request.get("sun") or {}
         quality = request.get("quality") or {}
         overlay = request.get("overlay") or None
+        environment = request.get("environment") or None
         overlays = []
         if overlay:
             try:
@@ -293,7 +294,7 @@ class StudioRenderer:
         # TerrainRenderParams — set it here so the project's Environment
         # intensity actually reaches the frame. The map itself is the project's
         # HDRI when set, otherwise the built-in studio sky.
-        ibl = self.environment_map(request.get("environment") or None)
+        ibl = self.environment_map(environment)
         ibl.intensity = float(request.get("iblIntensity", 1.0))
 
         settings = make_terrain_params_config(
@@ -337,7 +338,17 @@ class StudioRenderer:
             detail=DetailSettings(enabled=False),
             height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
             aov=AovSettings(enabled=False),
-            sky=SkySettings(enabled=bool(quality.get("sky", True)), aerial_perspective=False),
+            # With a project HDRI the visible sky is that environment map (the same
+        # one lighting the terrain); without one the analytic model stands.
+        # Background intensity is independent of the IBL lighting intensity.
+        sky=SkySettings(
+            enabled=bool(quality.get("sky", True)),
+            model="hdri" if environment else "hosek-wilkie",
+            aerial_perspective=False,
+            sky_exposure=float(request.get("environmentBackgroundIntensity", 1.0))
+            if environment
+            else 1.0,
+        ),
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))
         # The camera orbits far outside the 4000 m default max_distance

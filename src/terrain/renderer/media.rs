@@ -3671,7 +3671,7 @@ impl crate::terrain::renderer::TerrainScene {
         if self.realtime_media_directional_enabled()? {
         let viewport = self.media_resources.lock().map_err(|_| crate::core::error::RenderError::render("media_resources mutex poisoned"))?.as_ref().map(|r| r.viewport);
         let Some(viewport) = viewport else { return Ok(()); };
-        let sky = self.render_sky_texture(encoder, decoded, view, projection, camera, viewport.0, viewport.1)
+        let sky = self.render_sky_texture(encoder, decoded, env_maps.hdr_image(), view, projection, camera, viewport.0, viewport.1)
             .map_err(crate::core::error::RenderError::render)?;
         self.prepare_realtime_media_radiance_provider(encoder, sky.as_ref(), decoded,
             env_maps.hdr_image().map(AsRef::as_ref), env_maps.intensity.max(0.0), ibl_mean_radiance(env_maps))?;

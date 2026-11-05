@@ -39,6 +39,10 @@ pub struct TerrainScene {
     pub(super) sky_pipeline: wgpu::ComputePipeline,
     pub(super) aether_sky_bind_group_layout2: wgpu::BindGroupLayout,
     pub(super) aether_sky_pipeline: wgpu::ComputePipeline,
+    pub(super) sky_hdri_bind_group_layout2: wgpu::BindGroupLayout,
+    pub(super) sky_hdri_pipeline: wgpu::ComputePipeline,
+    pub(super) sky_hdri_sampler: wgpu::Sampler,
+    pub(super) sky_hdri_cache: Mutex<Option<super::atmosphere::HdriSkyTexture>>,
     pub(super) atmosphere_lut_cache: Mutex<Vec<super::atmosphere::luts::AtmosphereGpuLuts>>,
     pub(super) _sky_fallback_texture: TrackedTexture,
     pub(super) sky_fallback_view: wgpu::TextureView,
@@ -270,6 +274,9 @@ pub(super) struct OfflineAccumulationState {
     pub(super) materials: super::draw::PreparedMaterials,
     pub(super) ibl_bind_group: wgpu::BindGroup,
     pub(super) media_environment_radiance: [f32; 3],
+    /// Decoded HDRI for the offline sky pass, when the batch was started with
+    /// one. Offline samples render outside the per-frame IBL borrow.
+    pub(super) hdri_image: Option<std::sync::Arc<crate::formats::hdr::HdrImage>>,
     pub(super) height_curve_lut_uploaded: Option<(TrackedTexture, wgpu::TextureView)>,
     pub(super) hdr_aov_pipeline: wgpu::RenderPipeline,
     pub(super) hdr_background_blit_pipeline: wgpu::RenderPipeline,

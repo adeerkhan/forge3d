@@ -91,12 +91,16 @@ impl TerrainScene {
         // AETHER's sky blit uses the exact IEC sRGB transfer. Force the same
         // presentation contract for terrain whenever the spectral sky is
         // active so a single frame cannot mix exact sRGB and legacy gamma 2.2.
-        let output_srgb_eotf =
-            if params.output_srgb_eotf || (decoded.sky.enabled && decoded.sky.model == 3) {
-                1.0
-            } else {
-                0.0
-            };
+        let output_srgb_eotf = if params.output_srgb_eotf
+            || (decoded.sky.enabled && matches!(decoded.sky.model, 3 | 4))
+        {
+            // AETHER and HDRI skies enter through the linear-HDR background
+            // blit, which uses the exact IEC sRGB transfer; terrain must use
+            // the same contract or one frame mixes two gamma curves.
+            1.0
+        } else {
+            0.0
+        };
         let offline_hdr_flag = if offline_hdr_output { 1.0 } else { 0.0 };
 
         let mut binding = OverlayBinding {

@@ -352,6 +352,9 @@ pub struct RenderRequest {
     /// Radiance `.hdr` environment for image-based lighting, when the project
     /// sets one. `None` makes the service use its built-in studio sky.
     pub environment: Option<String>,
+    /// Backdrop brightness of the environment map in Rendered frames, 0..=1.
+    /// Independent of `ibl_intensity`, which scales the lighting.
+    pub environment_background_intensity: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -369,6 +372,8 @@ impl RenderRequest {
         self.ambient_occlusion = settings.ambient_occlusion;
         self.sky = settings.sky;
         self.ibl_intensity = f64::from(settings.ibl_intensity);
+        self.environment_background_intensity =
+            f64::from(settings.environment_background_intensity);
         self
     }
 
@@ -429,6 +434,7 @@ impl RenderRequest {
             "ambientOcclusion": self.ambient_occlusion,
             "iblIntensity": self.ibl_intensity,
             "environment": self.environment,
+            "environmentBackgroundIntensity": self.environment_background_intensity,
             "output": output,
         })
     }
@@ -505,6 +511,7 @@ impl RenderRequest {
                 .environment
                 .as_ref()
                 .map(|environment| environment.path.clone()),
+            environment_background_intensity: 1.0,
         })
     }
 }
@@ -535,6 +542,7 @@ mod tests {
             sky: true,
             ibl_intensity: 1.0,
             environment: None,
+            environment_background_intensity: 1.0,
         }
     }
 
@@ -545,6 +553,7 @@ mod tests {
         let payload = frame.to_payload("final", Some("/out/frame.png"));
         assert_eq!(payload["environment"], "/hdri/studio_sunrise.hdr");
         assert_eq!(payload["iblIntensity"], 1.0);
+        assert_eq!(payload["environmentBackgroundIntensity"], 1.0);
         assert_eq!(payload["output"], "/out/frame.png");
 
         // The built-in sky is requested by *not* sending a path, and a preview

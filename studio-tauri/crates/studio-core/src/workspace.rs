@@ -534,7 +534,7 @@ pub fn parameter_capabilities() -> CapabilityTable {
         environment: vec![parameter(
             "HDRI environment",
             CapabilityLevel::Full,
-            "The Material preview and Rendered frames both light with this .hdr: the viewport pre-filters it (PMREM), the engine uploads it as IBL. Without one both use the built-in studio sky.",
+            "The Material preview and Rendered frames both light with this .hdr and draw it as the sky: the viewport pre-filters it (PMREM), the engine uploads it as IBL and samples it as the background. Without one both use the built-in studio sky.",
         )],
         mesh_material: vec![
             parameter(

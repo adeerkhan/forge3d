@@ -764,6 +764,7 @@ pub fn render_still(
         "sky": request.sky,
         "iblIntensity": request.ibl_intensity,
         "environment": request.environment,
+        "environmentBackgroundIntensity": request.environment_background_intensity,
         "camera": {
             "phiDeg": request.phi_deg,
             "thetaDeg": request.theta_deg,

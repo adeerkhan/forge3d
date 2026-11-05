@@ -33,6 +33,9 @@ impl TerrainScene {
         let sky_pipeline = atmosphere_resources.sky_pipeline;
         let aether_sky_bind_group_layout2 = atmosphere_resources.aether_sky_bind_group_layout2;
         let aether_sky_pipeline = atmosphere_resources.aether_sky_pipeline;
+        let sky_hdri_bind_group_layout2 = atmosphere_resources.sky_hdri_bind_group_layout2;
+        let sky_hdri_pipeline = atmosphere_resources.sky_hdri_pipeline;
+        let sky_hdri_sampler = atmosphere_resources.sky_hdri_sampler;
         let atmosphere_lut_cache = atmosphere_resources.atmosphere_lut_cache;
         let sky_fallback_texture = atmosphere_resources.sky_fallback_texture;
         let sky_fallback_view = atmosphere_resources.sky_fallback_view;
@@ -727,6 +730,10 @@ impl TerrainScene {
             sky_pipeline,
             aether_sky_bind_group_layout2,
             aether_sky_pipeline,
+            sky_hdri_bind_group_layout2,
+            sky_hdri_pipeline,
+            sky_hdri_sampler,
+            sky_hdri_cache: Mutex::new(None),
             atmosphere_lut_cache,
             _sky_fallback_texture: sky_fallback_texture,
             sky_fallback_view,

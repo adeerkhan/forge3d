@@ -212,8 +212,10 @@ The Studio viewport has three modes, toggled in the viewport toolbar:
   orbits freely here exactly like Solid.
 - **Rendered** — the Forge3D terrain pipeline, rendered offscreen and displayed
   in the viewport. Same engine, same shaders, same PBR/POM/shadows/sky settings
-  as the golden-tested renders; no second window. It lights with the same
-  project HDRI (the engine uploads it with `IBL.from_hdr`).
+  as the golden-tested renders; no second window. It lights with the project
+  HDRI and, when the project sky is on, draws it as the background as well
+  (`IBL.from_hdr` for the light, a sky-model sample of the same map for the
+  backdrop).
 
 Implementation: `src-tauri/src/render.rs` keeps one Python process alive
 (`studio_render.py`) — session, renderer, and a generated neutral sky HDR are
@@ -252,12 +254,16 @@ backdrop's own brightness, 0..1: it scales the HDRI sky in the Material preview
 Removing the HDRI returns both views to the studio sky. The asset cannot be
 deleted while it is the environment — the Assets panel reports it as in use.
 
-**Rendered uses the HDRI for lighting, not as its sky.** The terrain pipeline
-draws one of its own procedural skies (Hosek-Wilkie / AETHER); its
-`SkySettings` has no HDRI-background mode, so the backdrop slider applies to the
-Material preview and Rendered frames keep the procedural sky. The HDRI still
-drives image-based lighting in both views (`IBL.from_hdr`), which is what makes
-the terrain respond to it.
+When an HDRI is set and **Sky background** is on, Rendered draws it as the sky
+too: the terrain renderer samples the same environment map as its background
+(`SkySettings(model="hdri")`), with **Background intensity** as the sky
+exposure. Without an HDRI the engine's analytic Hosek-Wilkie sky is used. The
+environment axes follow the engine's existing IBL convention (Y-up environment,
+Z-up terrain), so a map with an obvious horizon can appear rotated relative to
+the viewport; the background and the terrain lighting use the same convention,
+so they stay consistent with each other. Reorienting both is an engine-wide
+change (it touches the pinned terrain shader hash and the golden frames), not a
+Studio setting.
 
 ## The default scene is a DEM (Phase 4)
 
@@ -332,10 +338,12 @@ the render handoff.
   changes (throttled), not per playback frame. Use **Export frames…** for the
   sequence. Entering Rendered drops the previous frame, so a stale view never
   covers the scene while the new one renders.
-- **Rendered has no HDRI sky.** The engine's terrain pipeline draws a
-  procedural sky; the project HDRI lights it (IBL) but does not appear as the
-  background. That needs a `SkySettings` HDRI-background mode in the engine, not
-  a Studio setting.
+- **The HDRI sky uses the engine's environment orientation.** The renderer's
+  IBL axes are Y-up while terrain is Z-up, so a sharp horizon in an HDRI can
+  look rotated by 90° relative to the viewport. The background and the IBL
+  lighting share the convention, so the visible sky matches the light; fixing
+  the orientation itself changes every IBL-lit frame and the pinned terrain
+  shader hash.
 - **HDRI environments are Radiance `.hdr` only.** Both consumers read RGBE
   (three's `HDRLoader` and the engine's `IBL.from_hdr`); `.exr` is rejected with
   a specific message rather than silently mis-lighting. The viewport reads the

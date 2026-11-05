@@ -562,9 +562,10 @@ pub struct RenderSettings {
     /// work like every other file reference.
     #[serde(default)]
     pub environment: Option<AssetId>,
-    /// Brightness of the HDRI background in the Material preview, 0..=1.
-    /// 0 hides it and shows the neutral studio backdrop. Rendered frames keep
-    /// the engine's procedural sky, so this does not affect them.
+    /// Brightness of the HDRI background, 0..=1: the Material preview's
+    /// backdrop and the Rendered sky exposure (the engine samples the same
+    /// environment map as its sky). 0 hides the Material backdrop and renders
+    /// a black Rendered sky; turn the project sky off for no sky at all.
     #[serde(default = "default_one")]
     pub environment_background_intensity: f32,
 }

@@ -275,6 +275,7 @@ impl TerrainScene {
         ibl_bind_group: &wgpu::BindGroup,
         media_environment_radiance: [f32; 3],
         media_environment: Option<&crate::formats::hdr::HdrImage>,
+        environment_map: Option<&std::sync::Arc<crate::formats::hdr::HdrImage>>,
         media_environment_intensity: f32,
         height_curve_view: &wgpu::TextureView,
         render_targets: &RenderTargets,
@@ -313,6 +314,7 @@ impl TerrainScene {
         let sky_texture = self.render_sky_texture(
             encoder,
             decoded,
+            environment_map,
             camera_view,
             camera_proj,
             camera_eye,

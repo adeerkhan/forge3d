@@ -454,8 +454,8 @@ function RenderSettingsEditor() {
         viewport and the Render button. Solid is a neutral clay view; the
         Material preview lights the scene with this HDRI (or the built-in studio
         sky) plus soft sun shadows and never renders through the engine.
-        Rendered uses the HDRI for lighting but draws the engine's procedural
-        sky, so the backdrop slider affects the Material preview only.
+        Rendered draws the same HDRI as its sky and lights with it, so the
+        backdrop intensity applies to both views.
       </p>
     </Section>
   );
