@@ -172,6 +172,7 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       ambientOcclusion: false,
       sky: true,
       iblIntensity: 1,
+      environment: null,
     },
     timeline: {
       frameRate: 24,
@@ -493,13 +494,19 @@ export function createMockBridge(): StudioBridge {
       case "removeAsset": {
         const found = requireProject().assets.find((asset) => asset.id === command.id);
         if (!found) throw new Error("asset does not exist");
-        const used = scene.objects.some(
-          (object) =>
-            object.kind.type === "mesh" &&
-            object.kind.source.type === "gltf" &&
-            object.kind.source.asset === command.id,
-        );
-        if (used) throw new Error("asset is still used by an object");
+        const used =
+          requireProject().render.environment === command.id ||
+          scene.objects.some(
+            (object) =>
+              (object.kind.type === "mesh" &&
+                object.kind.source.type === "gltf" &&
+                object.kind.source.asset === command.id) ||
+              (object.kind.type === "mesh" && object.kind.material.texture === command.id) ||
+              (object.kind.type === "terrain" &&
+                (object.kind.asset === command.id ||
+                  object.kind.overlay?.asset === command.id)),
+          );
+        if (used) throw new Error("asset is still used by the project");
         requireProject().assets = requireProject().assets.filter((a) => a.id !== command.id);
         return { label, affected: [] };
       }
@@ -788,6 +795,10 @@ export function createMockBridge(): StudioBridge {
     // The harness has no filesystem: a nonzero placeholder keeps asset
     // validation (`byte_size > 0`) usable; real sizes come from the shell.
     fileSize: async (): Promise<number> => 1,
+
+    readHdr: async (): Promise<MeshFilePayload> => {
+      throw new Error("HDRI environments need the desktop shell");
+    },
 
     readMeshFile: async (): Promise<MeshFilePayload> => {
       throw new Error(

@@ -3,6 +3,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 
 import { bridge } from "../bridge/env";
 import type {
@@ -33,8 +34,22 @@ const SOLID_BACKGROUND = 0x101318;
 /** Material preview backdrop: the studio HDRI provides the light, this the
  *  neutral surround, so nothing hides the albedo. */
 const MATERIAL_BACKGROUND = 0x1c2129;
+const SOLID_BG = new THREE.Color(SOLID_BACKGROUND);
+const MATERIAL_BG = new THREE.Color(MATERIAL_BACKGROUND);
+/** Built-in studio environment is a fill; a project HDRI is used as authored. */
+const STUDIO_ENVIRONMENT_INTENSITY = 0.45;
 
 type Quaternion = [number, number, number, number];
+
+/** A project HDRI decoded into an equirect source plus its prefiltered PMREM. */
+interface LoadedEnvironment {
+  path: string;
+  /** Equirectangular linear texture — doubles as the Material background. */
+  source: THREE.Texture;
+  /** PMREM output: what `scene.environment` wants. */
+  environment: THREE.Texture;
+  target: THREE.WebGLRenderTarget;
+}
 
 interface Runtime {
   renderer: THREE.WebGLRenderer;
@@ -49,8 +64,14 @@ interface Runtime {
   helpers: THREE.BoxHelper[];
   /** Selection + camera-view identity the current helpers were built for. */
   helperKey: string;
-  /** Prefiltered studio environment for the Material preview (PMREM). */
+  /** Built-in RoomEnvironment, used until a project HDRI replaces it. */
+  studioEnvironment: THREE.Texture | null;
+  /** Environment lighting the scene right now (PMREM output). */
   environment: THREE.Texture | null;
+  /** HDRI source texture for the Material background, when one is loaded. */
+  environmentBackground: THREE.Texture | null;
+  /** True when `environment` is a project HDRI rather than the studio sky. */
+  customEnvironment: boolean;
   pmrem: THREE.PMREMGenerator | null;
   /** Latest selection, so the canvas click handler is not a stale closure. */
   selection: string[];
@@ -178,6 +199,24 @@ function applyShading(
     return;
   }
   if (object.kind.type === "mesh") setSolidShading(group, solid);
+}
+
+/**
+ * Environment lighting and backdrop for the current mode.
+ *
+ * Solid stays neutral: no IBL and no HDRI sky (the clay view is for shape).
+ * Material uses the project HDRI — including as the background, like Blender's
+ * Material preview — or the built-in studio sky. The project's IBL intensity
+ * scales the light; the fallback is additionally dimmed so it reads as fill.
+ */
+function applyEnvironment(runtime: Runtime, solid: boolean, iblIntensity: number): void {
+  runtime.scene.environment = solid ? null : runtime.environment;
+  runtime.scene.environmentIntensity = solid
+    ? 0
+    : iblIntensity * (runtime.customEnvironment ? 1 : STUDIO_ENVIRONMENT_INTENSITY);
+  runtime.scene.background = solid
+    ? SOLID_BG
+    : runtime.environmentBackground ?? MATERIAL_BG;
 }
 
 /** A small frustum, drawn where the project's active camera sits. */
@@ -504,6 +543,39 @@ export function Viewport3D() {
     [],
   );
 
+  /** The project HDRI currently decoded for this viewport (one at a time). */
+  const environmentRef = useRef<LoadedEnvironment | null>(null);
+  const loadEnvironment = useCallback(
+    async (path: string): Promise<LoadedEnvironment> => {
+      const runtime = runtimeRef.current;
+      if (!runtime?.pmrem) throw new Error("the viewport is not ready");
+      const payload = await bridge.readHdr(path);
+      const texData = new HDRLoader().parse(base64ToArrayBuffer(payload.base64));
+      if (!texData.data || !texData.width || !texData.height) {
+        throw new Error("the HDRI has no image data");
+      }
+      const source = new THREE.DataTexture(
+        texData.data as unknown as Uint16Array,
+        texData.width,
+        texData.height,
+        THREE.RGBAFormat,
+        texData.type ?? THREE.HalfFloatType,
+      );
+      source.mapping = THREE.EquirectangularReflectionMapping;
+      source.colorSpace = THREE.LinearSRGBColorSpace;
+      source.minFilter = THREE.LinearFilter;
+      source.magFilter = THREE.LinearFilter;
+      source.generateMipmaps = false;
+      source.flipY = texData.flipY ?? true;
+      source.needsUpdate = true;
+      // PMREM is what `scene.environment` expects; the source doubles as the
+      // Material background (PMREM output cannot be drawn as a skybox).
+      const target = runtime.pmrem.fromEquirectangular(source);
+      return { path, source, environment: target.texture, target };
+    },
+    [],
+  );
+
   useEffect(() => {
     const container = containerRef.current;
     const canvas = canvasRef.current;
@@ -570,15 +642,16 @@ export function Viewport3D() {
     fill.position.set(-7, 4, -6);
     scene.add(hemi, sun, fill);
 
-    // The Material preview's studio HDRI: prefiltered once at mount, then
-    // swapped in with the mode. A device without the required float target
-    // simply keeps the directional lights (the environment is optional).
+    // The studio HDRI is the fallback: prefiltered once at mount, then swapped
+    // for the project's HDRI when one is set. A device without the required
+    // float target simply keeps the directional lights (the environment is
+    // optional).
     const pmrem = new THREE.PMREMGenerator(renderer);
-    let environment: THREE.Texture | null = null;
+    let studioEnvironment: THREE.Texture | null = null;
     try {
-      environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      studioEnvironment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     } catch {
-      environment = null;
+      studioEnvironment = null;
     }
 
     const grid = new THREE.GridHelper(20, 40, 0x2f3744, 0x1d222a);
@@ -602,7 +675,10 @@ export function Viewport3D() {
       objects: new Map(),
       helpers: [],
       helperKey: "",
-      environment,
+      studioEnvironment,
+      environment: studioEnvironment,
+      environmentBackground: null,
+      customEnvironment: false,
       pmrem,
       selection: [],
     };
@@ -784,7 +860,7 @@ export function Viewport3D() {
       }
       grid.geometry.dispose();
       (grid.material as THREE.Material).dispose();
-      runtime.environment?.dispose();
+      runtime.studioEnvironment?.dispose();
       runtime.pmrem?.dispose();
       renderer.dispose();
       runtimeRef.current = null;
@@ -1017,16 +1093,10 @@ export function Viewport3D() {
     }
 
     // Viewport mode owns the light rig: Solid is flat clay under the scene sun;
-    // Material adds the studio HDRI and soft shadows. Rendered shows the engine
-    // frame instead, but keeping the rig consistent avoids a bright flash when
-    // switching back.
-    runtime.scene.environment = solidView ? null : runtime.environment;
-    // A gentle environment: the HDRI is a fill, the scene sun still decides
-    // the form, and the albedo must stay readable.
-    runtime.scene.environmentIntensity = 0.45;
-    runtime.scene.background = new THREE.Color(
-      solidView ? SOLID_BACKGROUND : MATERIAL_BACKGROUND,
-    );
+    // Material adds the environment (project HDRI or studio sky) and soft
+    // shadows. Rendered shows the engine frame instead, but keeping the rig
+    // consistent avoids a bright flash when switching back.
+    applyEnvironment(runtime, solidView, project.render.iblIntensity);
     runtime.sun.castShadow = !solidView;
     runtime.hemi.intensity = solidView ? 0.28 : 0.12;
 
@@ -1077,6 +1147,78 @@ export function Viewport3D() {
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
   }, [cameraView, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
+
+  // A project HDRI replaces the studio sky for Material and Rendered. The
+  // viewport decodes and pre-filters it here (Rendered receives the path and
+  // lets the engine upload it); a replaced map is freed after the new one is
+  // bound, and a failed load keeps whatever was lighting the scene before.
+  const environmentAssetId = state?.project.render.environment ?? null;
+  const environmentPath =
+    environmentAssetId && state
+      ? state.project.assets.find((asset) => asset.id === environmentAssetId)?.path ?? null
+      : null;
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    let cancelled = false;
+    const intensity = stateRef.current?.project.render.iblIntensity ?? 1;
+    const apply = () =>
+      applyEnvironment(runtime, viewportModeRef.current === "solid", intensity);
+
+    if (!environmentPath) {
+      const previous = environmentRef.current;
+      environmentRef.current = null;
+      previous?.source.dispose();
+      previous?.target.dispose();
+      runtime.environment = runtime.studioEnvironment;
+      runtime.environmentBackground = null;
+      runtime.customEnvironment = false;
+      apply();
+      return;
+    }
+
+    void loadEnvironment(environmentPath)
+      .then((loaded) => {
+        if (cancelled) {
+          loaded.source.dispose();
+          loaded.target.dispose();
+          return;
+        }
+        const previous = environmentRef.current;
+        environmentRef.current = loaded;
+        runtime.environment = loaded.environment;
+        runtime.environmentBackground = loaded.source;
+        runtime.customEnvironment = true;
+        apply();
+        if (previous && previous.path !== loaded.path) {
+          previous.source.dispose();
+          previous.target.dispose();
+        }
+        setProblem((current) =>
+          current && current.startsWith("Could not load HDRI") ? null : current,
+        );
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setProblem(
+          `Could not load HDRI ${environmentPath}: ${cause instanceof Error ? cause.message : cause}`,
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [environmentPath, loadEnvironment]);
+
+  // The decoded HDRI belongs to the viewport, not the cache, so free it here.
+  useEffect(
+    () => () => {
+      const custom = environmentRef.current;
+      environmentRef.current = null;
+      custom?.source.dispose();
+      custom?.target.dispose();
+    },
+    [],
+  );
 
   useEffect(() => {
     const runtime = runtimeRef.current;

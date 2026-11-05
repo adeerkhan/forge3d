@@ -382,6 +382,59 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     flash("Texture removed");
   }, [applyCommand, flash, selectedMesh]);
 
+  /**
+   * Pick a Radiance `.hdr` and make it the project's environment. Registered
+   * as an asset first (same batch), so the render settings never reference an
+   * id the project does not carry.
+   */
+  const importEnvironment = useCallback(async () => {
+    if (bridge.kind !== "tauri") {
+      fail(new Error("HDRI environments need the desktop shell"));
+      return;
+    }
+    const project = state?.project;
+    if (!project) return;
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Radiance HDR environment", extensions: ["hdr"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+      const byteSize = await bridge.fileSize(path);
+      const asset = {
+        id: crypto.randomUUID(),
+        name: path.split(/[\\/]/).pop() ?? "environment.hdr",
+        path,
+        kind: "hdr" as const,
+        byteSize,
+      };
+      const applied = await applyCommand({
+        type: "batch",
+        commands: [
+          { type: "addAsset", asset },
+          {
+            type: "setRenderSettings",
+            render: { ...project.render, environment: asset.id },
+          },
+        ],
+      });
+      if (applied) flash(`Environment set to ${asset.name}`);
+    } catch (cause) {
+      fail(cause);
+    }
+  }, [applyCommand, fail, flash, state]);
+
+  const clearEnvironment = useCallback(async () => {
+    const project = state?.project;
+    if (!project) return;
+    await applyCommand({
+      type: "setRenderSettings",
+      render: { ...project.render, environment: null },
+    });
+    flash("Environment cleared");
+  }, [applyCommand, flash, state]);
+
   const relinkAsset = useCallback(
     async (assetId: string) => {
       try {
@@ -705,6 +758,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       refreshEngine,
       importMaterialTexture,
       clearMaterialTexture,
+      importEnvironment,
+      clearEnvironment,
       relinkAsset,
       importTerrainDem,
       importTerrainOverlay,
@@ -755,6 +810,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importMesh,
       importMaterialTexture,
       clearMaterialTexture,
+      importEnvironment,
+      clearEnvironment,
       relinkAsset,
       importTerrainDem,
       importTerrainOverlay,

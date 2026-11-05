@@ -333,9 +333,13 @@ function AssetsPanel() {
 }
 
 function RenderSettingsEditor() {
-  const { state, actions } = useSession();
+  const { state, actions, bridgeKind } = useSession();
+  const caps = useCapabilities();
   const render = state?.project.render;
   if (!render) return null;
+  const environment = render.environment
+    ? state?.project.assets.find((asset) => asset.id === render.environment)
+    : undefined;
   const commit = (patch: Partial<typeof render>) => {
     void actions.apply({ type: "setRenderSettings", render: { ...render, ...patch } });
   };
@@ -365,11 +369,41 @@ function RenderSettingsEditor() {
         max={4}
         onCommit={(iblIntensity) => commit({ iblIntensity })}
       />
+      <span className="group-label">Environment (HDRI)</span>
+      <div className="readout readout--compact">
+        <dt>Map</dt>
+        <dd>{environment?.name ?? "built-in studio sky"}</dd>
+      </div>
+      <div className="inline-actions">
+        <button
+          type="button"
+          className="button button--small"
+          disabled={bridgeKind !== "tauri"}
+          title={
+            bridgeKind === "tauri"
+              ? "Pick a Radiance .hdr for image-based lighting; both Material and Rendered use it"
+              : "HDRI environments need the desktop shell"
+          }
+          onClick={() => void actions.importEnvironment()}
+        >
+          {environment ? "Replace HDRI…" : "Add HDRI…"}
+        </button>
+        {environment && (
+          <button
+            type="button"
+            className="button button--small"
+            onClick={() => void actions.clearEnvironment()}
+          >
+            Remove
+          </button>
+        )}
+      </div>
+      <CapabilityBadges rows={caps?.environment} />
       <p className="hint">
         Settings are stored with the project and applied to both the Rendered
         viewport and the Render button. Solid is a neutral clay view; the
-        Material preview lights the scene with a studio HDRI plus soft sun
-        shadows and never renders through the engine.
+        Material preview lights the scene with this HDRI (or the built-in studio
+        sky) plus soft sun shadows and never renders through the engine.
       </p>
     </Section>
   );

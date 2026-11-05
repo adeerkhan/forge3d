@@ -64,9 +64,9 @@ pub use timeline::{
     DEFAULT_FRAME_RATE, DEFAULT_LENGTH,
 };
 pub use workspace::{
-    camera_render_view, capability_report, compute_render_view, handoff, parameter_capabilities,
-    CameraSync, CapabilityLevel, CapabilityReport, CapabilityTable, Handoff, ObjectCapability,
-    ParameterCapability, RenderView, SunAngles, TerrainView,
+    camera_render_view, capability_report, compute_render_view, environment_handoff, handoff,
+    parameter_capabilities, CameraSync, CapabilityLevel, CapabilityReport, CapabilityTable,
+    Handoff, ObjectCapability, ParameterCapability, RenderView, SunAngles, TerrainView,
 };
 
 /// Wall-clock milliseconds since the Unix epoch.

@@ -62,6 +62,8 @@ export interface StudioBridge {
   readMeshFile(path: string): Promise<MeshFilePayload>;
   /** Read a PNG/JPEG for a viewport texture. */
   readImageAsset(path: string): Promise<MeshFilePayload>;
+  /** Raw Radiance `.hdr` bytes for the Material preview's PMREM. */
+  readHdr(path: string): Promise<MeshFilePayload>;
   /** Decoded, downsampled PNG of a raster overlay — the Material preview
    *  drapes this on the terrain (the webview cannot decode GeoTIFF). */
   rasterPreview(path: string, width?: number): Promise<MeshFilePayload>;

@@ -62,8 +62,11 @@ fn project_document_key_shape_is_stable() {
             "ambientOcclusion",
             "sky",
             "iblIntensity",
+            "environment",
         ],
     );
+    // The default project uses the built-in studio sky.
+    assert_eq!(value["render"]["environment"], serde_json::Value::Null);
 
     let timeline = &value["timeline"];
     expect_keys(timeline, &["frameRate", "length", "currentFrame", "tracks"]);

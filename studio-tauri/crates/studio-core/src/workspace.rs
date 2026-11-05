@@ -311,6 +311,9 @@ pub struct Handoff {
     pub terrain: Option<TerrainHandoff>,
     pub assets: Vec<ForgeAsset>,
     pub sun: Option<SunAngles>,
+    /// HDRI environment for image-based lighting, when the project sets one.
+    /// Both the Material preview and Rendered frames consume it.
+    pub environment: Option<ForgeAsset>,
 }
 
 /// Compute the report for a target workspace.
@@ -490,6 +493,8 @@ pub struct ParameterCapability {
 #[serde(rename_all = "camelCase")]
 pub struct CapabilityTable {
     pub light: Vec<ParameterCapability>,
+    /// Image-based lighting (the HDRI environment).
+    pub environment: Vec<ParameterCapability>,
     pub mesh_material: Vec<ParameterCapability>,
     pub terrain_material: Vec<ParameterCapability>,
     pub camera: Vec<ParameterCapability>,
@@ -526,6 +531,11 @@ pub fn parameter_capabilities() -> CapabilityTable {
                 "Neither view implements point lights — the option is disabled in the inspector.",
             ),
         ],
+        environment: vec![parameter(
+            "HDRI environment",
+            CapabilityLevel::Full,
+            "The Material preview and Rendered frames both light with this .hdr: the viewport pre-filters it (PMREM), the engine uploads it as IBL. Without one both use the built-in studio sky.",
+        )],
         mesh_material: vec![
             parameter(
                 "base colour",
@@ -672,7 +682,23 @@ pub fn handoff(project: &Project, revision: u64, target: Workspace) -> Handoff {
         terrain: terrain_handoff(project),
         assets,
         sun: sun_angles(project),
+        environment: environment_handoff(project),
     }
+}
+
+/// The project's HDRI environment in renderer terms, when set.
+///
+/// The path is what both consumers need: the viewport reads the bytes for its
+/// PMREM, and the engine hands it to `IBL.from_hdr`. Keeping the lookup here
+/// means a missing/renamed asset can never be silently ignored by one of them.
+pub fn environment_handoff(project: &Project) -> Option<ForgeAsset> {
+    let asset = project.asset(project.render.environment?)?;
+    Some(ForgeAsset {
+        id: asset.id,
+        name: asset.name.clone(),
+        path: asset.path.clone(),
+        kind: asset.kind,
+    })
 }
 
 /// The scene's DEM in viewer terms.
@@ -999,6 +1025,7 @@ mod tests {
         for row in table
             .light
             .iter()
+            .chain(&table.environment)
             .chain(&table.mesh_material)
             .chain(&table.terrain_material)
             .chain(&table.camera)

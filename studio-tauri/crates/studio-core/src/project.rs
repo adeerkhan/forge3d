@@ -253,6 +253,11 @@ impl Project {
                 }
             }
         }
+        if let Some(environment) = self.render.environment {
+            if !used.contains(&environment) {
+                used.push(environment);
+            }
+        }
         used
     }
 
@@ -272,6 +277,13 @@ impl Project {
                     || object.mesh().and_then(|mesh| mesh.material.texture) == Some(id)
             })
             .count()
+            + usize::from(self.render.environment == Some(id))
+    }
+
+    /// The HDRI environment's path, when the project sets one.
+    pub fn environment_path(&self) -> Option<&str> {
+        let asset = self.asset(self.render.environment?)?;
+        Some(asset.path.as_str())
     }
 
     pub fn asset(&self, id: AssetId) -> Option<&Asset> {
@@ -326,6 +338,19 @@ impl Project {
 
         // A mesh or terrain may only reference an asset the project carries;
         // dangling references are what "missing asset" panics are made of.
+        if let Some(environment) = self.render.environment {
+            let Some(asset) = self.asset(environment) else {
+                return Err(format!(
+                    "render environment references missing asset {environment}"
+                ));
+            };
+            if asset.kind != AssetKind::Hdr {
+                return Err(format!(
+                    "render environment uses {:?}, but it is {:?} (expected an .hdr environment)",
+                    asset.name, asset.kind
+                ));
+            }
+        }
         for object in &self.scene.objects {
             if let Some(asset) = object.mesh().and_then(MeshObject::asset_id) {
                 if !asset_ids.contains(&asset) {
@@ -525,6 +550,12 @@ pub struct RenderSettings {
     /// brightness relative to the sun (0 = environment light off).
     #[serde(default = "default_ibl_intensity")]
     pub ibl_intensity: f32,
+    /// HDRI environment (Radiance `.hdr`) used for image-based lighting in
+    /// Material previews and Rendered frames. `None` means the built-in
+    /// studio sky. Stored as an asset id so relinking and dependency counts
+    /// work like every other file reference.
+    #[serde(default)]
+    pub environment: Option<AssetId>,
 }
 
 fn default_exposure() -> f32 {
@@ -549,6 +580,7 @@ impl Default for RenderSettings {
             ambient_occlusion: false,
             sky: true,
             ibl_intensity: default_ibl_intensity(),
+            environment: None,
         }
     }
 }
@@ -598,6 +630,8 @@ pub enum AssetKind {
     Dem,
     /// An orthophoto / albedo raster draped over terrain.
     Orthophoto,
+    /// A Radiance `.hdr` environment map for image-based lighting.
+    Hdr,
 }
 
 impl AssetKind {
@@ -611,6 +645,7 @@ impl AssetKind {
             Some("gltf") => Some(AssetKind::Gltf),
             Some("glb") => Some(AssetKind::Glb),
             Some("tif" | "tiff") => Some(AssetKind::Dem),
+            Some("hdr") => Some(AssetKind::Hdr),
             _ => None,
         }
     }
@@ -621,6 +656,7 @@ impl AssetKind {
             AssetKind::Glb => "glb",
             AssetKind::Dem => "tif",
             AssetKind::Orthophoto => "tif",
+            AssetKind::Hdr => "hdr",
         }
     }
 

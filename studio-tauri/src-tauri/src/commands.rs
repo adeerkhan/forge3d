@@ -246,6 +246,9 @@ pub fn discard_recovery(state: State<'_, AppState>, id: String) -> Result<(), St
 /// Imports are read whole into memory. Phase 5 streams large assets; until
 /// then the cap is what keeps a 2 GB GLB from freezing the window.
 const MAX_MESH_BYTES: u64 = 32 * 1024 * 1024;
+/// Cap on an HDRI pulled across IPC for the Material preview (base64 adds a
+/// third, so this is a real memory bound).
+const MAX_HDR_BYTES: u64 = 64 * 1024 * 1024;
 
 /// A mesh file the viewport can parse with GLTFLoader.
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +276,13 @@ pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
             path.display()
         )
     })?;
+    // `.hdr` is an asset kind too (the environment map); it is not a mesh.
+    if !matches!(kind, AssetKind::Gltf | AssetKind::Glb) {
+        return Err(format!(
+            "{} is not a glTF file; import .gltf or .glb",
+            path.display()
+        ));
+    }
 
     let metadata = std::fs::metadata(&path)
         .map_err(|error| format!("could not read {}: {error}", path.display()))?;
@@ -554,6 +564,43 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
     })
 }
 
+/// Raw bytes of a Radiance `.hdr` environment for the Material preview.
+///
+/// The webview cannot display RGBE with an `<img>`, so the shell reads the file
+/// and the viewport parses it with three's `HDRLoader` before pre-filtering it
+/// with PMREM. Rendered frames do not go through here: the engine reads the
+/// path itself (`IBL.from_hdr`).
+#[tauri::command]
+pub fn read_hdr(path: String) -> Result<MeshFilePayload, String> {
+    if AssetKind::from_path(std::path::Path::new(&path)) != Some(AssetKind::Hdr) {
+        return Err(format!(
+            "{path} is not a Radiance .hdr environment — export the HDRI as .hdr"
+        ));
+    }
+    let bytes = std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))?;
+    if bytes.is_empty() {
+        return Err(format!("{path} is empty"));
+    }
+    if bytes.len() as u64 > MAX_HDR_BYTES {
+        return Err(format!(
+            "{path} is {:.1} MB; the environment map limit is {} MB",
+            bytes.len() as f64 / (1024.0 * 1024.0),
+            MAX_HDR_BYTES / (1024 * 1024)
+        ));
+    }
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "environment.hdr".to_owned());
+    Ok(MeshFilePayload {
+        path,
+        name,
+        kind: AssetKind::Hdr,
+        byte_size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    })
+}
+
 /// Decoded, downsampled PNG of a raster overlay for the Material preview's
 /// terrain drape — the webview cannot decode GeoTIFF, so the engine python
 /// does it and hands back a PNG the canvas can display.
@@ -693,6 +740,7 @@ pub fn render_still(
         "ambientOcclusion": request.ambient_occlusion,
         "sky": request.sky,
         "iblIntensity": request.ibl_intensity,
+        "environment": request.environment,
         "camera": {
             "phiDeg": request.phi_deg,
             "thetaDeg": request.theta_deg,

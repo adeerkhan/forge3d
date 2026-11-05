@@ -40,7 +40,7 @@ export interface LightObject {
   intensity: number;
 }
 
-export type AssetKind = "gltf" | "glb" | "dem" | "orthophoto";
+export type AssetKind = "gltf" | "glb" | "dem" | "orthophoto" | "hdr";
 
 /** An imported source file. Stored relative to the project where possible. */
 export interface Asset {
@@ -120,6 +120,9 @@ export interface RenderSettings {
   sky: boolean;
   /** Environment/IBL intensity multiplier; 0 turns the environment light off. */
   iblIntensity: number;
+  /** Radiance .hdr environment asset for image-based lighting, or null for
+   *  the built-in studio sky. Shared by the Material preview and Rendered. */
+  environment: string | null;
 }
 
 /** Studio-side material. The terrain renderer does not consume it. */
@@ -299,6 +302,7 @@ export interface ParameterCapability {
 /** Per-parameter capability table (studio-core is the single source). */
 export interface CapabilityTable {
   light: ParameterCapability[];
+  environment: ParameterCapability[];
   meshMaterial: ParameterCapability[];
   terrainMaterial: ParameterCapability[];
   camera: ParameterCapability[];

@@ -349,6 +349,9 @@ pub struct RenderRequest {
     pub sky: bool,
     /// Environment/IBL intensity multiplier (0 = environment light off).
     pub ibl_intensity: f64,
+    /// Radiance `.hdr` environment for image-based lighting, when the project
+    /// sets one. `None` makes the service use its built-in studio sky.
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -425,6 +428,7 @@ impl RenderRequest {
             "shadows": self.shadows,
             "ambientOcclusion": self.ambient_occlusion,
             "iblIntensity": self.ibl_intensity,
+            "environment": self.environment,
             "output": output,
         })
     }
@@ -497,6 +501,77 @@ impl RenderRequest {
             ambient_occlusion: false,
             sky: true,
             ibl_intensity: 1.0,
+            environment: handoff
+                .environment
+                .as_ref()
+                .map(|environment| environment.path.clone()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request() -> RenderRequest {
+        RenderRequest {
+            width: 960,
+            height: 600,
+            dem: "/data/dem.tif".to_owned(),
+            phi_deg: 310.0,
+            theta_deg: 68.0,
+            radius: 6100.0,
+            target: [0.0, 0.0, 39.5],
+            fov_deg: 45.0,
+            sun_azimuth_deg: 60.0,
+            sun_elevation_deg: 50.0,
+            sun_intensity: 3.0,
+            sun_color: [1.0, 0.97, 0.92],
+            z_scale: 1.0,
+            overlay: None,
+            exposure: 1.35,
+            shadows: true,
+            ambient_occlusion: false,
+            sky: true,
+            ibl_intensity: 1.0,
+            environment: None,
+        }
+    }
+
+    #[test]
+    fn payload_carries_the_project_hdri() {
+        let mut frame = request();
+        frame.environment = Some("/hdri/studio_sunrise.hdr".to_owned());
+        let payload = frame.to_payload("final", Some("/out/frame.png"));
+        assert_eq!(payload["environment"], "/hdri/studio_sunrise.hdr");
+        assert_eq!(payload["iblIntensity"], 1.0);
+        assert_eq!(payload["output"], "/out/frame.png");
+
+        // The built-in sky is requested by *not* sending a path, and a preview
+        // frame skips POM and AO while a final honours them.
+        let preview = request().to_payload("preview", None);
+        assert!(preview["environment"].is_null());
+        assert_eq!(preview["quality"]["pom"], false);
+        assert_eq!(preview["quality"]["ambientOcclusion"], false);
+    }
+
+    #[test]
+    fn view_override_still_wins_over_the_handoff_camera() {
+        let mut frame = request();
+        frame.phi_deg = 10.0;
+        frame.target = [1.0, 2.0, 3.0];
+        let view = RenderView {
+            phi_deg: 200.0,
+            theta_deg: 55.0,
+            radius: 900.0,
+            target: Some([4.0, 5.0, 6.0]),
+            fov_deg: Some(30.0),
+        };
+        let frame = frame.with_view(Some(&view));
+        assert_eq!(frame.phi_deg, 200.0);
+        assert_eq!(frame.theta_deg, 55.0);
+        assert_eq!(frame.radius, 900.0);
+        assert_eq!(frame.target, [4.0, 5.0, 6.0]);
+        assert_eq!(frame.fov_deg, 30.0);
     }
 }

@@ -78,6 +78,7 @@ pub fn run() {
             commands::terrain_preview,
             commands::import_terrain_dem,
             commands::read_image_asset,
+            commands::read_hdr,
             commands::raster_preview,
             commands::set_terrain_overlay,
             commands::forge3d_probe,

@@ -49,6 +49,7 @@ export.
 | Material inspector (terrain albedo + engine summary, mesh base colour/texture) | `Inspector.tsx` | done |
 | Texture asset management (attach, replace, remove; non-empty invariant) | `session.tsx`, `commands.rs` | done |
 | Environment/IBL controls (sky background, environment intensity) | `RenderSettings`, `RenderSettingsEditor` | done |
+| HDRI environment for Material + Rendered (`read_hdr`, PMREM, `IBL.from_hdr`) | `RenderSettings.environment`, `Viewport3D.tsx`, `studio_render.py` | done |
 | Basic lights & camera properties (direction/intensity/colour, fov/clip) | `Inspector.tsx`, `render.rs` | done |
 | Asset relinking and dependency counts | `Inspector.tsx`, `command.rs` | done |
 | Material-preview albedo drape (raster → PNG via engine python) | `raster_preview`, `Viewport3D.tsx` | done |
@@ -196,12 +197,15 @@ The Studio viewport has three modes, toggled in the viewport toolbar:
   with **no albedo, textures or material colours**. Fast orbit/pan/zoom, gizmos,
   and instant selection. This is the editing view.
 - **Material** — a lightweight material preview, not an engine render: the
-  three.js scene lit by a prefiltered studio HDRI (`RoomEnvironment`, via PMREM)
-  plus soft sun shadows, showing the albedo (terrain drape, mesh base colour and
-  texture, glTF materials). The camera orbits freely here exactly like Solid.
+  three.js scene lit by the project's HDRI (pre-filtered with PMREM) or, when
+  none is set, a built-in studio environment, plus soft sun shadows. It shows
+  the albedo (terrain drape, mesh base colour and texture, glTF materials) and
+  uses the HDRI as its background, so it reads as a look-dev view. The camera
+  orbits freely here exactly like Solid.
 - **Rendered** — the Forge3D terrain pipeline, rendered offscreen and displayed
   in the viewport. Same engine, same shaders, same PBR/POM/shadows/sky settings
-  as the golden-tested renders; no second window.
+  as the golden-tested renders; no second window. It lights with the same
+  project HDRI (the engine uploads it with `IBL.from_hdr`).
 
 Implementation: `src-tauri/src/render.rs` keeps one Python process alive
 (`studio_render.py`) — session, renderer, and a generated neutral sky HDR are
@@ -217,6 +221,26 @@ describing every setting that produced it.
 
 Mode changes only re-shade the built content (Solid swaps in a clay material and
 back); they never rebuild geometry or re-fetch textures.
+
+### Environment (HDRI)
+
+`Inspector → Render output → Environment (HDRI)` adds a Radiance `.hdr` file to
+the project as an asset and makes it the scene's image-based light. It is one
+setting used by two consumers:
+
+- **Material** reads the bytes through `read_hdr`, decodes them with three's
+  `HDRLoader`, pre-filters with PMREM, and uses the result for `scene.environment`
+  — with the equirect source as the background. A replaced map is freed once the
+  new one is bound; the built-in studio sky is the fallback.
+- **Rendered** sends the *path* with each frame; `studio_render.py` hands it to
+  `IBL.from_hdr` and caches the prefiltered map by file identity (path, mtime,
+  size), so orbiting costs nothing and replacing the file takes effect.
+
+`Environment / IBL intensity` scales the image-based light in both views (0
+turns it off; the built-in studio fallback is additionally dimmed so it reads as
+fill, the project HDRI is used as authored). Removing the HDRI returns both views
+to the studio sky. The asset cannot be deleted while it is the environment — the
+Assets panel reports it as in use.
 
 ## The default scene is a DEM (Phase 4)
 
@@ -289,6 +313,11 @@ the render handoff.
 - **Rendered shows one still frame at a time.** Playback animates the Solid and
   Material viewports live; Rendered re-renders on edits and camera changes
   (throttled), not per playback frame. Use **Export frames…** for the sequence.
+- **HDRI environments are Radiance `.hdr` only.** Both consumers read RGBE
+  (three's `HDRLoader` and the engine's `IBL.from_hdr`); `.exr` is rejected with
+  a specific message rather than silently mis-lighting. The viewport reads the
+  file whole over IPC (64 MB cap) and keeps one decoded map at a time, so a very
+  large HDRI costs a decode (~a second) when first selected or replaced.
 - **Country-scale DEMs render through a scale budget.** The studio renderer
   scales any DEM into a 30 000-unit world, so wide maps frame correctly
   (verified end-to-end with Switzerland, 353 km — its relief is only ~1 % of

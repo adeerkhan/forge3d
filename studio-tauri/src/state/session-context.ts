@@ -81,6 +81,10 @@ export interface SessionApi {
     importMaterialTexture(): Promise<void>;
     /** Remove the selected mesh's texture. */
     clearMaterialTexture(): Promise<void>;
+    /** Pick a Radiance .hdr environment for Material and Rendered lighting. */
+    importEnvironment(): Promise<void>;
+    /** Drop the project HDRI and fall back to the built-in studio sky. */
+    clearEnvironment(): Promise<void>;
     /** Re-point an asset at a new file. */
     relinkAsset(assetId: string): Promise<void>;
     /** Pick a raster overlay for the terrain. */

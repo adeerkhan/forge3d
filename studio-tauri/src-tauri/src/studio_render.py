@@ -135,12 +135,49 @@ class StudioRenderer:
 
         env_path = Path(tempfile.gettempdir()) / "forge3d-studio-sky.hdr"
         write_sky_hdr(env_path)
+        self.sky_path = env_path
+        # The built-in sky is the fallback; a project HDRI replaces it. IBLs
+        # are cached because `from_hdr` uploads and pre-filters the map, and
+        # Rendered mode re-requests frames while the camera moves.
+        self._ibl_cache: Dict[tuple, Any] = {}
+        self._ibl_cache_limit = 4
 
         self.session = f3d.Session(window=False, backend="vulkan")
         self.renderer = f3d.TerrainRenderer(self.session)
-        self.ibl = f3d.IBL.from_hdr(str(env_path), intensity=1.0)
         self.materials = f3d.MaterialSet.terrain_default()
         self.size: Optional[tuple[int, int]] = None
+
+    def environment_map(self, path: Optional[str]):
+        """The IBL for one frame: the project's HDRI, or the built-in studio sky.
+
+        Cached by file identity (path, mtime, size) so replacing the .hdr in
+        place still takes effect, while orbiting reuses the prefiltered map.
+        """
+        if not path:
+            key: tuple = ("studio-sky",)
+            source = str(self.sky_path)
+        else:
+            target = Path(path)
+            try:
+                stat = target.stat()
+            except OSError as exc:
+                raise RuntimeError("HDRI environment not found: %s (%s)" % (path, exc))
+            if not target.is_file():
+                raise RuntimeError("HDRI environment is not a file: %s" % (path,))
+            if stat.st_size == 0:
+                raise RuntimeError("HDRI environment is empty: %s" % (path,))
+            key = (str(target), stat.st_mtime_ns, stat.st_size)
+            source = str(target)
+
+        cached = self._ibl_cache.get(key)
+        if cached is None:
+            cached = self.f3d.IBL.from_hdr(source, intensity=1.0)
+            self._ibl_cache[key] = cached
+            # A user trying several HDRIs should not leak every prefiltered
+            # map; keep a few and drop the oldest insertion.
+            while len(self._ibl_cache) > self._ibl_cache_limit:
+                self._ibl_cache.pop(next(iter(self._ibl_cache)))
+        return cached
 
     def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
         """Read a raster overlay decimated to the frame, aiming for the drape.
@@ -254,8 +291,10 @@ class StudioRenderer:
         # The shader's u_ibl.intensity comes from the IBL object itself
         # (prepare_ibl_bind_group reads env_maps.intensity), not from
         # TerrainRenderParams — set it here so the project's Environment
-        # intensity actually reaches the frame.
-        self.ibl.intensity = float(request.get("iblIntensity", 1.0))
+        # intensity actually reaches the frame. The map itself is the project's
+        # HDRI when set, otherwise the built-in studio sky.
+        ibl = self.environment_map(request.get("environment") or None)
+        ibl.intensity = float(request.get("iblIntensity", 1.0))
 
         settings = make_terrain_params_config(
             size_px=(width, height),
@@ -317,7 +356,7 @@ class StudioRenderer:
 
         params = f3d.TerrainRenderParams(settings)
         frame = self.renderer.render_terrain_pbr_pom(
-            self.materials, self.ibl, params, self.heights
+            self.materials, ibl, params, self.heights
         )
         image = np.asarray(frame.to_numpy())
         rgb = image[:, :, :3].astype(np.uint8)
