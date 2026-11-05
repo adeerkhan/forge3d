@@ -1,587 +1,297 @@
-# Bringing Forge3D into Studio — integration roadmap (Phases 8–18)
+# Studio × Forge3D — implementable integration plan (ponytail edition)
 
-Status: **proposal**. This document is a plan, not a changelog.
+Status: **plan**, not code. Phases 0–7 plus the HDRI sky are implemented;
+everything below is future work. This revision replaces the earlier 8–18
+roadmap: same coverage, far fewer moving parts, every increment sized to land
+against the **current** `studio-tauri` with the files that already exist.
 
-> **Delivery status (read this first).** Studio Phases 0–7 from
-> `FORGE3D_STUDIO_IMPLEMENTATION_PLAN.md` are implemented, plus the HDRI sky
-> engine feature added after Phase 7. **Nothing in Phases 8–18 below is
-> implemented.** They are the roadmap for the rest of the engine surface.
-> The appendix maps every engine module to a phase so no area is dropped.
-
-This is a second pass: the first draft covered the headline APIs (MapScene,
-terrain params, geometry, cartography, bundles) but missed several real
-subsystems — ANAMNESIS render caching, CHRONOS flythroughs, Mapbox style import,
-thematic raster styles, data preparation, VT/scatter/smoke, licensing, render
-passes, camera rigs, datasets and DEM codec. They are folded in below.
-
-Readiness labels are the engine's own (`supported`, `native-required`,
-`underdeveloped`) where it publishes them, so a phase cannot quietly claim more
-than the engine can do.
+The rule applied throughout: use the ladder, stop at the first rung that holds.
+Most Forge3D features are *settings on the render request we already send*, not
+new subsystems. The plan only spends real design on the two things that cannot
+be a payload field: vector layers and meshes.
 
 ---
 
-## 0. What is actually in the code today
+## 0. Delivery status
 
-Studio already has the hard parts of a desktop product:
+| Area | State |
+|---|---|
+| Project model, commands, undo, schema v4 | done |
+| Solid / Material / Rendered viewport, HDRI sky | done |
+| Terrain stills, Rendered frames, animation export | done |
+| Timeline drawer, render queue, asset integrity, samples | done |
+| Everything below (§3–§6) | **not started** |
 
-- `studio-tauri/crates/studio-core` — canonical project (scene, commands, undo,
-  timeline, assets, validation), schema v4, no GPU/Python dependency.
-- `studio-tauri/src-tauri` — Tauri shell: IPC, autosave/recovery, atomic save,
-  render service (`studio_render.py`), offline render queue, asset integrity,
-  packaging.
-- `studio-tauri/src` — React UI: viewport (Solid/Material/Rendered), inspector,
-  scene tree, timeline drawer, render queue, capability badges.
+The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
+to decisions in §7 and the appendix; most of them are now explicitly **not
+built** until a trigger fires.
 
-| Area | State | Where |
+---
+
+## 1. What already exists in studio-tauri (the map)
+
+| Layer | File | What it already does |
 |---|---|---|
-| Project model, schema v4, migrations | done | `studio-core/src/persist.rs` |
-| Commands, undo/redo, validation | done | `command.rs`, `editor.rs` |
-| Solid / Material / Rendered viewport | done | `Viewport3D.tsx` |
-| Terrain preview + drape | done | `Viewport3D.tsx`, `raster_preview` |
-| Rendered terrain stills + Rendered viewport | done | `studio_render.py`, `render.rs` |
-| Timeline, keys, interpolation, playback, export | done | `timeline.rs`, `Timeline.tsx` |
-| Camera animation → engine | done | `workspace::camera_render_view` |
-| HDRI as IBL **and** as Rendered sky | done (post-7) | `sky_hdri.wgsl` |
-| Offline render queue + cancellation | done | `renderQueue.ts` |
-| Asset integrity + samples + perf guards | done | `integrity.rs`, `samples/` |
-| Packaging (Linux deb) + CI | done | `tauri.conf.json`, workflow |
-| Everything in Phases 8–18 | **not started** | this document |
+| Model | `crates/studio-core/src/project.rs` | `RenderSettings`, asset kinds, validation, schema |
+| Model | `crates/studio-core/src/command.rs` | `SetRenderSettings`, `AddAsset`, `Batch` — reuse these |
+| Model | `crates/studio-core/src/workspace.rs` | sun/camera handoff, `sun_angles`, `camera_render_view` |
+| Shell | `src-tauri/src/forge3d.rs` | engine probe (`EngineStatus`), terrain sampling |
+| Shell | `src-tauri/src/render.rs` | `RenderRequest`, `with_settings`, `to_payload` |
+| Shell | `src-tauri/src/studio_render.py` | one engine session, `TerrainRenderer`, IBL, sky |
+| Shell | `src-tauri/src/commands.rs` | IPC, `render_frame`/`render_still`/`render_animation_frame` |
+| Bridge | `src/bridge/types.ts` | `RenderSettings`, `EngineStatus`, command union |
+| Bridge | `src/bridge/mock.ts` | preview semantics (mirrors core) |
+| UI | `src/components/Inspector.tsx` | render settings + capability badges |
+| UI | `src/components/StatusBar.tsx` | engine probe status |
+| UI | `src/state/session.tsx` | render queue, playhead, actions |
+| Tests | `studio-core/tests/*`, `render.rs` tests, `npm test` | cheap, no GPU for most |
 
-Known product gaps inherited from Phases 0–7: the engine renders terrain only
-(no meshes until Phase 15), there is no shared material library (per-object
-materials only), the workspace switch was dropped, Windows/macOS installers are
-not configured, and Rendered is a still frame rather than live playback.
+## 2. The reusable recipe for a renderer setting
+
+Every "look" feature follows this exact diff. No new command, no new IPC, no
+new schema version (optional scalars with `serde(default)` are backward-safe,
+as `environment` proved).
+
+1. `project.rs`: add the field to `RenderSettings` with `#[serde(default…)]`;
+   add its range check to `Project::validate`.
+2. `types.ts` + `mock.ts`: add the field to `RenderSettings` and the default.
+3. `render.rs`: copy it in `with_settings`, emit it in `to_payload`.
+4. `studio_render.py`: map it to the engine dataclass in `render()`.
+5. `Inspector.tsx`: one control (`NumberField`/`Toggle`/`RangeField`).
+6. Tests: one schema-contract line, one payload assertion, one round-trip test.
+
+Five places (six files counting the mock), one test each, no architecture. The
+sections below list only what differs from this recipe.
 
 ---
 
-## 1. Integration architecture
+## 3. Increment 8.0 — Engine facts in the existing probe (0.5 day)
 
-### 1.1 One bridge, typed commands
+**Trigger:** always; later gating depends on it.
+**Reuse:** `forge3d.rs::probe_interpreter` + `EngineStatus`; extend its JSON.
 
-Keep the transport (Rust owns the Python process, newline-delimited JSON) and
-replace the single request shape with a command dispatcher:
+- `PROBE_SCRIPT`: one extra line, `forge3d.capabilities()` plus
+  `device_probe()` adapter/backend into the same JSON.
+- `EngineStatus`: add `features: Vec<String>`, `backend: Option<String>`,
+  `adapter: Option<String>`. TS type mirrors it.
+- `StatusBar`: the existing title tooltip lists the adapter and granted
+  features. No new panel.
+- Do **not** add a capability framework, license UI or per-control registry.
+  Gated controls appear only when a Pro-gated feature is actually built.
 
-```json
-{"cmd": "render_still",    "request": { "recipe": { ... } }}
-{"cmd": "validate_scene",  "request": { "recipe": { ... } }}
-{"cmd": "bake_atmosphere","request": { "lut": { ... } }}
-{"cmd": "import_vector",   "request": { "path": "...", "crs": "..." }}
+**Check:** a probe JSON fixture; status bar shows features on hover.
+
+## 4. Increment 9.0 — Sun from date/time/location (0.5 day)
+
+**Trigger:** always; highest value per line.
+**Reuse:** the sun light object, `SetTransform`, `workspace::sun_angles`.
+
+- Shell command `solar_position(latitude, longitude, datetime)` → Python
+  `forge3d.sun_position(lat, lon, datetime)`. One command, no project fields.
+- Core helper `sun_transform(azimuth_deg, elevation_deg) -> Transform` (the
+  inverse of `sun_angles`), with a round-trip test.
+- Inspector (light): four inputs (lat, lon, date-time) + **Apply** → compute →
+  `setTransform` on the sun. The existing light transform persists the result;
+  the date/lat/lon are not stored (add fields only if users ask for re-edit).
+- **Check:** round-trip `sun_transform → sun_angles` within 0.5°.
+
+## 5. Look increments — one setting group per commit
+
+All use §2. Nothing new is introduced beyond the settings below.
+
+### 5.1 Sky model and atmosphere (1 day)
+- Settings: `skyModel` (`hosek-wilkie` | `preetham` | `aether` | `hdri`),
+  `turbidity` (1–10), `groundAlbedo` (0–1), `skyExposure` (0–4).
+- Service: `SkySettings(enabled=sky, model=…, turbidity=…, ground_albedo=…,
+  sky_exposure=…)`. Keep the existing "environment ⇒ hdri" branch.
+- **Defer AETHER**: it needs `atmosphere_bake_luts` and a stored LUT handle.
+  The UI option stays disabled with "requires bake" until asked.
+- Check: payload fields + Python `SkySettings` validation test.
+
+### 5.2 Water (0.5 day)
+- Settings: `water.enabled`, `water.level`, `water.slopeThreshold`.
+- Service: `WaterSettings(enabled, level, slope_threshold, optics=default)`.
+- Defer water mask paths and optics.
+- Check: round-trip.
+
+### 5.3 Clouds (0.5 day)
+- Settings: `clouds.enabled`, `coverage`, `density`, `shadowStrength`.
+- Service: `CloudSettings(enabled, shadows_enabled=…, coverage, density,
+  shadow_strength, quality="medium")`.
+- Check: round-trip.
+
+### 5.4 Post: bloom + lens vignette (0.5 day)
+- Settings: `bloom.enabled`, `threshold`, `softness`, `intensity`;
+  `vignette` 0–1 (`LensEffectsSettings.vignette_strength`).
+- Defer DoF, motion blur, TAA: costly and rarely wanted.
+- Check: round-trip.
+
+### 5.5 Shadows (0.5 day)
+- Settings: `shadowTechnique` (`pcf` | `pcss`), `shadowSoftness`, `cascades`.
+- Service: `ShadowSettings` fields; keep the existing tuned biases.
+- Check: round-trip; one GPU smoke only if the pixel is the deliverable.
+
+## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day)
+
+**Trigger:** a user asks for AOVs or cleaner stills.
+**Reuse:** the existing still path (`render_still`), `OfflineQualitySettings`,
+`oidn_denoise`.
+
+- Settings: `stillAov: { albedo, normal, depth }` booleans, `stillDenoise` bool.
+- Service: pass `AovSettings` to `render_with_aov` when any AOV is on; write
+  the AOV PNGs next to the still; run OIDN on the beauty when requested.
+- UI: two checkboxes in the render section; no new panel.
+- Check: files exist + naming; shell test for the payload.
+
+## 7. The two real design increments
+
+### 7.1 Vector layers (3–5 days) — trigger: a user brings GeoJSON
+This is the first feature the current `TerrainRenderParams` path cannot do, so
+it is the only place worth adding a second path.
+
+**Minimal model (schema v5 + migration):**
 ```
+MapSettings { layers: Vec<VectorLayer> }
+VectorLayer { id, name, asset, visible, style: { color, widthPx, opacity } }
+```
+- One new asset kind (`geojson`), registered through the existing `AddAsset`.
+- One command `SetMapLayers { layers }` (whole list, like `SetChannelKeys`):
+  add/edit/reorder/delete is one undo step; no per-property command zoo.
+- New service command `render_map` that builds a `SceneRecipe` with the terrain
+  plus `VectorOverlay` layers and renders via `MapScene`. Used only when the
+  project has layers; terrain-only projects keep the current path unchanged.
+- UI: a Layers list under the scene tree; import GeoJSON; flat style fields.
+- Defer: labels, furniture, Mapbox style import, style expressions, PDF/SVG,
+  plate layouts, alignment/reprojection. Each is a later trigger.
+- Check: v4→v5 migration, layer round-trip/undo, one MapScene render smoke
+  (GPU-opt-in).
 
-Rules: JSON in/out, assets as paths, base64 PNG for pixels, progress events on
-stdout, typed errors `{ok:false, code, message, diagnostics}`, one offline job at
-a time (the Phase 7 queue is the only scheduler).
+### 7.2 Meshes in Rendered (5–10 days) — trigger: users need glTF in Rendered
+**Lazy path only:** `io.import_gltf` + `geometry` + `instance_mesh_gpu_render`,
+composited over the terrain frame with the same camera. No path tracer, no
+BVH product path, no hybrid preview.
+- Reuse the existing glTF asset and node selection.
+- Service command `render_meshes` or an extra pass inside `render_map`.
+- UI: none beyond what exists (objects already exist; Rendered just starts
+  including them).
+- Defer: LOD chain, tangents, PT, SDF, AOV per object.
+- Check: a cube import renders over terrain at the viewport camera.
 
-### 1.2 Capability + license gate
+## 8. Explicitly not built (with the trigger that would change that)
 
-Every control is enabled by a snapshot, never by `try/except` at render time:
-
-- `forge3d.capabilities()` (granted/requested/limits), `device_probe()`,
-  `enumerate_adapters()`, `native_import_error()`, `native_degradations()`,
-  `has_gpu()`, `memory_metrics()`, `shader_report()`, feature probes
-  (`copc_laz_enabled`, `is_weighted_oit_available`, `proj_available`,
-  `splat_fusion_available`, `oidn_available`, `widgets_available`).
-- **Licensing is part of the snapshot**: `forge3d._license.set_license_key`,
-  `LicenseError`, `pro_gated_path_diagnostic`. A Pro-gated path is disabled with
-  its reason, not attempted.
-- Per-feature validators: `validate_terrain_vt_support`,
-  `validate_label_support`, `validate_building_layer_support`,
-  `validate_tiles3d_support`, `validate_style_support`.
-
-### 1.3 Canonical model stays authoritative
-
-The engine gets a **derived recipe**. The project stores Studio settings; the
-recipe is recomputed at render time. Undo, autosave and the schema never depend
-on engine structs. Bundle import (Phase 17) is a conversion with explicit loss
-reporting, not a second source of truth.
-
-### 1.4 One camera truth, one scheduler
-
-Every new camera path (MapScene `OrbitCamera`, `CameraAnimation`, camera rigs,
-path-tracer camera) gets a golden-vector test against `camera_render_view`.
-Offline work goes through the Phase 7 queue; viewport previews stay
-newest-wins.
-
----
-
-## 2. Engine inventory — what exists and how Studio would use it
-
-### 2.1 Rendering core
-
-| API | What it does | Studio use | Readiness | Phase |
-|---|---|---|---|---|
-| `Session`, `TerrainRenderer`, `render_terrain_pbr_pom`, `render_with_aov` | GPU session + terrain pipeline | in use | in use | — |
-| `TerrainRenderParams` / `make_terrain_params_config` | the frame: camera, sun, quality, overlays, all features | grows in 10 | supported | 10 |
-| `MaterialSet`, `IBL`, `OverlayLayer`, `Colormap1D` | material layers, environment, drape, palettes | HDRI + drape already | supported | 10 |
-| `Frame`, `HdrFrame`, `AovFrame` | RGBA/linear HDR, AOVs | stills, look-dev | supported | 15 |
-| `render_offline` + `OfflineQualitySettings` / `OfflineProgress` | progressive accumulation | final stills/frames | supported | 15 |
-| `CompiledFrame` / `compile_frame` | precompiled frame reuse | fast repeated frames | native | 16 |
-| `render_pass` (`RenderPassSpec`, `compile_passes`, `execute_passes`) | ordered composition of RGBA outputs | custom post/composite, batch | supported | 15 |
-| `TerrainSpike` | minimal validation renderer | diagnostics | supported | 8 |
-
-### 2.2 Scene recipes and layers (`map_scene`)
-
-| API | What it does | Studio use | Readiness | Phase |
-|---|---|---|---|---|
-| `MapScene`, `SceneRecipe`, `validate`, `compile_plan`, `render` | declarative scene + validation | render recipe | supported | 9 |
-| `TerrainSource`, `OrbitCamera`, `LightingPreset`, `OutputSpec` | recipe inputs | map from project | supported | 9 |
-| `VectorOverlay` + `vector` / `vector_line` | polylines/polygons/points, styles | layers | supported | 11 |
-| `LabelLayer`, `label_plan`, `text`, `text_atlas` | labels, atlas, collision plans | cartography | supported | 11 |
-| `MapFurnitureLayer` | title, legend, scale bar, north arrow, graticule, keepouts | map furniture | supported | 11 |
-| `BuildingLayer` (`from_geojson`, 3D Tiles) | building volumes | data layer | **underdeveloped** | 13 |
-| `PointCloudLayer` | declares COPC/EPT/LAZ | data layer | **native-required** | 13 |
-| `Tiles3DLayer` | declares a 3D Tiles tileset | data layer | **underdeveloped** | 13 |
-| `ValidationReport`, `Diagnostic` | supported/unsupported features, remediation | Render check panel | supported | 9 |
-
-### 2.3 Look development (`terrain_params` catalog)
-
-| Group | Settings | Phase |
+| Feature | Why not now | Trigger |
 |---|---|---|
-| Sky | `SkySettings` (hosek-wilkie, preetham, approximate, aether, hdri), `AtmosphereSettings`, `AtmosphereLutHandle`, `atmosphere_bake_luts` | 10 |
-| Water | `WaterSettings`, `WaterOpticsSettings`, `ReflectionSettings` | 10 |
-| Clouds | `CloudSettings` | 10 |
-| Volumetrics | `VolumetricsSettings`, `DensityVolumeSettings`, `media`, `smoke` | 10 (volumes), 14 (simulation) |
-| Post | `BloomSettings`, `DofSettings`, `MotionBlurSettings`, `LensEffectsSettings`, `TonemapSettings`, `DenoiseSettings` | 10, 15 |
-| Screen space | `ScreenSpaceSettings` (SSAO/SSGI/SSR/TAA) | 10 |
-| Shadows | `ShadowSettings` | 10 |
-| Terrain surface | `MaterialLayerSettings`, `MaterialNoiseSettings`, `PomSettings`, `DetailSettings`, `TriplanarSettings`, `LodSettings`, `SamplingSettings`, `ClampSettings` | 10, 14 |
-| Virtual texturing | `TerrainVTSettings`, `VTLayerFamily`, `VTStore`, `open_vt_store`, `vt_stats`, `validate_terrain_vt_support` | 14 |
-| Scatter | `terrain_scatter`: sources, filters, LOD, wind, contact, `apply_to_renderer` | 14 |
-| Presets | `presets` (`outdoor_sun`, `rainier_relief`, `studio_pbr`, …), `lighting` presets | 10 |
+| MapScene as the default path | current path already renders; rewrite risk | vector layers land |
+| Labels / furniture / style import | big model + style spec surface | vectors shipped, users ask for text/legend |
+| Point clouds / 3D Tiles / buildings | engine marks them underdeveloped/native-required | engine exposes an offline render |
+| VT / scatter / smoke volumes | subsystems, not settings | a large-scene user asks |
+| Camera rigs / CHRONOS / ANAMNESIS | current per-frame export works; caching is an optimization | sequences get slow |
+| Path tracing / splat / inverse / globe | different product tier | explicit request |
+| Bundles / certificates / provenance | no interchange/provenance need yet | sharing/verification requested |
+| COG remote streaming | local COGs are GeoTIFFs and already import via rasterio | a URL-based DEM is requested |
+| Licensing UI | no Pro-gated feature is exposed yet | first gated feature |
+| Detached viewer / Jupyter widgets | Studio viewport is the product path | diagnostics request |
+| Datasets / presets / material library | sample projects already exist | onboarding gap measured |
+| Precision/dd harnesses | internal determinism tooling | a precision bug is reported |
 
-### 2.4 Components and materials
+## 9. Schema policy (keeps the lazy path honest)
 
-| API | What it does | Studio use | Phase |
+- Optional scalar settings: no version bump; `#[serde(default)]` (established
+  by `environment`, `environmentBackgroundIntensity`).
+- New collections (`MapSettings.layers`): **v5 + `migrate_v4_to_v5`**; older
+  builds must reject, not silently drop.
+- Engine recipes are always derived; no engine struct in the schema.
+- Bundle import/export stays a conversion, never the project format.
+
+## 10. Testing that fits the work
+
+- Rust: one schema-contract line per field, one round-trip test per group.
+- Shell: one `to_payload` assertion per new request field.
+- Python: one model-validation test per new engine dataclass.
+- Browser: one manual check per UI group; no e2e framework.
+- GPU: only when the pixel is the product (e.g. HDRI sky). Look settings do not
+  need golden images; their payload is the contract.
+
+## 11. Build order and effort
+
+| Order | Increment | Days | Depends |
 |---|---|---|---|
-| `materials` (`PbrMaterial`, `PbrTexSet`), `textures` | PBR material containers/descriptors | shared material library | 11 |
-| `colors`, `thematic`, `raster_style` | palettes, classification, categorical/bivariate raster styles | thematic maps, overlays | 11 |
-| `style`, `style_expressions` | Mapbox Style Spec import + expression evaluation | vector/label styles | 11 |
-| `parse_style`, `load_style`, `apply_style`, `layer_to_*`, `paint_to_vector_style` | style plumbing | style import | 11 |
-| `declutter`, `layout_label_candidates`, `label_plan` | label placement | cartography | 11 |
+| 1 | 8.0 engine facts in probe | 0.5 | — |
+| 2 | 9.0 sun from date/time | 0.5 | — |
+| 3 | 5.1 sky model | 1 | 8.0 (feature list) |
+| 4 | 5.2 water | 0.5 | — |
+| 5 | 5.3 clouds | 0.5 | — |
+| 6 | 5.4 post (bloom/vignette) | 0.5 | — |
+| 7 | 5.5 shadows | 0.5 | — |
+| 8 | 10.0 AOV/denoise stills | 1 | — |
+| 9 | 7.1 vector layers | 3–5 | user request |
+| 10 | 7.2 meshes | 5–10 | user request |
 
-### 2.5 Geometry, meshes and path tracing
+That is ~4.5 days for everything a terrain studio needs now, with the two heavy
+items gated on real requests.
 
-| API | What it does | Studio use | Readiness | Phase |
-|---|---|---|---|---|
-| `geometry` | primitives, glTF/OBJ import, ribbon/tube/extrusion, LOD chain, tangents, `instance_mesh_gpu_render` | meshes in Rendered | supported | 15 |
-| `mesh` | TBN, BVH build/refit, GPU upload | PT/picking | supported | 15 |
-| `io.import_gltf` / `load_obj` / `save_obj` / `save_stl` | engine-side mesh import/export | assets | supported | 15 |
-| `path_tracing` (`PathTracer`, `hybrid_render_terrain_reference`, AOVs) | PT of triangles/BVH, terrain+mesh reference | physical preview | reference | 15 |
-| `render_offscreen_rgba` | hybrid offscreen render | physical preview | native | 15 |
-| `sdf`, `SdfScene` | SDF geometry | lab | native | 18 |
-| `render_brdf_tile`, `render_adjudication_pair` | material/determinism QA | tests | supported | 15/17 |
+## 12. Next three commits
 
-### 2.6 Geo data, preparation and time
-
-| API | What it does | Studio use | Readiness | Phase |
-|---|---|---|---|---|
-| `cog.open_cog`, `CogDataset` | COG streaming | DEM import | supported | 12 |
-| `crs`, `geo`, `gis`, `alignment`, `transform_coords`, `reproject_dem_to_target`, `resample_raster_to_grid` | CRS/reprojection/alignment | import + layer alignment | supported (PROJ optional) | 12 |
-| `preparation` (`prepare_scene`, recipes/grids) | semantic data prep for MapScene | import pipeline | supported | 12 |
-| `datasets` (`list/fetch/bundled`, `mini_dem`) | sample/on-demand datasets | onboarding, samples | supported | 12 |
-| `codec` (`compress_dem`, `decompress_dem`, `verify_dem`) | deterministic DEM compression | asset handling | supported | 12 |
-| `io.load_dem`, `fill_nodata`, `dem_stats`, `dem_normalize` | DEM I/O/stat | import | supported | 12 |
-| `sun_position`, `sun_position_utc`, `sky.set_observation`, `astro` | solar/lunar ephemeris | time-of-day lighting | supported | 12 |
-| `graticule.generate_graticule` | lat/lon grid | furniture | supported | 11/12 |
-
-### 2.7 Cartography and publication
-
-| API | What it does | Studio use | Phase |
-|---|---|---|---|
-| `VectorOverlay`, `VectorScene`, `vector` | vector geometry + coverage | layers | 11 |
-| `label_plan`, `text`, `text_atlas`, `vector_line` | label placement/shaping/atlas, viewer ribbons | labels | 11 |
-| `legend`, `scale_bar`, `north_arrow`, `graticule` | furniture builders | map furniture | 11 |
-| `export` (`export_svg`, `export_pdf`, `generate_svg`) | vector/print export | export | 11 |
-| `map_plate`, `publication` (`MapPlate`, `PublicationRecipe`) | print plates, linked plan-view PNGs | publication | 11 |
-| `landscape` | Unreal Landscape interchange | export | 18 |
-| `render_terrain_poster` | poster render | publication | 11 |
-
-### 2.8 Animation, caching and sequences
-
-| API | What it does | Studio use | Phase |
-|---|---|---|---|
-| `animation` (`CameraAnimation`, `CameraKeyframe`, `CameraState`) | keyframed camera paths | timeline handoff | 16 |
-| `camera_rigs` (orbit/rail/target-follow, terrain clearance) | rig authoring baked to animations | camera tools | 16 |
-| `chronos.render_flythrough`, `FlythroughManifest` | deterministic terrain flythroughs | sequence export | 16 |
-| `render_flythrough` | flythrough entry | export | 16 |
-| `anamnesis` (+ `_anamnesis_*`) | content-addressed execution/caching of offline sequences | render cache | 16 |
-
-### 2.9 Projects, evidence and operations
-
-| API | What it does | Studio use | Phase |
-|---|---|---|---|
-| `bundle.save_bundle` / `load_bundle` | `.forge3d` bundle: DEM, overlays, labels, preset, bookmarks, HDR, checksums | interchange | 17 |
-| `certificate` (`emit_render_certificate`, `sign_certificate`, `verify`) | signed render certificates | verified renders | 17 |
-| `provenance` (`seal_provenance`, `verify_provenance`) | tile/asset provenance | evidence | 17 |
-| `recipe_manifest` | golden fixture intent + provenance | test/evidence | 17 |
-| `determinism_probe`, `ReproducibilityProfile` | determinism check + declared inputs | render check | 17 |
-| `capabilities`, `device_probe`, `native_degradations`, `memory_metrics`, `shader_report`, `render_execution_report` | machine/execution truth | diagnostics | 8 |
-| `_license` (`set_license_key`, `requires_pro`, `LicenseError`) | Pro gating | licensing | 8 |
-| `precision` (`dd_selftest`, `dd_harness`) | double-float precision | diagnostics | 8 |
-| `verify` (`shader_report`), `_degradation` | shader proof/degradation sink | diagnostics | 8 |
-
-### 2.10 Viewer and notebooks (deliberately out of the product path)
-
-`viewer.open_viewer`, `ViewerHandle`, `viewer_ipc`, `viewer_contract`,
-`interactive`, `widgets` (Jupyter), `_viewer_*`. Studio's embedded viewport is
-the product path; a detached viewer window was tried in Phase 3 and dropped.
-These stay available for diagnostics/reference (Phase 18, opt-in) but are not a
-Studio feature.
-
-### 2.11 Lab surfaces
-
-`splat` (Gaussian splats + LiDAR/terrain fusion), `inverse` (DIFFERENTIA),
-`GuidingGrid`, `GlobeScene`/ORBIS, `landscape`, `sdf`, `lighting` (ReSTIR PT),
-`bench`, `smoke` simulation internals, `dd_*` harnesses. Capability-gated,
-labelled "Lab", never on the default path.
+1. `feat(studio): engine facts in the probe` — `PROBE_SCRIPT`, `EngineStatus`,
+   `types.ts`, `StatusBar.tsx`; fixture test.
+2. `feat(studio): sun from date/time/location` — `solar_position` command,
+   `sun_transform` + round-trip test, light inspector dialog.
+3. `feat(studio): sky model and atmosphere settings` — §2 recipe for the four
+   sky fields; payload + Python validation tests.
 
 ---
 
-## 3. Phases
+## Appendix A — module coverage decisions
 
-Ordered by dependency. Each phase is shippable and honest on its own.
+Every public module from the earlier audit, now with a decision instead of a
+promise. `build` = in the increments above; `trigger` = §8; `tool` = test/bench
+surface; `out` = deliberately outside Studio.
 
-### Phase 8 — Engine truth: capabilities, licensing, diagnostics
-**Goal:** one snapshot of what this machine can do and may use.
-
-APIs: §2.9 machine/diagnostic rows; `_license`; `precision`; `verify`;
-`has_gpu`, `native_import_error`, `native_degradations`, `capabilities`,
-`device_probe`, `enumerate_adapters`, `memory_metrics`, `shader_report`,
-`render_execution_report`, `determinism_probe`.
-
-Studio: `EngineCapabilities` + `LicenseState` snapshot; `engine_capabilities`
-IPC; diagnostics panel (adapter, backend, features, degradations, license,
-memory policy); `useEngineCapability` gating with reasons; service dispatcher
-with typed errors, restart-on-crash, version pin.
-
-Exit: every later control can ask "available? licensed?" without try/except,
-and the answer is visible.
-
-Size M · risk low.
-
-### Phase 9 — Scene recipes (MapScene)
-**Goal:** render from a declared scene, not a hand-built payload.
-
-APIs: `MapScene`, `SceneRecipe`, `TerrainSource`, `OrbitCamera`,
-`LightingPreset`, `OutputSpec`, `validate`, `compile_plan`, `render`,
-`ValidationReport`/`Diagnostic`, `ReproducibilityProfile`.
-
-Studio: pure `render_recipe` mapping from the project (terrain, camera, lighting,
-output, CRS) with golden vectors; `render_scene` for stills; `validate_scene` for
-a Render check panel; per-frame IPC keeps the animation path.
-
-Exit: terrain stills from one recipe path; warnings/unsupported features visible
-before rendering; visual equivalence with today's output.
-
-Size L · risk medium.
-
-### Phase 10 — Look development
-**Goal:** the engine's look controls, grouped and gated.
-
-APIs: `SkySettings` (analytic/AETHER/HDRI), `atmosphere_bake_luts`,
-`WaterSettings`/`WaterOpticsSettings`/`ReflectionSettings`, `CloudSettings`,
-`VolumetricsSettings`/`DensityVolumeSettings`, `BloomSettings`, `DofSettings`,
-`MotionBlurSettings`, `LensEffectsSettings`, `TonemapSettings`,
-`ScreenSpaceSettings`, `ShadowSettings`, `MaterialLayerSettings`,
-`MaterialNoiseSettings`, `PomSettings`, `DetailSettings`, `TriplanarSettings`,
-`LodSettings`, `SamplingSettings`, `ClampSettings`, `presets`.
-
-Studio: capability-tagged setting groups (defaults equal today), ranges mirroring
-the engine, presets, AETHER as bake → select, cost hints, disabled controls.
-
-Exit: an authored look renders identically in Rendered and export; AETHER bake
-is explicit.
-
-Size L · risk medium (bake/cost).
-
-### Phase 11 — Cartography and styles
-**Goal:** Studio becomes a map-making tool.
-
-APIs: `VectorOverlay`, `vector`, `vector_line`, `style`, `style_expressions`,
-`parse_style`/`load_style`/`apply_style`, `layer_to_*`, `paint_to_vector_style`,
-`raster_style`, `thematic`, `colors`, `materials`, `textures`, `label_plan`,
-`text`, `text_atlas`, `declutter`, furniture (`legend`, `scale_bar`,
-`north_arrow`, `graticule`, `MapFurnitureLayer`), `export_svg`/`export_pdf`,
-`map_plate`/`publication`, `alignment`.
-
-Studio: canonical layer types (vector/label/furniture) with assets, styles,
-ordering, visibility; style import (Mapbox Style Spec) with support validation;
-thematic raster styling; shared material/palette library; Layers panel; label
-rules; furniture editor; PNG/SVG/PDF export; plate layouts.
-
-Exit: a labelled, styled map exports to PNG/SVG/PDF from one project, with
-unsupported style fields and label rejections reported.
-
-Size XL · risk medium-high (new model surface).
-
-### Phase 12 — Geo data, preparation and time
-**Goal:** real geospatial input, reproducible preparation, location lighting.
-
-APIs: `cog`, `crs`, `geo`, `gis`, `alignment`, `transform_coords`,
-`reproject_dem_to_target`, `resample_raster_to_grid`, `preparation`
-(`prepare_scene`, recipes/grids), `datasets`, `codec`, `io.load_dem`/
-`fill_nodata`/`dem_stats`/`dem_normalize`, `sun_position*`, `sky.set_observation`,
-`astro`, `graticule`.
-
-Studio: COG/remote DEM assets, CRS display and reprojection on import,
-preparation recipes, dataset browser/sample content, DEM verification/compression,
-sun from date/time/location, optional moon/planets, CRS-aware graticule.
-
-Exit: a COG opens with correct CRS/extent; preparation is declarative; the sun
-can be driven by a timestamp with a tested vector.
-
-Size L · risk medium (PROJ optional, time zones).
-
-### Phase 13 — Data layers: buildings, point clouds, 3D Tiles (honest split)
-**Goal:** bring the datasets in without pretending the renderer supports them.
-
-APIs: `buildings.add_buildings*`, `infer_roof_type`, `materials`,
-`io.import_osm_buildings*`; `pointcloud.open_copc/open_ept/open_laz`,
-`PointCloudRenderer`, `read_laz_points_info`, `_pointcloud_octree`;
-`tiles3d.load_tileset`, `decode_b3dm`, `decode_pnts`, `Tiles3dRenderer`;
-`preparation` for tiling.
-
-**13a — Import and preview.** Decode headers/chunks, count points/tiles, bounds,
-bounded three.js preview, engine diagnostics, "preview only" labels. Buildings
-from GeoJSON/CityJSON/OSM can be previewed as extrusions.
-
-**13b — Engine-native rendering** only when the engine exposes a complete
-offline path; behind a capability, with 13a as fallback.
-
-Exit: COPC/LAZ/tilesets can be inspected and explained; no claim of a Rendered
-result the engine cannot produce.
-
-Size L (13a) + XL (13b) · risk high.
-
-### Phase 14 — Terrain surface systems: VT, scatter, media volumes
-**Goal:** the large-scale terrain features.
-
-APIs: `TerrainVTSettings`, `VTLayerFamily`, `VTStore`, `open_vt_store`,
-`vt_stats`, `validate_terrain_vt_support`, `terrain_scatter` (sources, filters,
-LOD, wind, contact, `apply_to_renderer`), `DensityVolumeSettings`, `media`,
-`smoke` (`load_npz_volume`, `interpolate_density_frames`; simulation is offline).
-
-Studio: VT layer families/atlas/residency budget UI + stats; scatter rule editor
-(altitude/slope/mask/LOD/wind) with preview; volume import and playback.
-
-Exit: a VT terrain layer and a scatter layer survive save/load and render; a
-volume sequence plays; unsupported families report diagnostics.
-
-Size XL · risk high (VT is a subsystem).
-
-### Phase 15 — Meshes in Rendered, path tracing, AOV/denoise
-**Goal:** objects actually appear in engine frames.
-
-**15a — Instanced raster meshes over terrain.** `io.import_gltf`/`load_obj`,
-`geometry` (LOD/tangents/bounds), `mesh` (BVH), `instance_mesh_gpu_render`,
-material mapping, composited over the terrain frame with the shared camera.
-
-**15b — Physical preview.** `PathTracer` / `hybrid_render_terrain_reference`,
-`render_offscreen_rgba`, AOVs (`AovSettings`, `AovFrame`), OIDN
-(`oidn_denoise`), `render_pass` composition, deterministic seeds; one frame per
-IPC with progress/cancel.
-
-Studio: meshes reach Rendered; material mapping; AOV export; denoise toggle;
-"Physical preview" tier.
-
-Exit: 15a matches the viewport camera; 15b is deterministic and reproducible.
-
-Size XL + XL · risk high.
-
-### Phase 16 — Animation systems: rigs, CHRONOS, ANAMNESIS
-**Goal:** replace the per-frame loop where the engine has a better contract.
-
-APIs: `animation` (`CameraAnimation`, keyframes), `camera_rigs` (orbit/rail/
-target-follow, terrain clearance), `chronos.render_flythrough` +
-`FlythroughManifest`, `render_flythrough`, `anamnesis` (content-addressed
-sequence execution and store), `compile_frame`/`CompiledFrame`.
-
-Studio: camera rigs in the timeline (bake to keys, preview), flythrough manifests
-for sequence export, ANAMNESIS caching for repeated frames/sequences with cache
-stats and GC, deterministic sequence manifests.
-
-Exit: an exported sequence is reproducible from its manifest; repeated renders
-hit the cache; rig math is golden-tested against `camera_render_view`.
-
-Size L · risk medium.
-
-### Phase 17 — Projects and evidence
-**Goal:** portable interchange and render truth.
-
-APIs: `bundle.save_bundle`/`load_bundle`, `_render_pass_bundle`, `certificate`,
-`provenance`, `recipe_manifest`, `determinism_probe`, `ReproducibilityProfile`,
-`render_execution_report`, `sign_render_certificate_digest`, `verify_*`,
-`codec.verify_dem`.
-
-Studio: `.forge3d` import/export with checksum verification and loss warnings;
-signed renders when a key is configured; certificate badge + verify; provenance/
-evidence panel; reproducibility profile stored with render settings; recipe
-manifests for goldens.
-
-Exit: a render can be reproduced and verified outside Studio; a project moves
-between machines as a bundle.
-
-Size L · risk medium (signing policy).
-
-### Phase 18 — Lab (optional)
-`GlobeScene`/ORBIS, `splat` (`render_fused`, `GaussianSplatCloud`),
-`inverse` (DIFFERENTIA), `landscape`, `sdf`, `lighting` (ReSTIR),
-`viewer`/`widgets` (detached viewer/notebook), `dd_*`. Labelled experimental,
-capability-gated, never default. Droppable without affecting 8–17.
-
-Size XL · risk high.
-
----
-
-## 4. Sequencing
-
-```
-8 capabilities/licensing
- └ 9 MapScene recipes
-    ├ 10 look
-    ├ 11 cartography/styles
-    │   └ 12 geo data/preparation/time
-    │        └ 13 data layers (13a preview, 13b native)
-    ├ 14 terrain surface systems (VT/scatter/volumes)
-    ├ 15 meshes + path tracing (15a raster, 15b PT)
-    └ 16 animation systems (rigs/CHRONOS/ANAMNESIS)
- └ 17 projects/evidence
-18 lab (optional, last)
-```
-
-Sizes: 8 M · 9 L · 10 L · 11 XL · 12 L · 13 L+XL · 14 XL · 15 XL+XL · 16 L ·
-17 L · 18 XL.
-
-Shortest visible jump: **8 → 9 → 10 → 11**. Honest cheap wins before the heavy
-phases: 13a previews, 16 ANAMNESIS caching.
-
----
-
-## 5. Cross-cutting rules
-
-1. **No engine state in the project.** Recipes are derived; bundle import is a
-   conversion with explicit loss.
-2. **Capability before control.** Every control is enabled by the Phase 8
-   snapshot (including licensing) or a validation report.
-3. **No silent degradation.** Preview-only and underdeveloped features are
-   labelled and reported in the render request.
-4. **One camera truth.** Golden vectors for every camera path.
-5. **One scheduler.** Phase 7 queue; no second job system.
-6. **Asset references, never bytes.** Paths + sizes, relinkable, integrity-checked.
-7. **Evidence is a feature.** Certificates, provenance, reproducibility profiles,
-   recipe manifests.
-8. **Determinism is a gate.** Shader/recipe changes run the determinism rewrite
-   and golden lanes; never assume.
-
-## 6. What not to do
-
-- Do not reimplement engine algorithms in TypeScript beyond lightweight previews.
-- Do not make `SceneRecipe` the project schema.
-- Do not expose `underdeveloped` layers as rendering.
-- Do not default to path tracing/AETHER; both are opt-in tiers.
-- Do not add a second Python process; one engine session, one queue.
-- Do not reintroduce the interactive viewer as a second editor; it can only be
-  an opt-in diagnostic window.
-
-## 7. Immediate next steps
-
-1. Phase 8 skeleton: `engine_capabilities` + `LicenseState` + Diagnostics panel;
-   split `studio_render.py` into a dispatcher without changing behavior.
-2. Phase 9 mapping: `render_recipe` with golden vectors and `validate_scene` in a
-   Render check panel; prove a still is unchanged.
-3. Then Phase 10 in groups (sky/atmosphere → water/clouds → post) with presets.
-
-First files: `src-tauri/src/render.rs`, `src-tauri/src/commands.rs`,
-`src-tauri/src/studio_render.py`, `crates/studio-core/src/workspace.rs`,
-`src/state/session.tsx`, `src/components/Inspector.tsx`.
-
----
-
-## Appendix A — Python module coverage
-
-Every public module and the phase that owns it. `internal` = private helper;
-`tooling` = test/bench/example surface, not product.
-
-| Module | Purpose | Phase |
+| Module | Purpose | Decision |
 |---|---|---|
-| `alignment` | CRS/geotransform alignment | 11/12 |
-| `anamnesis` | content-addressed offline sequence cache | 16 |
-| `animation` | camera keyframes/Animation | 16 |
-| `astro` | moon/planet ephemeris (SIDERA) | 12 |
-| `atmosphere` | AETHER helpers | 10 |
-| `bench` | benchmark harness | tooling |
-| `buildings` | buildings pipeline | 13 |
-| `bundle` | `.forge3d` bundles | 17 |
-| `camera_rigs` | orbit/rail/follow rigs | 16 |
-| `certificate` | signed render certificates | 17 |
-| `chronos` | deterministic flythroughs | 16 |
-| `codec` | F3DZ DEM compression | 12/17 |
-| `cog` | COG streaming | 12 |
-| `colors` | colour conversions | 11 |
-| `config` | renderer config | 8/10 |
-| `crs` | CRS utilities | 12 |
-| `datasets` | bundled/on-demand datasets | 12 |
-| `denoise`, `denoise_oidn` | denoising | 15 |
-| `determinism` | deterministic reference | 17 |
-| `diagnostics` | structured validation diagnostics | 8/9 |
-| `export` | SVG/PDF vector export | 11 |
-| `geo` | solar geometry | 12 |
-| `geometry` | mesh authoring/instancing | 15 |
-| `gis` | GIS raster/vector ops | 12 |
-| `graticule` | lat/lon grid | 11 |
-| `guiding` | PT guiding grid | 18 |
-| `interactive` | example command loop | 18 |
-| `io` | DEM/mesh I/O, OSM buildings | 12/13/15 |
-| `label_plan` | label planning | 11 |
-| `landscape` | Unreal Landscape interchange | 18 |
-| `legend` | legend builder | 11 |
-| `lighting` | ReSTIR PT lighting | 18 |
-| `map_plate` | print plate layout | 11 |
-| `map_scene` | scene recipes + layers | 9 |
-| `materials` | PBR material containers | 11 |
-| `media` | participating media | 14 |
-| `mem` | memory helpers | 8 |
-| `mesh` | TBN/BVH/GPU mesh | 15 |
-| `north_arrow` | compass furniture | 11 |
-| `offline` | progressive offline rendering | 15 |
-| `path_tracing` | path tracer | 15/18 |
-| `pointcloud` | COPC/EPT/LAZ | 13 |
-| `precision` | double-float precision | 8 |
-| `preparation` | semantic scene preparation | 12 |
-| `presets` | look presets | 10 |
-| `provenance` | per-pixel provenance | 17 |
-| `publication` | linked plan-view publications | 11 |
-| `raster_style` | thematic raster styles | 11 |
-| `recipe_manifest` | golden/recipe provenance | 17 |
-| `render_pass` | pass composition | 15 |
-| `scale_bar` | scale bar furniture | 11 |
-| `sdf` | SDF scenes | 18 |
-| `sky` | observation state | 12 |
-| `smoke` | smoke volumes/simulation | 14 |
-| `splat` | splat fusion | 18 |
-| `style`, `style_expressions` | Mapbox style import/eval | 11 |
-| `terrain` | terrain analysis/out-of-core | 12/14 |
-| `terrain_demo`, `terrain_pbr_pom` | reference harnesses | tooling |
-| `terrain_params` | renderer parameter catalog | 10 |
-| `terrain_scatter` | scatter systems | 14 |
-| `text`, `text_atlas` | text shaping/atlas | 11 |
-| `textures` | PBR texture descriptors | 11 |
-| `thematic` | vector classification | 11 |
-| `tiles3d` | 3D Tiles | 13 |
-| `vector`, `vector_line` | vectors/ribbons | 11 |
-| `verify` | shader proof reports | 8 |
-| `viewer`, `viewer_contract`, `viewer_ipc`, `widgets` | interactive viewer/notebooks | 18 (opt-in) |
-| `_license` | Pro gating | 8 |
-| `_degradation`, `_gpu`, `_memory`, `_native`, `_cache_policy` | internal runtime | 8 |
-| `_anamnesis_*`, `_map_scene_*`, `_render_pass_bundle`, `_pointcloud_octree`, `_detail_normals`, `_deltae`, `_ed25519`, `_png`, `_canonical_json`, `_validate`, `_viewer_*` | internal helpers | owning phase |
+| `terrain_params` | renderer settings catalog | build (5.x) |
+| `offline`, `denoise`, `denoise_oidn` | offline quality/denoise | build (10.0) |
+| `sky`, `atmosphere`, `geo`, `astro` | sky/sun/moon | build (5.1, 9.0) |
+| `map_scene`, `vector`, `vector_line` | vectors/layers | trigger (7.1) |
+| `style`, `style_expressions`, `raster_style`, `thematic`, `colors`, `materials`, `textures`, `presets` | styling/material library | trigger |
+| `label_plan`, `text`, `text_atlas`, `legend`, `scale_bar`, `north_arrow`, `graticule` | cartography | trigger |
+| `export`, `map_plate`, `publication` | print/vector export | trigger |
+| `geometry`, `mesh`, `io`, `path_tracing` | meshes/PT | trigger (7.2) |
+| `cog`, `gis`, `alignment`, `crs`, `preparation`, `codec` | geo data | trigger (local COG already works) |
+| `datasets` | sample datasets | out (samples exist) |
+| `pointcloud`, `tiles3d`, `buildings` | data layers | trigger (engine incomplete) |
+| `terrain` (VT), `terrain_scatter`, `smoke`, `media` | surface systems | trigger |
+| `camera_rigs`, `animation`, `chronos`, `anamnesis` | rigs/caching | trigger |
+| `bundle`, `certificate`, `provenance`, `recipe_manifest`, `determinism`, `verify`, `precision`, `_license` | evidence/licensing | trigger (except engine facts 8.0) |
+| `render_pass` | pass composition | trigger |
+| `splat`, `inverse`, `sdf`, `lighting`, `guiding`, `landscape`, `viewer*`, `interactive`, `widgets` | lab/viewer | out |
+| `config`, `diagnostics`, `mem`, `_gpu`, `_memory`, `_native`, `_degradation` | runtime plumbing | build only where 8.0 needs it |
+| `bench`, `smoke` (harness), `terrain_demo`, `terrain_pbr_pom`, `_map_scene_*`, `_viewer_*`, `_png`, `_canonical_json`, `_deltae`, `_ed25519`, `_pointcloud_octree`, `_render_pass_bundle`, `_detail_normals`, `_cache_policy`, `_validate` | internal/tooling | tool |
+| `_anamnesis_*`, `_anamnesis_params`, `_anamnesis_scene` | cache internals | trigger with 16 |
 
-## Appendix B — Rust surface
+## Appendix B — Rust surface decisions
 
-The same phases map onto the crate modules: `license`, `core` (memory/budget/
-determinism), `verify`, `passes`, `scene`/`render`/`renderer`/`pipeline`,
-`labels`/`vector`/`style`, `gis`/`geo`/`converters`/`import`/`loaders`/`codec`/
-`tiles3d`, `pointcloud`/`accel`/`mesh`/`geometry`, `smoke`/`media`,
-`animation`/`camera`, `bundle`/`export`/`offscreen`, `splat`/`sdf`/`viewer`/
-`astro`/`lighting`. Features in `Cargo.toml` (`copc_laz`, `cog_streaming`,
-`proj`, `enable-globe`, `enable-inverse-pt`, `atmosphere-bake`, `splat-fusion`,
-`weighted-oit`, …) are probed by Phase 8, never assumed.
+`terrain*`/`render*`/`scene`/`passes` → build only as settings reach the
+payload; `vector`/`style`/`labels`/`export` → trigger with 7.1; `geometry`/
+`mesh`/`accel`/`import`/`loaders` → trigger with 7.2; `gis`/`geo`/`converters`/
+`codec`/`tiles3d`/`pointcloud`/`smoke`/`media`/`splat`/`sdf`/`viewer`/`astro`/
+`lighting`/`license`/`verify` → trigger or out per Appendix A. Cargo features
+(`copc_laz`, `cog_streaming`, `proj`, `enable-globe`, `enable-inverse-pt`,
+`atmosphere-bake`, `splat-fusion`, `weighted-oit`) are reported by 8.0 and
+never assumed.
+
+## Appendix C — earlier phase mapping
+
+| Earlier phase | Now |
+|---|---|
+| 8 capabilities/licensing | 8.0 (facts only; licensing deferred) |
+| 9 MapScene recipes | not now; 7.1 uses MapScene only for vectors |
+| 10 look | 5.1–5.5 |
+| 11 cartography | trigger (7.1 then labels/furniture) |
+| 12 geo/time | 9.0 sun; COG local already works; rest trigger |
+| 13 data layers | trigger |
+| 14 VT/scatter/volumes | trigger |
+| 15 meshes/PT | 7.2 (raster only); PT out |
+| 16 rigs/CHRONOS/ANAMNESIS | trigger |
+| 17 bundles/evidence | trigger |
+| 18 lab | out |
