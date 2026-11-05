@@ -469,6 +469,15 @@ the node tests, both Rust suites on every pull request, and builds + uploads the
 deb on pushes to `main`. Windows and macOS installers are not configured yet;
 their bundle config needs a signing/notarisation decision.
 
+## Roadmap: the rest of the engine
+
+Studio currently draws a terrain frame through one narrow engine path. The
+phased plan for bringing the rest of Forge3D in — scene recipes, look
+development, cartography, geo data, meshes, bundles and evidence — is in
+[`docs/forge3d-integration-roadmap.md`](docs/forge3d-integration-roadmap.md).
+It lists the actual engine APIs behind each phase and the readiness of each
+(including the layers the engine itself still marks underdeveloped).
+
 ## Browser preview harness
 
 `src/bridge/` selects the Tauri bridge when `__TAURI_INTERNALS__` exists, and
