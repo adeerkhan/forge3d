@@ -3,16 +3,17 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Forge3D Studio — Tauri desktop shell (Phase 1)",
+  "description": "Forge3D Studio \u2014 Tauri desktop shell (Phase 1)",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types src/viewport/viewMath.test.ts && node --experimental-strip-types src/state/playback.test.ts",
+    "test": "node --experimental-strip-types src/viewport/viewMath.test.ts && node --experimental-strip-types src/state/playback.test.ts && node --experimental-strip-types src/state/renderQueue.test.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "package": "tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",

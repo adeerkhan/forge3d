@@ -1,0 +1,154 @@
+{
+  "format": "studio3d",
+  "schemaVersion": 4,
+  "id": "b059f4cf-fde4-4039-954f-7adba401e5cf",
+  "name": "HDRI studio",
+  "createdUnixMs": 1793894621745,
+  "updatedUnixMs": 1793894621745,
+  "scene": {
+    "id": "ce5df372-22a1-4934-86f2-66374a7fd07e",
+    "name": "Scene",
+    "objects": [
+      {
+        "id": "cfe8353c-aadb-471e-9a04-efd291461aef",
+        "name": "Sphere",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "rotationDeg": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "mesh",
+          "source": {
+            "type": "primitive",
+            "primitive": {
+              "type": "sphere",
+              "radius": 1.2
+            }
+          },
+          "material": {
+            "baseColor": [
+              0.62,
+              0.66,
+              0.72
+            ],
+            "roughness": 0.6,
+            "metallic": 0.04,
+            "texture": null
+          }
+        }
+      },
+      {
+        "id": "19fd29ae-b57a-48fc-bdd9-bc44d9124d7a",
+        "name": "Camera",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 6.0,
+            "y": 4.0,
+            "z": 8.0
+          },
+          "rotationDeg": {
+            "x": -22.0,
+            "y": 37.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "camera",
+          "fovDeg": 45.0,
+          "near": 0.1,
+          "far": 1000.0
+        }
+      },
+      {
+        "id": "b9a3d2f6-10c5-478d-987b-9483fb664aa6",
+        "name": "Sun",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 4.0,
+            "y": 6.0,
+            "z": 3.0
+          },
+          "rotationDeg": {
+            "x": -50.0,
+            "y": 30.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "light",
+          "kind": "directional",
+          "color": [
+            1.0,
+            0.97,
+            0.92
+          ],
+          "intensity": 0.6
+        }
+      }
+    ],
+    "activeCamera": "19fd29ae-b57a-48fc-bdd9-bc44d9124d7a"
+  },
+  "assets": [
+    {
+      "id": "92a019dc-7d2f-4f23-955d-f5230013c3b5",
+      "name": "studio-sky.hdr",
+      "path": "media/studio-sky.hdr",
+      "kind": "hdr",
+      "byteSize": 524337
+    }
+  ],
+  "selection": [],
+  "workspace": "studio",
+  "viewport": {
+    "mode": "solid",
+    "gridVisible": true
+  },
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "exposure": 1.35,
+    "shadows": true,
+    "ambientOcclusion": false,
+    "sky": true,
+    "iblIntensity": 1.2,
+    "environment": "92a019dc-7d2f-4f23-955d-f5230013c3b5"
+  },
+  "timeline": {
+    "frameRate": 24,
+    "length": 96,
+    "currentFrame": 0.0,
+    "tracks": []
+  }
+}

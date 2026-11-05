@@ -890,6 +890,16 @@ kbd {
   color: var(--vp-camera);
 }
 
+.badge--missing {
+  background: var(--danger-quiet);
+  color: var(--danger);
+}
+
+.badge--changed {
+  background: rgba(240, 169, 74, 0.14);
+  color: var(--accent);
+}
+
 /* Per-parameter capability badges (Inspector). */
 .capability-badges {
   display: flex;
@@ -1798,4 +1808,118 @@ kbd {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* --------------------------------------------------------- render queue */
+
+/* Offline work strip under the viewport: only present while there are jobs. */
+.render-queue {
+  flex: none;
+  max-height: 172px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-panel);
+}
+
+.render-queue__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.render-queue__meta {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.render-queue__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.render-job {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.render-job:last-child {
+  border-bottom: none;
+}
+
+.render-job__row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.render-job__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.render-job__status {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+
+.render-job--running .render-job__status {
+  color: var(--accent);
+}
+
+.render-job--failed .render-job__status {
+  color: var(--danger);
+}
+
+.render-job--done .render-job__status {
+  color: var(--ok);
+}
+
+.render-job__count {
+  color: var(--text-dim);
+  font-size: 10.5px;
+  min-width: 72px;
+  text-align: right;
+}
+
+.render-job__bar {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-panel-alt);
+  overflow: hidden;
+}
+
+.render-job__bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+.render-job__error {
+  margin: 4px 0 0;
+  color: var(--danger);
+  font-size: 11.5px;
 }

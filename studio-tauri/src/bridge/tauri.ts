@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { StudioBridge } from "./index";
 import type {
+  AssetIntegrity,
   AutosaveStatus,
   CapabilityTable,
   EditResult,
@@ -82,6 +83,8 @@ export const tauriBridge: StudioBridge = {
     invoke<MeshFilePayload>("raster_preview", { path, width: width ?? null }),
 
   fileSize: (path) => invoke<number>("file_size", { path }),
+
+  checkAssets: () => invoke<AssetIntegrity[]>("check_assets"),
 
   terrainPreview: (path, resolution) =>
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),

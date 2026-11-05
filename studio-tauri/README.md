@@ -59,6 +59,13 @@ export.
 | Per-channel keys (`SetChannelKeys`), 9 transform channels + camera FOV | `command.rs`, `timeline.rs` | done |
 | Offline PNG sequence export (`renderAnimationFrame` per frame) | `src/state/session.tsx`, `render.rs` | done |
 | Camera animation reaches Forge3D (`camera_render_view` → `with_view`) | `workspace.rs`, `commands.rs` | done |
+| **Phase 7** — crash recovery, atomic save, recovery store | `autosave.rs`, `session.rs`, `RecoveryBanner.tsx` | done |
+| Asset integrity (existence + size on open/relink, Inspector badges) | `integrity.rs`, `check_assets`, `Inspector.tsx` | done |
+| Large-scene performance guards (2k objects / 500 tracks, 10k stress) | `crates/studio-core/tests/performance.rs` | done |
+| Offline render queue + cancellation (stills and sequences) | `src/state/renderQueue.ts`, `RenderQueue.tsx` | done |
+| Packaging (deb/rpm/appimage config, release bundle job) | `tauri.conf.json`, `.github/workflows/studio-tauri.yml` | done (Linux) |
+| Sample projects + docs | `samples/`, `examples/make_samples.rs`, this file | done |
+| Workspace-switch regression suite | — | dropped with Phase 3 |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -318,6 +325,13 @@ the render handoff.
   a specific message rather than silently mis-lighting. The viewport reads the
   file whole over IPC (64 MB cap) and keeps one decoded map at a time, so a very
   large HDRI costs a decode (~a second) when first selected or replaced.
+- **Asset integrity checks size, not content.** A file replaced in place with a
+  different same-sized file passes; this is a relink aid, not tamper detection.
+- **The offline queue lives in the UI process.** If the app quits during a
+  sequence, the frames already written stay on disk but the job does not resume
+  on restart; queue it again.
+- **Sample GeoTIFF references need Git LFS.** Without `git lfs pull` the Bryce
+  sample loads with its assets flagged missing/changed (the HDRI ships normally).
 - **Country-scale DEMs render through a scale budget.** The studio renderer
   scales any DEM into a 30 000-unit world, so wide maps frame correctly
   (verified end-to-end with Switzerland, 353 km — its relief is only ~1 % of
@@ -363,6 +377,72 @@ v4; older builds reject a v4 file rather than silently dropping its tracks).
   but it does not appear in Rendered frames (the same geometry-export gap as
   primitives). The UI does not claim otherwise.
 
+## Asset integrity
+
+Every referenced file is checked when the project opens and whenever an asset
+is imported or relinked: `studio_core::integrity::asset_integrity` takes a
+`stat` closure (the shell passes `std::fs::metadata`; tests pass a map), so the
+rules stay pure. The Assets panel shows a `missing` badge (with the OS error) or
+`changed` when the file's size differs from what the project recorded, plus a
+summary line. A missing file never blocks editing — Relink… is the repair, and
+the viewport/renderer still report the real read failure if you render anyway.
+
+## Offline render queue
+
+Stills (**Render**) and frame sequences (**Export frames…**) are FIFO jobs run
+by one worker, so the engine never has two offline jobs fighting over it:
+
+- **Progress** is per job (frames done / total) and shown in a queue strip under
+  the viewport, with the sequence bar and a Cancel button.
+- **Cancelling** a queued job drops it immediately; a running sequence stops
+  between frames. A running still is a single frame already inside the
+  renderer, so it cannot be interrupted without killing the engine (and any
+  viewport preview with it) — it finishes and reports what happened.
+- **Capture at enqueue**: a job records the render width/height when it is
+  queued, so later settings edits cannot retarget work already started.
+- **Closing the project** cancels queued jobs and stops the running sequence.
+- The state machine lives in `src/state/renderQueue.ts` and is unit-tested
+  (`npm test`); `session.tsx` only does the IPC. Viewport previews are a
+  different scheduler: newest-wins, never queued.
+
+## Performance guards
+
+`crates/studio-core/tests/performance.rs` measures the interaction path rather
+than micro-benchmarks: 2,000 objects with 500 animated tracks (3 channels × 40
+keys) evaluating 240 frames, and a save/load round trip of the same scene. The
+budgets are two orders of magnitude above the measured value (≈130 ms and
+≈400 ms on the development machine) so they catch accidental quadratic work
+without flaking on CI. A 10,000-object / 2,000-track stress case is `#[ignore]`d
+and runs with `cargo test -p studio-core --test performance -- --ignored`.
+`--nocapture` prints the measured numbers.
+
+## Sample projects
+
+`samples/` ships three projects plus a committed HDRI:
+
+| Sample | Shows |
+|---|---|
+| `bryce-terrain.studio3d` | terrain-first starter, NAIP drape, HDRI environment |
+| `cube-animation.studio3d` | keyed cube (position + rotation), 96 frames at 24 fps |
+| `hdri-studio.studio3d` | a sphere lit by `media/studio-sky.hdr` (sun turned down) |
+
+Asset paths are **relative to the sample file**, so the folder is portable. The
+GeoTIFF references are Git LFS objects; a plain checkout without `git lfs pull`
+still loads the project (integrity marks those two files changed/missing).
+Regenerate with `cargo run -p studio-core --example make_samples` from
+`studio-tauri/`; `tests/samples.rs` loads, validates, checks each sample's
+feature content, and round-trips them through save/load.
+
+## Packaging
+
+`npm run package` runs `tauri build`. `src-tauri/tauri.conf.json` bundles
+`deb`, `rpm`, and `appimage` for Linux with the icon set in
+`src-tauri/icons/` (regenerate with `scripts/make_icons.py`). The release build
+is gated in CI: `.github/workflows/studio-tauri.yml` runs fmt, clippy, `tsc`,
+the node tests, both Rust suites on every pull request, and builds + uploads the
+deb on pushes to `main`. Windows and macOS installers are not configured yet;
+their bundle config needs a signing/notarisation decision.
+
 ## Browser preview harness
 
 `src/bridge/` selects the Tauri bridge when `__TAURI_INTERNALS__` exists, and
@@ -377,12 +457,11 @@ the viewport clock and camera math have dependency-free `node` tests run by
 
 - Geometry export for primitives — Rendered still draws terrain only
 - Shared material library — **Phase 5** (environment/IBL controls, capability badges, the Material-preview albedo drape, and glTF node selection shipped)
-- Render queue and cancellation — **Phase 7**
-
 Relinking, the material inspector (terrain albedo, mesh base colour and
-texture), the render settings UI, and the Phase 6 timeline already shipped; there
-is no Forge3D workspace tab (Phase 3 was dropped) — the top-bar **Render** button
-renders to a chosen path with a JSON sidecar.
+texture), the render settings UI, the Phase 6 timeline, and the Phase 7 queue,
+integrity checks, and samples already shipped; there is no Forge3D workspace tab
+(Phase 3 was dropped) — the top-bar **Render** button renders to a chosen path
+with a JSON sidecar.
 
 ## Regenerating the app icon
 

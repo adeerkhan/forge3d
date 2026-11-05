@@ -36,6 +36,7 @@ pub mod command;
 pub mod editor;
 pub mod error;
 pub mod ids;
+pub mod integrity;
 pub mod math;
 pub mod persist;
 pub mod project;
@@ -48,6 +49,7 @@ pub use autosave::{AutosaveStore, RecoveryEntry, DEFAULT_AUTOSAVE_KEEP};
 pub use command::{Command, CommandError};
 pub use editor::{Applied, Editor, HistoryEntry, SessionState, DEFAULT_HISTORY_LIMIT};
 pub use error::StudioError;
+pub use integrity::{asset_integrity, AssetIntegrity};
 pub use math::{Transform, Vec3};
 pub use persist::{load, save_atomic, to_json_pretty};
 pub use project::{

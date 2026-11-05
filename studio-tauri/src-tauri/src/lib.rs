@@ -71,6 +71,7 @@ pub fn run() {
             commands::autosave_now,
             commands::autosave_status,
             commands::list_recovery,
+            commands::check_assets,
             commands::restore_recovery,
             commands::discard_recovery,
             commands::read_mesh_file,

@@ -1,0 +1,197 @@
+{
+  "format": "studio3d",
+  "schemaVersion": 4,
+  "id": "a1534075-db43-4c60-b0ff-784d335d326b",
+  "name": "Cube animation",
+  "createdUnixMs": 1793894621745,
+  "updatedUnixMs": 1793894621745,
+  "scene": {
+    "id": "2272d868-9523-4cac-9b6b-80dfc6543769",
+    "name": "Scene",
+    "objects": [
+      {
+        "id": "efcc1898-70bc-49d6-a20a-e534cabd1498",
+        "name": "Cube",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "rotationDeg": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "mesh",
+          "source": {
+            "type": "primitive",
+            "primitive": {
+              "type": "cube",
+              "size": 2.0
+            }
+          },
+          "material": {
+            "baseColor": [
+              0.62,
+              0.66,
+              0.72
+            ],
+            "roughness": 0.6,
+            "metallic": 0.04,
+            "texture": null
+          }
+        }
+      },
+      {
+        "id": "1fe0984c-c604-4da1-ae54-56481808197f",
+        "name": "Camera",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 6.0,
+            "y": 4.0,
+            "z": 8.0
+          },
+          "rotationDeg": {
+            "x": -22.0,
+            "y": 37.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "camera",
+          "fovDeg": 45.0,
+          "near": 0.1,
+          "far": 1000.0
+        }
+      },
+      {
+        "id": "a387dc42-26e5-49f4-999b-d7b26cf91a5a",
+        "name": "Sun",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 4.0,
+            "y": 6.0,
+            "z": 3.0
+          },
+          "rotationDeg": {
+            "x": -50.0,
+            "y": 30.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "light",
+          "kind": "directional",
+          "color": [
+            1.0,
+            0.97,
+            0.92
+          ],
+          "intensity": 3.0
+        }
+      }
+    ],
+    "activeCamera": "1fe0984c-c604-4da1-ae54-56481808197f"
+  },
+  "assets": [],
+  "selection": [],
+  "workspace": "studio",
+  "viewport": {
+    "mode": "solid",
+    "gridVisible": true
+  },
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "exposure": 1.35,
+    "shadows": true,
+    "ambientOcclusion": false,
+    "sky": true,
+    "iblIntensity": 1.0,
+    "environment": null
+  },
+  "timeline": {
+    "frameRate": 24,
+    "length": 96,
+    "currentFrame": 0.0,
+    "tracks": [
+      {
+        "objectId": "efcc1898-70bc-49d6-a20a-e534cabd1498",
+        "channels": [
+          {
+            "channel": "translationX",
+            "keys": [
+              {
+                "frame": 0,
+                "value": 0.0,
+                "interpolation": "smooth"
+              },
+              {
+                "frame": 24,
+                "value": 3.0,
+                "interpolation": "smooth"
+              },
+              {
+                "frame": 48,
+                "value": 0.0,
+                "interpolation": "smooth"
+              },
+              {
+                "frame": 72,
+                "value": -3.0,
+                "interpolation": "smooth"
+              },
+              {
+                "frame": 96,
+                "value": 0.0,
+                "interpolation": "smooth"
+              }
+            ]
+          },
+          {
+            "channel": "rotationZ",
+            "keys": [
+              {
+                "frame": 0,
+                "value": 0.0,
+                "interpolation": "smooth"
+              },
+              {
+                "frame": 96,
+                "value": 180.0,
+                "interpolation": "smooth"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

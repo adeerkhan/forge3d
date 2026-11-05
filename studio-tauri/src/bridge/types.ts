@@ -51,6 +51,20 @@ export interface Asset {
   byteSize: number;
 }
 
+/** One asset's on-disk state, checked at open and after relink. */
+export interface AssetIntegrity {
+  id: string;
+  name: string;
+  path: string;
+  kind: AssetKind;
+  /** Size recorded when the asset was imported or relinked. */
+  expectedBytes: number;
+  /** Size on disk, when the file could be read. */
+  actualBytes: number | null;
+  /** Why it could not be read (missing, permissions), when it could not. */
+  error: string | null;
+}
+
 export type MeshSource =
   | { type: "primitive"; primitive: Primitive }
   | { type: "gltf"; asset: string; node: string | null };

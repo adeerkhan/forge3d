@@ -292,11 +292,23 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
 }
 
 function AssetsPanel() {
-  const { state, actions } = useSession();
+  const { state, actions, assetIntegrity } = useSession();
   const project = state?.project;
   if (!project || project.assets.length === 0) return null;
+  const integrity = new Map(assetIntegrity.map((entry) => [entry.id, entry]));
+  const problems = assetIntegrity.filter(
+    (entry) => entry.actualBytes === null || entry.actualBytes !== entry.expectedBytes,
+  );
   return (
     <Section title="Assets">
+      {problems.length > 0 && (
+        <p className="hint hint--boxed">
+          {problems.length === 1
+            ? "1 referenced file needs attention."
+            : `${problems.length} referenced files need attention.`}{" "}
+          Missing files keep their path; relink them before rendering.
+        </p>
+      )}
       <ul className="multi-list">
         {project.assets.map((asset) => {
           const usage =
@@ -310,10 +322,30 @@ function AssetsPanel() {
                   (object.kind.asset === asset.id ||
                     object.kind.overlay?.asset === asset.id)),
             ).length + (project.render.environment === asset.id ? 1 : 0);
+          const check = integrity.get(asset.id);
+          const exists = check ? check.actualBytes !== null : true;
+          const sizeMatches = check
+            ? check.actualBytes === check.expectedBytes
+            : true;
           return (
             <li key={asset.id}>
-              <span title={asset.path}>{asset.name}</span>
-              <span className="mono">{usage} use{usage === 1 ? "" : "s"}</span>
+              <span title={check?.error ?? asset.path}>{asset.name}</span>
+              {check && !exists && (
+                <span className="badge badge--missing" title={check.error ?? undefined}>
+                  missing
+                </span>
+              )}
+              {check && exists && !sizeMatches && (
+                <span
+                  className="badge badge--changed"
+                  title={`recorded ${check.expectedBytes} bytes, found ${check.actualBytes}`}
+                >
+                  changed
+                </span>
+              )}
+              <span className="mono">
+                {usage} use{usage === 1 ? "" : "s"}
+              </span>
               <button
                 type="button"
                 className="text-button"
@@ -326,9 +358,9 @@ function AssetsPanel() {
         })}
       </ul>
       <p className="hint">
-        Relinking points an asset at a new path without touching scene
-        references. A file that moved is reported by the viewport or renderer
-        the next time it reads it.
+        Files are checked when the project opens and whenever an asset is
+        imported or relinked. Relinking points the asset at a new path without
+        touching scene references.
       </p>
     </Section>
   );

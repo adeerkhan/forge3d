@@ -197,6 +197,29 @@ pub struct PlayheadResult {
     pub state: SessionState,
 }
 
+/// Check every referenced asset against the filesystem.
+///
+/// Read-only: the UI shows "missing"/"changed" next to each asset and offers
+/// Relink; nothing here modifies the project. The pure half lives in
+/// `studio_core::integrity`, so the rules are testable without disk.
+#[tauri::command]
+pub fn check_assets(
+    state: State<'_, AppState>,
+) -> Result<Vec<studio_core::AssetIntegrity>, String> {
+    let session = lock(&state)?;
+    let snapshot = session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())?;
+    Ok(studio_core::asset_integrity(
+        &snapshot.project,
+        |path| match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => Ok(metadata.len()),
+            Ok(_) => Err(format!("{path} is not a file")),
+            Err(error) => Err(format!("{path}: {error}")),
+        },
+    ))
+}
+
 #[tauri::command]
 pub fn autosave_now(state: State<'_, AppState>) -> Result<Option<AutosaveReport>, String> {
     lock(&state)?

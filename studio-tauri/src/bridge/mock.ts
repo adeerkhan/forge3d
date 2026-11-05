@@ -13,6 +13,7 @@
 import type { StudioBridge } from "./index";
 import type {
   Asset,
+  AssetIntegrity,
   AutosaveStatus,
   CameraObject,
   Command,
@@ -795,6 +796,19 @@ export function createMockBridge(): StudioBridge {
     // The harness has no filesystem: a nonzero placeholder keeps asset
     // validation (`byte_size > 0`) usable; real sizes come from the shell.
     fileSize: async (): Promise<number> => 1,
+
+    // The preview has no filesystem: every asset "exists" at its recorded
+    // size, so the integrity badges stay quiet while editing.
+    checkAssets: async (): Promise<AssetIntegrity[]> =>
+      requireProject().assets.map((asset) => ({
+        id: asset.id,
+        name: asset.name,
+        path: asset.path,
+        kind: asset.kind,
+        expectedBytes: asset.byteSize,
+        actualBytes: asset.byteSize,
+        error: null,
+      })),
 
     readHdr: async (): Promise<MeshFilePayload> => {
       throw new Error("HDRI environments need the desktop shell");

@@ -4,6 +4,7 @@ import { EmptyState } from "./components/EmptyState";
 import { Inspector } from "./components/Inspector";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { RecoveryBanner } from "./components/RecoveryBanner";
+import { RenderQueue } from "./components/RenderQueue";
 import { SceneTree } from "./components/SceneTree";
 import { StatusBar } from "./components/StatusBar";
 import { Timeline } from "./components/Timeline";
@@ -30,6 +31,7 @@ export default function App() {
             <section className="workspace__center">
               <RecoveryBanner />
               <Viewport3D />
+              <RenderQueue />
             </section>
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />

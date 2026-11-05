@@ -1,7 +1,9 @@
 import { createContext, useContext } from "react";
 
+import type { RenderJob } from "./renderQueue";
 import type {
   Applied,
+  AssetIntegrity,
   AutosaveStatus,
   Command,
   EngineStatus,
@@ -47,6 +49,10 @@ export interface SessionApi {
   };
   /** Frame-sequence export progress, or null when idle. */
   exporting: { done: number; total: number } | null;
+  /** On-disk state of every referenced asset (advisory). */
+  assetIntegrity: AssetIntegrity[];
+  /** Offline render jobs: stills and frame sequences, FIFO. */
+  renderJobs: RenderJob[];
   /** Starter scenes for the New Project dialog (empty until probed). */
   presets: ScenePreset[];
   newProjectOpen: boolean;
@@ -87,6 +93,8 @@ export interface SessionApi {
     clearEnvironment(): Promise<void>;
     /** Re-point an asset at a new file. */
     relinkAsset(assetId: string): Promise<void>;
+    /** Re-check every asset's existence and size on disk. */
+    refreshAssetIntegrity(): Promise<void>;
     /** Pick a raster overlay for the terrain. */
     importTerrainOverlay(): Promise<void>;
     /** Change or clear the overlay's opacity (0..1). */
@@ -99,8 +107,12 @@ export interface SessionApi {
      *  stops between frames. The shell evaluates a clone per frame, so the
      *  session's playhead does not move. Desktop shell only. */
     exportFrames(directory: string): Promise<void>;
-    /** Stop a running frame-sequence export between frames. */
+    /** Stop the running frame-sequence export between frames. */
     cancelExport(): void;
+    /** Cancel one queued job, or stop a running sequence between frames. */
+    cancelRenderJob(id: string): void;
+    /** Drop done/failed/cancelled jobs from the list. */
+    clearFinishedJobs(): void;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;

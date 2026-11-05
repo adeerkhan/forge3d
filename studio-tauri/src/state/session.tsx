@@ -12,8 +12,18 @@ import { viewStore } from "../viewport/viewStore";
 import { bridge } from "../bridge/env";
 import { SessionContext, type SessionApi } from "./session-context";
 import { base64ToArrayBuffer, inspectGltf, putAssetBytes } from "../viewport/assets";
+import {
+  canCancelJob,
+  clearFinishedJobs as dropFinishedJobs,
+  enqueueJob,
+  newRenderJob,
+  nextQueuedJob,
+  patchJob,
+  type RenderJob,
+} from "./renderQueue";
 import type {
   Applied,
+  AssetIntegrity,
   AutosaveStatus,
   Command,
   EngineStatus,
@@ -60,8 +70,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     busy: false,
     error: null,
   });
-  const [exporting, setExporting] = useState<{ done: number; total: number } | null>(null);
-  const exportCancelled = useRef(false);
+  const [assetIntegrity, setAssetIntegrity] = useState<AssetIntegrity[]>([]);
+  /** Offline render jobs (stills + frame sequences), FIFO. */
+  const [renderJobs, setRenderJobs] = useState<RenderJob[]>([]);
+  /** Authoritative mirror of `renderJobs`: the worker reads it without a render. */
+  const jobsRef = useRef<RenderJob[]>([]);
+  /** Render settings captured when the job was queued. */
+  const jobSpecs = useRef(new Map<string, { width: number; height: number }>());
+  const cancelledJobs = useRef(new Set<string>());
+  const queueBusy = useRef(false);
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((message: string) => {
@@ -81,6 +98,36 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       fail(cause);
     }
   }, [fail]);
+
+  /**
+   * Re-check referenced assets against the filesystem. Advisory: a missing
+   * file does not block editing, and the viewport/renderer still report the
+   * real read failure — this is what puts the "missing" badge on it.
+   */
+  const refreshAssetIntegrity = useCallback(async () => {
+    try {
+      setAssetIntegrity(await bridge.checkAssets());
+    } catch {
+      // Integrity is a convenience; never turn it into an error toast.
+      setAssetIntegrity([]);
+    }
+  }, []);
+
+  // Re-check when the asset list changes (import, relink, undo, open), not on
+  // every snapshot — the playhead produces one per frame.
+  const assetSignature = state
+    ? state.project.assets
+        .map((asset) => `${asset.id}:${asset.path}:${asset.byteSize}`)
+        .join("|")
+    : "";
+  const hasProject = Boolean(state);
+  useEffect(() => {
+    if (!hasProject) {
+      setAssetIntegrity([]);
+      return;
+    }
+    void refreshAssetIntegrity();
+  }, [assetSignature, hasProject, refreshAssetIntegrity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -527,25 +574,127 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
-  const renderStillTo = useCallback(async (path: string | null) => {
-    setRender((current) => ({ ...current, busy: true, error: null }));
+  /**
+   * Offline render queue.
+   *
+   * The viewport's preview scheduler is newest-wins (a preview is disposable);
+   * a still or a frame sequence is a job, so it runs FIFO to completion with
+   * honest progress and a cancel that stops between frames. Each job captures
+   * the render size when it is queued, so a later settings edit cannot
+   * retarget work the user already started.
+   */
+  const commitJobs = useCallback((next: RenderJob[]) => {
+    jobsRef.current = next;
+    setRenderJobs(next);
+  }, []);
+
+  const updateJob = useCallback(
+    (id: string, patch: Partial<Omit<RenderJob, "id">>) => {
+      commitJobs(patchJob(jobsRef.current, id, patch));
+    },
+    [commitJobs],
+  );
+
+  const pumpJobs = useCallback(async () => {
+    if (queueBusy.current) return;
+    queueBusy.current = true;
     try {
-      const frame = await bridge.renderStill(path, viewStore.current ?? undefined);
-      setRender({ frame, busy: false, error: null });
-      flash(frame.path ? `Saved ${frame.path}` : "Rendered");
-    } catch (cause) {
-      setRender({
-        frame: null,
-        busy: false,
-        error: cause instanceof Error ? cause.message : String(cause),
-      });
+      for (;;) {
+        const job = nextQueuedJob(jobsRef.current);
+        if (!job) break;
+        updateJob(job.id, { status: "running" });
+        try {
+          if (job.kind === "still") {
+            const frame = await bridge.renderStill(
+              job.output || null,
+              viewStore.current ?? undefined,
+            );
+            // A still cannot be interrupted mid-frame; a cancel requested
+            // while it ran still writes the file, so report the truth.
+            const cancelled = cancelledJobs.current.has(job.id);
+            updateJob(job.id, {
+              status: cancelled ? "cancelled" : "done",
+              done: 1,
+              output: frame.path ?? job.output,
+            });
+            flash(frame.path ? `Saved ${frame.path}` : "Rendered");
+          } else {
+            const spec = jobSpecs.current.get(job.id);
+            const width = spec?.width ?? 1920;
+            const height = spec?.height ?? 1080;
+            let index = 0;
+            for (; index < job.total; index += 1) {
+              if (cancelledJobs.current.has(job.id)) break;
+              const output = `${job.output}/frame_${String(index).padStart(4, "0")}.png`;
+              await bridge.renderAnimationFrame({
+                frame: index,
+                width,
+                height,
+                quality: "final",
+                output,
+              });
+              updateJob(job.id, { done: index + 1 });
+            }
+            if (index < job.total) {
+              updateJob(job.id, { status: "cancelled" });
+              flash(`Export stopped at frame ${index} of ${job.total}`);
+            } else {
+              updateJob(job.id, { status: "done" });
+              flash(`Exported ${job.total} frames to ${job.output}`);
+            }
+          }
+        } catch (cause) {
+          // A frame that fails because the job was cancelled (or its project
+          // closed under it) is a cancellation, not an error to shout about.
+          const cancelled = cancelledJobs.current.has(job.id);
+          updateJob(job.id, {
+            status: cancelled ? "cancelled" : "failed",
+            error: cancelled
+              ? null
+              : cause instanceof Error
+                ? cause.message
+                : String(cause),
+          });
+          if (!cancelled) fail(cause);
+        } finally {
+          jobSpecs.current.delete(job.id);
+          cancelledJobs.current.delete(job.id);
+        }
+      }
+    } finally {
+      queueBusy.current = false;
     }
-  }, [flash]);
+  }, [fail, flash, updateJob]);
+
+  const enqueueRenderJob = useCallback(
+    (job: RenderJob, spec: { width: number; height: number }) => {
+      jobSpecs.current.set(job.id, spec);
+      commitJobs(enqueueJob(jobsRef.current, job));
+      void pumpJobs();
+    },
+    [commitJobs, pumpJobs],
+  );
+
+  /** Queue one still; its path is already chosen (null in the preview). */
+  const enqueueStill = useCallback(
+    (path: string | null) => {
+      const render = state?.project.render;
+      enqueueRenderJob(
+        newRenderJob({
+          kind: "still",
+          label: path ? `Still → ${path.split(/[\\/]/).pop()}` : "Still (preview)",
+          total: 1,
+          output: path ?? "",
+        }),
+        { width: render?.width ?? 1920, height: render?.height ?? 1080 },
+      );
+    },
+    [enqueueRenderJob, state],
+  );
 
   /**
-   * Render the whole timeline as a PNG sequence, one IPC per frame so progress
-   * is real and Stop works between frames. The shell evaluates a clone per
-   * frame — the same studio-core `evaluate` the playhead uses — so the
+   * Queue the whole timeline as a PNG sequence. The shell evaluates a clone
+   * per frame — the same studio-core `evaluate` the playhead uses — so the
    * session's playhead and dirty state never move during export.
    */
   const exportFrames = useCallback(
@@ -554,37 +703,74 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       if (!snapshot || bridge.kind !== "tauri") return;
       const { timeline, render: renderSettings } = snapshot.project;
       const total = timeline.length + 1;
-      exportCancelled.current = false;
-      setExporting({ done: 0, total });
-      try {
-        for (let index = 0; index <= timeline.length; index += 1) {
-          if (exportCancelled.current) {
-            flash(`Export stopped at frame ${index} of ${total}`);
-            return;
-          }
-          const output = `${directory}/frame_${String(index).padStart(4, "0")}.png`;
-          await bridge.renderAnimationFrame({
-            frame: index,
-            width: renderSettings.width,
-            height: renderSettings.height,
-            quality: "final",
-            output,
-          });
-          setExporting({ done: index + 1, total });
-        }
-        flash(`Exported ${total} frames to ${directory}`);
-      } catch (cause) {
-        fail(cause);
-      } finally {
-        setExporting(null);
-      }
+      const name = directory.split(/[\\/]/).filter(Boolean).pop() ?? "sequence";
+      enqueueRenderJob(
+        newRenderJob({
+          kind: "sequence",
+          label: `Sequence · ${total} frames → ${name}`,
+          total,
+          output: directory,
+        }),
+        { width: renderSettings.width, height: renderSettings.height },
+      );
     },
-    [state, flash, fail],
+    [enqueueRenderJob, state],
   );
 
+  /** Stop the running sequence and drop anything queued behind it. */
   const cancelExport = useCallback(() => {
-    exportCancelled.current = true;
-  }, []);
+    for (const job of jobsRef.current) {
+      if (job.kind !== "sequence") continue;
+      if (job.status === "running") {
+        cancelledJobs.current.add(job.id);
+        flash("Stopping after the current frame…");
+      } else if (job.status === "queued") {
+        // Also raise the flag: the worker may have picked it up between our
+        // read and this write, in which case it stops after the current frame.
+        cancelledJobs.current.add(job.id);
+        updateJob(job.id, { status: "cancelled" });
+      }
+    }
+  }, [flash, updateJob]);
+
+  const cancelRenderJob = useCallback(
+    (id: string) => {
+      const job = jobsRef.current.find((entry) => entry.id === id);
+      if (!job) return;
+      if (job.status === "queued") {
+        // Same race as cancelExport: the worker may already be inside it.
+        cancelledJobs.current.add(id);
+        updateJob(id, { status: "cancelled" });
+        return;
+      }
+      if (job.status === "running" && canCancelJob(job)) {
+        cancelledJobs.current.add(id);
+        flash("Stopping after the current frame…");
+      }
+    },
+    [flash, updateJob],
+  );
+
+  const clearFinishedJobs = useCallback(() => {
+    commitJobs(dropFinishedJobs(jobsRef.current));
+  }, [commitJobs]);
+
+  // Closing a project abandons its offline work: every job reads the session's
+  // project, so there is nothing left to render.
+  useEffect(() => {
+    if (hasProject) return;
+    for (const job of jobsRef.current) {
+      if (job.status === "queued") updateJob(job.id, { status: "cancelled" });
+      else if (job.status === "running") cancelledJobs.current.add(job.id);
+    }
+  }, [hasProject, updateJob]);
+
+  const runningSequence = renderJobs.find(
+    (job) => job.kind === "sequence" && job.status === "running",
+  );
+  const exporting = runningSequence
+    ? { done: runningSequence.done, total: runningSequence.total }
+    : null;
 
   const setViewportMode = useCallback(
     async (mode: ViewportMode) => {
@@ -664,30 +850,34 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // The still goes where the user points the save dialog; the folder
         // defaults to <project>/renders/<name>-<timestamp>.png so a render
         // can always be traced to its settings (JSON sidecar next to it).
+        // It is queued like every offline render, so one worker owns the
+        // engine and progress/cancel are uniform.
         if (!state) return;
-        if (bridge.kind !== "tauri") {
-          await renderStillTo(null);
-          return;
+        let path: string | null = null;
+        if (bridge.kind === "tauri") {
+          const name = (state.project.name || "untitled").replace(/[^A-Za-z0-9-_]+/g, "-");
+          const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+          const slash = Math.max(
+            state.path?.lastIndexOf("/") ?? -1,
+            state.path?.lastIndexOf("\\") ?? -1,
+          );
+          const dir = state.path && slash > 0 ? state.path.slice(0, slash) : null;
+          const picked = await saveDialog({
+            defaultPath: dir
+              ? `${dir}/renders/${name}-${stamp}.png`
+              : `${name}-${stamp}.png`,
+            filters: [{ name: "PNG image", extensions: ["png"] }],
+          });
+          if (!picked) return;
+          path = picked;
         }
-        const name = (state.project.name || "untitled").replace(/[^A-Za-z0-9-_]+/g, "-");
-        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-        const slash = Math.max(
-          state.path?.lastIndexOf("/") ?? -1,
-          state.path?.lastIndexOf("\\") ?? -1,
-        );
-        const dir = state.path && slash > 0 ? state.path.slice(0, slash) : null;
-        const picked = await saveDialog({
-          defaultPath: dir
-            ? `${dir}/renders/${name}-${stamp}.png`
-            : `${name}-${stamp}.png`,
-          filters: [{ name: "PNG image", extensions: ["png"] }],
-        });
-        if (!picked) return;
-        await renderStillTo(picked);
+        enqueueStill(path);
       },
 
       exportFrames,
       cancelExport,
+      cancelRenderJob,
+      clearFinishedJobs,
 
       async saveProject(saveAs = false) {
         if (!state) return;
@@ -761,6 +951,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importEnvironment,
       clearEnvironment,
       relinkAsset,
+      refreshAssetIntegrity,
       importTerrainDem,
       importTerrainOverlay,
       setTerrainOverlayOpacity,
@@ -813,15 +1004,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importEnvironment,
       clearEnvironment,
       relinkAsset,
+      refreshAssetIntegrity,
       importTerrainDem,
       importTerrainOverlay,
       clearTerrainOverlay,
       refreshEngine,
       refreshRecovery,
-      renderStillTo,
+      enqueueStill,
       renderViewport,
       exportFrames,
       cancelExport,
+      cancelRenderJob,
+      clearFinishedJobs,
       select,
       setPlayhead,
       setTerrainOverlayOpacity,
@@ -850,6 +1044,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     engine,
     render,
     exporting,
+    assetIntegrity,
+    renderJobs,
     terrainResolution,
     setTerrainResolution,
     actions,

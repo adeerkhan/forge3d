@@ -16,7 +16,7 @@ on:
 
 jobs:
   studio-tauri:
-    name: fmt · tsc · studio-core tests
+    name: fmt · lint · types · node tests · Rust suites
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -33,12 +33,55 @@ jobs:
           npm ci
           npx tsc --noEmit
 
+      - name: Frontend tests (viewport math, playback clock, render queue)
+        run: npm test
+
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - name: Rust formatting
         run: cargo fmt --check
 
+      - name: Rust lint
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: studio-core tests
         run: cargo test -p studio-core
+
+      - name: Shell unit tests (render payload, view override)
+        run: cargo test -p forge3d-studio-shell --lib
+
+  bundle:
+    name: Linux bundle (deb)
+    # Packaging is a release gate, not a pull-request gate: the test job above
+    # already compiles both crates, and a full release build costs minutes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: studio-tauri
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: studio-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the deb
+        run: |
+          npm ci
+          npm run tauri build -- --bundles deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: forge3d-studio-deb
+          path: studio-tauri/src-tauri/target/release/bundle/deb/*.deb

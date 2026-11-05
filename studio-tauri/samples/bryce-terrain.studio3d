@@ -1,0 +1,175 @@
+{
+  "format": "studio3d",
+  "schemaVersion": 4,
+  "id": "2acdd02f-1b7c-4a62-8238-a718ac9cd1e5",
+  "name": "Bryce Canyon",
+  "createdUnixMs": 1793894621744,
+  "updatedUnixMs": 1793894621744,
+  "scene": {
+    "id": "45123a28-bea7-4313-be8d-d51c47f06cb6",
+    "name": "Scene",
+    "objects": [
+      {
+        "id": "eaa87546-a5bb-41d7-8e41-f9c69af58371",
+        "name": "Bryce Canyon",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "rotationDeg": {
+            "x": 0.0,
+            "y": 0.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "terrain",
+          "asset": "43a6c18b-ca90-4234-9d15-577cdf06f2bf",
+          "zScale": 1.0,
+          "albedo": null,
+          "dimensions": [
+            1024,
+            1024
+          ],
+          "worldOriginXz": [
+            395998.5,
+            -4165574.5
+          ],
+          "worldSpanXz": [
+            4000.0,
+            3800.0
+          ],
+          "elevationRange": [
+            2099.23,
+            2553.58
+          ],
+          "overlay": {
+            "asset": "745806cf-8fec-4ff9-81db-8ecf6fac112e",
+            "opacity": 0.82,
+            "preserveColors": true
+          }
+        }
+      },
+      {
+        "id": "6b5d1927-e64a-4e48-93fe-62287c305035",
+        "name": "Camera",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 11.0,
+            "y": 7.5,
+            "z": 13.0
+          },
+          "rotationDeg": {
+            "x": -24.0,
+            "y": 40.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "camera",
+          "fovDeg": 45.0,
+          "near": 0.1,
+          "far": 1000.0
+        }
+      },
+      {
+        "id": "90188d95-d10a-40d9-a127-8ab96a47e936",
+        "name": "Sun",
+        "parent": null,
+        "transform": {
+          "translation": {
+            "x": 4.0,
+            "y": 6.0,
+            "z": 3.0
+          },
+          "rotationDeg": {
+            "x": -50.0,
+            "y": 30.0,
+            "z": 0.0
+          },
+          "scale": {
+            "x": 1.0,
+            "y": 1.0,
+            "z": 1.0
+          }
+        },
+        "visible": true,
+        "locked": false,
+        "kind": {
+          "type": "light",
+          "kind": "directional",
+          "color": [
+            1.0,
+            0.97,
+            0.92
+          ],
+          "intensity": 3.0
+        }
+      }
+    ],
+    "activeCamera": "6b5d1927-e64a-4e48-93fe-62287c305035"
+  },
+  "assets": [
+    {
+      "id": "745806cf-8fec-4ff9-81db-8ecf6fac112e",
+      "name": "Bryce_Canyon_naip.tif",
+      "path": "../../assets/tif/Bryce_Canyon_naip.tif",
+      "kind": "orthophoto",
+      "byteSize": 11775186
+    },
+    {
+      "id": "43a6c18b-ca90-4234-9d15-577cdf06f2bf",
+      "name": "Bryce_Canyon_1024.tif",
+      "path": "../../assets/tif/Bryce_Canyon_1024.tif",
+      "kind": "dem",
+      "byteSize": 3321356
+    },
+    {
+      "id": "cc419798-e066-41f4-88a9-e8bd9f111e26",
+      "name": "studio-sky.hdr",
+      "path": "media/studio-sky.hdr",
+      "kind": "hdr",
+      "byteSize": 524337
+    }
+  ],
+  "selection": [],
+  "workspace": "studio",
+  "viewport": {
+    "mode": "solid",
+    "gridVisible": true
+  },
+  "render": {
+    "width": 1920,
+    "height": 1080,
+    "exposure": 1.35,
+    "shadows": true,
+    "ambientOcclusion": false,
+    "sky": true,
+    "iblIntensity": 1.0,
+    "environment": "cc419798-e066-41f4-88a9-e8bd9f111e26"
+  },
+  "timeline": {
+    "frameRate": 24,
+    "length": 96,
+    "currentFrame": 0.0,
+    "tracks": []
+  }
+}

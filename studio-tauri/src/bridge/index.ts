@@ -9,6 +9,7 @@
  */
 
 import type {
+  AssetIntegrity,
   AutosaveStatus,
   CapabilityTable,
   Command,
@@ -69,6 +70,8 @@ export interface StudioBridge {
   rasterPreview(path: string, width?: number): Promise<MeshFilePayload>;
   /** Size of a file on disk — asset registration validates non-empty files. */
   fileSize(path: string): Promise<number>;
+  /** Existence and size of every referenced asset (read-only). */
+  checkAssets(): Promise<AssetIntegrity[]>;
   /** Sample a DEM into a heightfield for the Studio viewport. */
   terrainPreview(path: string, resolution?: number): Promise<TerrainPreview>;
   /** Replace the scene terrain's DEM with a raster the user picked — or add
