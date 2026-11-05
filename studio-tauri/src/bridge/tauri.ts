@@ -14,6 +14,7 @@ import type {
   RenderStatus,
   ScenePreset,
   SessionState,
+  SolarResult,
   ShellInfo,
   TerrainPreview,
   WrittenFrame,
@@ -52,6 +53,14 @@ export const tauriBridge: StudioBridge = {
   setSelection: (ids) => invoke<SessionState>("set_selection", { ids }),
 
   setPlayhead: (frame) => invoke<PlayheadResult>("set_playhead", { frame }),
+
+  setSunFromSolar: (id, latitude, longitude, datetimeUtc) =>
+    invoke<SolarResult>("set_sun_from_solar", {
+      id,
+      latitude,
+      longitude,
+      datetimeUtc,
+    }),
 
   renderAnimationFrame: (request) =>
     invoke<WrittenFrame>("render_animation_frame", {

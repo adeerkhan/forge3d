@@ -34,6 +34,7 @@ import type {
   RecoveryEntry,
   SessionState,
   ShellInfo,
+  SolarResult,
   RenderView,
   Tool,
   ToolSpace,
@@ -229,6 +230,39 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       }
     },
     [fail],
+  );
+
+  /**
+   * Point a directional light from the engine's ephemeris. One undoable
+   * `SetTransform`; the date and place are inputs, not project state.
+   */
+  const setSunFromSolar = useCallback(
+    async (
+      id: string,
+      latitude: number,
+      longitude: number,
+      datetimeUtc: string,
+    ): Promise<SolarResult | null> => {
+      try {
+        const result = await bridge.setSunFromSolar(
+          id,
+          latitude,
+          longitude,
+          datetimeUtc,
+        );
+        setState(result.state);
+        flash(
+          result.daytime
+            ? `Sun ${result.azimuthDeg.toFixed(0)}° · ${result.elevationDeg.toFixed(1)}° elevation`
+            : "Sun is below the horizon",
+        );
+        return result;
+      } catch (cause) {
+        fail(cause);
+        return null;
+      }
+    },
+    [fail, flash],
   );
 
   const addPrimitive = useCallback(
@@ -957,6 +991,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
       select,
       setPlayhead,
+      setSunFromSolar,
       addPrimitive,
       duplicateSelection,
       deleteSelection,
@@ -1037,6 +1072,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearFinishedJobs,
       select,
       setPlayhead,
+      setSunFromSolar,
       setTerrainOverlayOpacity,
       setViewportMode,
       state,

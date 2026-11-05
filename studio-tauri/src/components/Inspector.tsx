@@ -10,6 +10,7 @@ import type {
   LightObject,
   Primitive,
   SceneObject,
+  SolarResult,
   Transform,
 } from "../bridge/types";
 import { objectKindLabel } from "../bridge/types";
@@ -244,6 +245,106 @@ function CameraEditor({
   );
 }
 
+function localDateTimeInput(): string {
+  const now = new Date();
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(
+    now.getHours(),
+  )}:${pad(now.getMinutes())}`;
+}
+
+/**
+ * Bakes the engine's solar ephemeris into the light's rotation. The datetime
+ * input is local; the browser converts it to the UTC string the engine wants.
+ * Nothing is stored: re-applying a different time is the way to change it.
+ */
+function SolarPositionEditor({ object }: { object: SceneObject }) {
+  const { actions, bridgeKind } = useSession();
+  const [latitude, setLatitude] = useState(0);
+  const [longitude, setLongitude] = useState(0);
+  const [when, setWhen] = useState(localDateTimeInput);
+  const [pending, setPending] = useState(false);
+  const [result, setResult] = useState<SolarResult | null>(null);
+
+  const apply = async () => {
+    const local = new Date(when);
+    if (Number.isNaN(local.getTime())) {
+      actions.notify("Enter a valid date and time");
+      return;
+    }
+    setPending(true);
+    try {
+      const utc = local.toISOString();
+      const applied = await actions.setSunFromSolar(
+        object.id,
+        latitude,
+        longitude,
+        utc,
+      );
+      if (applied) setResult(applied);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div className="solar-position">
+      <span className="group-label">Sun from date &amp; place</span>
+      <div className="pair">
+        <NumberField
+          label="Latitude"
+          value={latitude}
+          step={0.1}
+          min={-90}
+          max={90}
+          onCommit={setLatitude}
+        />
+        <NumberField
+          label="Longitude"
+          value={longitude}
+          step={0.1}
+          min={-180}
+          max={180}
+          onCommit={setLongitude}
+        />
+      </div>
+      <label className="field">
+        <span className="field-label">Local date &amp; time</span>
+        <input
+          className="input"
+          type="datetime-local"
+          value={when}
+          disabled={bridgeKind !== "tauri"}
+          onChange={(event) => setWhen(event.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        className="button button--small"
+        disabled={bridgeKind !== "tauri" || pending || !when}
+        title={
+          bridgeKind === "tauri"
+            ? "Rotate the sun to this place and time — one undo step"
+            : "Solar placement needs the desktop shell"
+        }
+        onClick={() => void apply()}
+      >
+        {pending ? "Locating…" : "Set sun"}
+      </button>
+      {result && (
+        <p className="hint">
+          Azimuth {result.azimuthDeg.toFixed(1)}° · elevation{" "}
+          {result.elevationDeg.toFixed(1)}°
+          {!result.daytime && " · below the horizon"}
+        </p>
+      )}
+      {bridgeKind !== "tauri" && (
+        <p className="hint">Solar placement needs the desktop shell.</p>
+      )}
+    </div>
+  );
+}
+
 function LightEditor({ object, light }: { object: SceneObject; light: LightObject }) {
   const { actions } = useSession();
   const caps = useCapabilities();
@@ -286,6 +387,7 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
         <NumberField label="B" value={light.color[2]} step={0.02} min={0} max={1} onCommit={channel(2)} />
       </div>
       <span className="group-label">Colour (linear RGB)</span>
+      {light.kind === "directional" && <SolarPositionEditor object={object} />}
       <CapabilityBadges rows={caps?.light} />
     </Section>
   );

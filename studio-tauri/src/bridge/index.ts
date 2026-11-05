@@ -23,6 +23,7 @@ import type {
   RenderFrame,
   RenderStatus,
   ScenePreset,
+  SolarResult,
   RenderView,
   ShellInfo,
   TerrainPreview,
@@ -50,6 +51,14 @@ export interface StudioBridge {
    *  state: not undoable, no autosave). Returns the snapshot plus the
    *  clamped frame that was applied. */
   setPlayhead(frame: number): Promise<PlayheadResult>;
+  /** Place a directional light from the engine's solar ephemeris. One
+   *  undoable transform; the date/place are inputs, not project state. */
+  setSunFromSolar(
+    id: string,
+    latitude: number,
+    longitude: number,
+    datetimeUtc: string,
+  ): Promise<SolarResult>;
   /** Render one frame of an offline sequence to `output` (PNG). The shell
    *  evaluates the timeline on a clone, so the session's playhead does not
    *  move. Desktop shell only. */

@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{AssetId, ObjectId, ProjectId, SceneId};
-use crate::math::Vec3;
+use crate::math::{Transform, Vec3};
 use crate::project::{Asset, AssetKind, Project, Workspace};
 use crate::scene::{LightKind, ObjectKind};
 
@@ -612,6 +612,17 @@ pub fn camera_sync(project: &Project) -> Option<CameraSync> {
     })
 }
 
+/// Rotation for the sun light from the engine ephemeris direction.
+///
+/// `scene_direction` is the direction **toward** the sun in MapScene's frame
+/// (+X east, +Y up, +Z north), as returned by `SunPosition.to_scene_direction`.
+/// Studio's Solid frame is +X east, +Y up, +Z south, so north flips; the light
+/// itself travels the opposite way.
+pub fn sun_rotation(scene_direction: [f32; 3]) -> Vec3 {
+    let toward_sun = Vec3::new(scene_direction[0], scene_direction[1], -scene_direction[2]);
+    Transform::rotation_looking_along(Vec3::new(-toward_sun.x, -toward_sun.y, -toward_sun.z))
+}
+
 /// The scene's directional sun in viewer terms.
 pub fn sun_angles(project: &Project) -> Option<SunAngles> {
     let light = project
@@ -942,6 +953,91 @@ mod tests {
         // The renderer receives the light's colour too — Solid and Rendered
         // must agree on it.
         assert_eq!(sun.color, [1.0, 0.97, 0.92], "{sun:?}");
+    }
+
+    fn sun_object_id(project: &Project) -> ObjectId {
+        project
+            .scene
+            .objects
+            .iter()
+            .find(|object| {
+                matches!(&object.kind, ObjectKind::Light(light) if light.kind == LightKind::Directional)
+            })
+            .expect("starter scene has a sun")
+            .id
+    }
+
+    #[test]
+    fn sun_rotation_round_trips_the_light_angles() {
+        let mut project = Project::new("Solar");
+        let sun_id = sun_object_id(&project);
+        for (azimuth_deg, elevation_deg) in [
+            (0.0f32, 10.0f32),
+            (60.0, 50.0),
+            (107.2, 66.08),
+            (200.0, 5.0),
+            (330.0, -10.0),
+        ] {
+            let azimuth = azimuth_deg.to_radians();
+            let elevation = elevation_deg.to_radians();
+            // Solid axes: x east, y up, z south.
+            let toward_sun = Vec3::new(
+                elevation.cos() * azimuth.cos(),
+                elevation.sin(),
+                elevation.cos() * azimuth.sin(),
+            );
+            // The engine's scene direction is (east, up, north).
+            let scene = [toward_sun.x, toward_sun.y, -toward_sun.z];
+            let rotation = sun_rotation(scene);
+            project
+                .scene
+                .object_mut(sun_id)
+                .unwrap()
+                .transform
+                .rotation_deg = rotation;
+
+            let angles = sun_angles(&project).expect("sun still exists");
+            let azimuth_delta = ((angles.azimuth_deg - azimuth_deg + 540.0) % 360.0) - 180.0;
+            assert!(
+                azimuth_delta.abs() < 0.5,
+                "azimuth {azimuth_deg} -> {} via {rotation:?}",
+                angles.azimuth_deg
+            );
+            assert!(
+                (angles.elevation_deg - elevation_deg).abs() < 0.5,
+                "elevation {elevation_deg} -> {} via {rotation:?}",
+                angles.elevation_deg
+            );
+        }
+    }
+
+    #[test]
+    fn sun_rotation_matches_a_known_ephemeris_vector() {
+        // forge3d.sun_position(46.6, 7.9, "2026-06-21T12:00:00Z")
+        //   .to_scene_direction()  (x east, y up, z north)
+        // Sun in the south at local noon, elevation 66.08°.
+        let scene = [-0.118_866_32, 0.914_083_86, -0.387_713_16];
+        let mut project = Project::new("Solar");
+        let sun_id = sun_object_id(&project);
+        project
+            .scene
+            .object_mut(sun_id)
+            .unwrap()
+            .transform
+            .rotation_deg = sun_rotation(scene);
+
+        let angles = sun_angles(&project).expect("sun still exists");
+        // Engine azimuth is east -> south: north-based 197.04 becomes 107.04.
+        assert!(
+            (angles.azimuth_deg - 107.16).abs() < 0.5,
+            "azimuth {}",
+            angles.azimuth_deg
+        );
+        assert!(
+            (angles.elevation_deg - 66.08).abs() < 0.5,
+            "elevation {}",
+            angles.elevation_deg
+        );
     }
 
     #[test]

@@ -759,6 +759,10 @@ export function createMockBridge(): StudioBridge {
       return state();
     },
 
+    setSunFromSolar: async () => {
+      throw new Error("solar position needs the desktop shell");
+    },
+
     setPlayhead: async (frame) => {
       const applied = evaluateTimeline(requireProject(), frame);
       return { frame: applied, state: state() };

@@ -105,6 +105,26 @@ impl Transform {
         self.rotate_vector(Vec3::new(0.0, 1.0, 0.0))
     }
 
+    /// Euler rotation (degrees, the model's ZYX order) that points the local
+    /// `-Z` axis along `forward`.
+    ///
+    /// Roll is zero: a light or camera only needs its direction, and a
+    /// direction has two degrees of freedom. A vertical `forward` (straight up
+    /// or down) is a degenerate yaw, so it gets pitch 0 or 180 with yaw 0.
+    pub fn rotation_looking_along(forward: Vec3) -> Vec3 {
+        let length = (forward.x * forward.x + forward.y * forward.y + forward.z * forward.z).sqrt();
+        if !length.is_finite() || length <= 1e-9 {
+            return Vec3::ZERO;
+        }
+        let (x, y, z) = (forward.x / length, forward.y / length, forward.z / length);
+        let pitch = (-z).clamp(-1.0, 1.0).acos().to_degrees();
+        let horizontal = (x * x + y * y).sqrt();
+        if horizontal < 1e-6 {
+            return Vec3::new(0.0, pitch, 0.0);
+        }
+        Vec3::new(0.0, pitch, (-y).atan2(-x).to_degrees())
+    }
+
     /// Reject NaN/infinite values before they reach a renderer, where they
     /// become invisible objects and un-diagnosable blank frames.
     pub fn validate(&self) -> Result<(), String> {
@@ -182,5 +202,42 @@ mod tests {
         t.translation.x = 0.0;
         t.scale.y = f32::INFINITY;
         assert!(t.validate().is_err());
+    }
+
+    #[test]
+    fn looking_along_rotation_recovers_its_forward_axis() {
+        let assert_forward = |forward: Vec3| {
+            let rotation = Transform::rotation_looking_along(forward);
+            let look = Transform {
+                rotation_deg: rotation,
+                ..Transform::default()
+            };
+            let got = look.forward();
+            let length =
+                (forward.x * forward.x + forward.y * forward.y + forward.z * forward.z).sqrt();
+            let want = Vec3::new(forward.x / length, forward.y / length, forward.z / length);
+            let close = (got.x - want.x).abs() < 1e-5
+                && (got.y - want.y).abs() < 1e-5
+                && (got.z - want.z).abs() < 1e-5;
+            assert!(
+                close,
+                "forward {want:?}, recovered {got:?} via {rotation:?}"
+            );
+        };
+
+        for forward in [
+            Vec3::new(0.0, 0.0, -1.0),   // the model's neutral forward
+            Vec3::new(0.0, 0.0, 1.0),    // straight up: degenerate yaw
+            Vec3::new(-1.0, 0.0, 0.0),   // west
+            Vec3::new(0.0, -1.0, 0.0),   // down
+            Vec3::new(0.0, 1.0, 0.0),    // up
+            Vec3::new(0.3, -0.4, 0.866), // arbitrary
+            Vec3::new(2.0, 0.0, 0.0),    // non-unit input
+        ] {
+            assert_forward(forward);
+        }
+
+        // A zero direction cannot define a rotation; refuse silently.
+        assert_eq!(Transform::rotation_looking_along(Vec3::ZERO), Vec3::ZERO);
     }
 }

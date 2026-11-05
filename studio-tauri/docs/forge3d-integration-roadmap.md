@@ -20,7 +20,8 @@ be a payload field: vector layers and meshes.
 | Solid / Material / Rendered viewport, HDRI sky | done |
 | Terrain stills, Rendered frames, animation export | done |
 | Timeline drawer, render queue, asset integrity, samples | done |
-| Everything below (§3–§6) | **not started** |
+| Sun from date/time/location (increment 9.0) | done |
+| Everything below (§3–§6, except 9.0) | **not started** |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
 to decisions in §7 and the appendix; most of them are now explicitly **not
@@ -217,7 +218,7 @@ BVH product path, no hybrid preview.
 | Order | Increment | Days | Depends |
 |---|---|---|---|
 | 1 | 8.0 engine facts in probe | 0.5 | — |
-| 2 | 9.0 sun from date/time | 0.5 | — |
+| 2 | 9.0 sun from date/time | 0.5 | done |
 | 3 | 5.1 sky model | 1 | 8.0 (feature list) |
 | 4 | 5.2 water | 0.5 | — |
 | 5 | 5.3 clouds | 0.5 | — |
@@ -232,10 +233,10 @@ items gated on real requests.
 
 ## 12. Next three commits
 
-1. `feat(studio): engine facts in the probe` — `PROBE_SCRIPT`, `EngineStatus`,
+1. ~~`feat(studio): sun from date/time/location`~~ — **done**: `solar_position`
+   one-shot, `sun_rotation` + ephemeris/round-trip tests, light inspector group.
+2. `feat(studio): engine facts in the probe` — `PROBE_SCRIPT`, `EngineStatus`,
    `types.ts`, `StatusBar.tsx`; fixture test.
-2. `feat(studio): sun from date/time/location` — `solar_position` command,
-   `sun_transform` + round-trip test, light inspector dialog.
 3. `feat(studio): sky model and atmosphere settings` — §2 recipe for the four
    sky fields; payload + Python validation tests.
 

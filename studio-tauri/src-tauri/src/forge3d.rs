@@ -421,6 +421,120 @@ pub fn sample_terrain(
     Ok(value)
 }
 
+/// Solar position from the engine's SIDERA ephemeris.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolarPosition {
+    /// Azimuth from north toward east, degrees (the engine's convention).
+    pub azimuth_deg: f64,
+    /// Degrees above the horizon.
+    pub elevation_deg: f64,
+    /// Direction toward the sun in MapScene axes: +X east, +Y up, +Z north.
+    pub direction: [f32; 3],
+    pub daytime: bool,
+}
+
+/// One-shot ephemeris call. No GPU session: the shell's solar button must not
+/// wait for the renderer service.
+const SOLAR_SCRIPT: &str = r#"
+import json, sys
+
+try:
+    import forge3d
+    position = forge3d.sun_position(float(sys.argv[1]), float(sys.argv[2]), sys.argv[3])
+    direction = position.to_scene_direction()
+    print(json.dumps({
+        "ok": True,
+        "azimuth": position.azimuth,
+        "elevation": position.elevation,
+        "direction": [direction[0], direction[1], direction[2]],
+        "daytime": bool(position.is_daytime()),
+    }))
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": str(exc)}))
+"#;
+
+/// Ask the engine where the sun is for a UTC timestamp and a place.
+///
+/// The engine owns the astronomy (SIDERA); Studio only turns the returned
+/// direction into the light's rotation (`workspace::sun_rotation`). The
+/// direction is in MapScene axes, so no azimuth conversion happens here.
+pub fn solar_position(
+    python: &str,
+    latitude: f64,
+    longitude: f64,
+    datetime_utc: &str,
+) -> Result<SolarPosition, String> {
+    let mut command = Command::new(python);
+    command
+        .arg("-c")
+        .arg(SOLAR_SCRIPT)
+        .arg(latitude.to_string())
+        .arg(longitude.to_string())
+        .arg(datetime_utc)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(extra) = python_path_entries() {
+        command.env("PYTHONPATH", extra);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("could not run {python}: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| {
+            format!(
+                "the solar probe produced no output: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+    parse_solar_reply(line)
+}
+
+fn parse_solar_reply(line: &str) -> Result<SolarPosition, String> {
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("the solar probe returned invalid JSON: {error}"))?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return Err(value
+            .get("detail")
+            .and_then(|detail| detail.as_str())
+            .unwrap_or("the engine could not compute the sun position")
+            .to_owned());
+    }
+    let azimuth = value
+        .get("azimuth")
+        .and_then(|value| value.as_f64())
+        .ok_or_else(|| "the solar probe returned no azimuth".to_owned())?;
+    let elevation = value
+        .get("elevation")
+        .and_then(|value| value.as_f64())
+        .ok_or_else(|| "the solar probe returned no elevation".to_owned())?;
+    let direction = value
+        .get("direction")
+        .and_then(|value| value.as_array())
+        .filter(|entries| entries.len() == 3)
+        .ok_or_else(|| "the solar probe returned no direction".to_owned())?;
+    let mut parsed = [0.0f32; 3];
+    for (index, entry) in direction.iter().enumerate() {
+        parsed[index] = entry
+            .as_f64()
+            .ok_or_else(|| "the solar direction is not numeric".to_owned())?
+            as f32;
+    }
+    Ok(SolarPosition {
+        azimuth_deg: azimuth,
+        elevation_deg: elevation,
+        direction: parsed,
+        daytime: value
+            .get("daytime")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+    })
+}
+
 /// Decoded raster preview for the Material preview's terrain drape: a
 /// downsampled RGBA PNG, colour handling mirroring
 /// `studio_render.build_overlay`'s preserve-colours path so Material and
@@ -651,4 +765,26 @@ fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
 
 fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_solar_reply;
+
+    #[test]
+    fn solar_reply_parses_and_reports_engine_errors() {
+        let ok = r#"{"ok":true,"azimuth":197.04,"elevation":66.08,"direction":[-0.118,0.914,-0.387],"daytime":true}"#;
+        let position = parse_solar_reply(ok).expect("valid reply");
+        assert!((position.azimuth_deg - 197.04).abs() < 1e-9);
+        assert!((position.elevation_deg - 66.08).abs() < 1e-9);
+        assert!((position.direction[2] + 0.387).abs() < 1e-5);
+        assert!(position.daytime);
+
+        let error =
+            parse_solar_reply(r#"{"ok":false,"detail":"bad datetime"}"#).expect_err("engine error");
+        assert!(error.contains("bad datetime"), "{error}");
+
+        let missing = parse_solar_reply(r#"{"ok":true}"#).expect_err("incomplete reply");
+        assert!(missing.contains("azimuth"), "{missing}");
+    }
 }

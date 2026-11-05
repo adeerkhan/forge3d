@@ -59,6 +59,7 @@ export.
 | Per-channel keys (`SetChannelKeys`), 9 transform channels + camera FOV | `command.rs`, `timeline.rs` | done |
 | Offline PNG sequence export (`renderAnimationFrame` per frame) | `src/state/session.tsx`, `render.rs` | done |
 | Camera animation reaches Forge3D (`camera_render_view` → `with_view`) | `workspace.rs`, `commands.rs` | done |
+| Sun from date/place via the engine ephemeris (`sun_rotation`) | `commands.rs`, `workspace.rs`, light Inspector | done |
 | **Phase 7** — crash recovery, atomic save, recovery store | `autosave.rs`, `session.rs`, `RecoveryBanner.tsx` | done |
 | Asset integrity (existence + size on open/relink, Inspector badges) | `integrity.rs`, `check_assets`, `Inspector.tsx` | done |
 | Large-scene performance guards (2k objects / 500 tracks, 10k stress) | `crates/studio-core/tests/performance.rs` | done |
@@ -299,6 +300,18 @@ like "nothing happened" if you get them wrong:
    Canyon is 4000 × 3800 m at ≈ 4 165 774 m north, so a pixel-space guess aims at
    empty space and the render is blank. `TerrainObject::viewer_framing` reproduces
    that formula exactly and is pinned by a test.
+
+## Sun from date and place
+
+Select the Sun (a directional light) and use **Inspector → Light → Sun from
+date & place**: latitude, longitude, and a local date/time, then **Set sun**.
+The shell asks the engine's SIDERA ephemeris (`forge3d.sun_position`) for the
+direction, converts it into the light's rotation (`workspace::sun_rotation`,
+one tested axis conversion from MapScene's east/up/north frame), and applies a
+single `SetTransform`. Both viewport modes and the renderer read that rotation,
+so one undo restores the previous sun. The date and place are inputs to the
+calculation, not project state: apply again to change them. A result below the
+horizon is applied and reported (`daytime: false`), never clamped.
 
 ## Engine discovery
 

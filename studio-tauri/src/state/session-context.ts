@@ -13,6 +13,7 @@ import type {
   ScenePreset,
   SessionState,
   ShellInfo,
+  SolarResult,
   Tool,
   ToolSpace,
   ViewportMode,
@@ -73,6 +74,14 @@ export interface SessionApi {
     select(ids: string[]): Promise<void>;
     /** Move the playhead and evaluate the timeline (view state: not an edit). */
     setPlayhead(frame: number): Promise<void>;
+    /** Place the selected directional light from the engine's solar
+     *  ephemeris. Returns the computed angles for display. */
+    setSunFromSolar(
+      id: string,
+      latitude: number,
+      longitude: number,
+      datetimeUtc: string,
+    ): Promise<SolarResult | null>;
     addPrimitive(shape: PrimitiveShape): Promise<void>;
     duplicateSelection(): Promise<void>;
     deleteSelection(): Promise<void>;

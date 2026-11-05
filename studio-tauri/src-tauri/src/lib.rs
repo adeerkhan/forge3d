@@ -67,6 +67,7 @@ pub fn run() {
             commands::redo,
             commands::set_selection,
             commands::set_playhead,
+            commands::set_sun_from_solar,
             commands::render_animation_frame,
             commands::autosave_now,
             commands::autosave_status,

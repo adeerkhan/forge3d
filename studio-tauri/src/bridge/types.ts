@@ -210,6 +210,17 @@ export interface Timeline {
   tracks: ObjectTrack[];
 }
 
+/** What `setSunFromSolar` returns: the ephemeris and the new snapshot. */
+export interface SolarResult {
+  /** Azimuth from north toward east, degrees (engine display convention). */
+  azimuthDeg: number;
+  elevationDeg: number;
+  daytime: boolean;
+  /** Rotation written to the light (degrees, ZYX). */
+  rotationDeg: { x: number; y: number; z: number };
+  state: SessionState;
+}
+
 /** What `setPlayhead` returns: the new snapshot plus the clamped frame. */
 export interface PlayheadResult {
   frame: number;

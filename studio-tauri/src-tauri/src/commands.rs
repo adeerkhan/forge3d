@@ -15,7 +15,9 @@ use studio_core::ids::ObjectId;
 use studio_core::project::AssetKind;
 use tauri::State;
 
-use studio_core::{AutosaveReport, Session, Workspace, AUTOSAVE_INTERVAL_SECONDS};
+use studio_core::{
+    AutosaveReport, LightKind, ObjectKind, Session, Transform, Workspace, AUTOSAVE_INTERVAL_SECONDS,
+};
 
 use crate::forge3d::{EngineStatus, Forge3dState};
 use crate::render::{RenderFrame, RenderRequest, RenderState, RenderStatus, RenderView};
@@ -218,6 +220,81 @@ pub fn check_assets(
             Err(error) => Err(format!("{path}: {error}")),
         },
     ))
+}
+
+/// Place the directional light from the engine's ephemeris.
+///
+/// One undoable `SetTransform`: the date, place and UTC timestamp are an input
+/// to the calculation, not project state. The light's rotation is what both
+/// the Solid/Material viewport and the Rendered handoff read.
+#[tauri::command]
+pub fn set_sun_from_solar(
+    forge: State<'_, Forge3dState>,
+    state: State<'_, AppState>,
+    id: ObjectId,
+    latitude: f64,
+    longitude: f64,
+    datetime_utc: String,
+) -> Result<SolarResult, String> {
+    if !latitude.is_finite() || !(-90.0..=90.0).contains(&latitude) {
+        return Err("latitude must be between -90 and 90 degrees".to_owned());
+    }
+    if !longitude.is_finite() || !(-180.0..=180.0).contains(&longitude) {
+        return Err("longitude must be between -180 and 180 degrees".to_owned());
+    }
+    let datetime_utc = datetime_utc.trim();
+    if datetime_utc.is_empty() {
+        return Err("a UTC date and time is required".to_owned());
+    }
+
+    let engine = forge.probe(false);
+    if !engine.available {
+        return Err(engine.detail);
+    }
+    let solar = crate::forge3d::solar_position(&engine.python, latitude, longitude, datetime_utc)?;
+    let rotation = studio_core::workspace::sun_rotation(solar.direction);
+
+    let mut session = lock(&state)?;
+    let snapshot = session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())?;
+    let object = snapshot
+        .project
+        .scene
+        .object(id)
+        .ok_or_else(|| format!("object {id} does not exist"))?;
+    match &object.kind {
+        ObjectKind::Light(light) if light.kind == LightKind::Directional => {}
+        _ => return Err("solar placement needs a directional light".to_owned()),
+    }
+    let transform = Transform {
+        rotation_deg: rotation,
+        ..object.transform
+    };
+    let (_applied, snapshot) = session
+        .apply(Command::SetTransform { id, transform })
+        .map_err(|error| error.to_string())?;
+
+    Ok(SolarResult {
+        azimuth_deg: solar.azimuth_deg,
+        elevation_deg: solar.elevation_deg,
+        daytime: solar.daytime,
+        rotation_deg: rotation,
+        state: snapshot,
+    })
+}
+
+/// What `set_sun_from_solar` returns: where the sun is and the new snapshot.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SolarResult {
+    /// Engine azimuth, north toward east, for display.
+    pub azimuth_deg: f64,
+    pub elevation_deg: f64,
+    pub daytime: bool,
+    /// The rotation written to the light (degrees, ZYX).
+    pub rotation_deg: studio_core::Vec3,
+    pub state: SessionState,
 }
 
 #[tauri::command]
