@@ -6,6 +6,7 @@ import { NewProjectDialog } from "./components/NewProjectDialog";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { SceneTree } from "./components/SceneTree";
 import { StatusBar } from "./components/StatusBar";
+import { Timeline } from "./components/Timeline";
 import { TopBar } from "./components/TopBar";
 import { Viewport3D } from "./viewport/Viewport3D";
 import { CloseIcon } from "./components/icons";
@@ -33,6 +34,7 @@ export default function App() {
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />
             </aside>
+            <Timeline />
           </>
         ) : (
           <>

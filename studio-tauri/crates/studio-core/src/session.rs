@@ -154,6 +154,19 @@ impl Session {
         Ok(editor.state())
     }
 
+    /// Move the playhead and evaluate the timeline into the project (view
+    /// state — not undoable, not a reason to autosave). Returns the new
+    /// snapshot so the UI re-renders with the evaluated transforms, plus the
+    /// clamped frame that was applied.
+    pub fn set_playhead(&mut self, frame: f32) -> Result<(f32, SessionState), StudioError> {
+        let editor = self
+            .editor
+            .as_mut()
+            .ok_or_else(|| StudioError::invalid("no project is open"))?;
+        let frame = editor.preview_playhead(frame);
+        Ok((frame, editor.state()))
+    }
+
     /// Swap in a recovered project. It stays dirty: the user still has to save.
     pub fn restore_recovery(&mut self, entry: &RecoveryEntry, project: Project) -> SessionState {
         let mut editor = Editor::new(project);

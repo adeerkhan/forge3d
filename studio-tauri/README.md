@@ -5,12 +5,13 @@ The desktop shell for the renewed **Forge3D Studio** product described in
 a Tauri app around a canonical project model, with one project serving both the
 Studio workspace and (from Phase 3) the Forge3D workspace.
 
-**Phases 1–3 are implemented**: the desktop shell, project schema and migration,
-open/save/autosave/recovery, command-based undo/redo, a Three.js solid viewport
-with orbit/pan/zoom and a camera view, Blender-style move/rotate/scale tools, an
-orientation gizmo, add/duplicate/delete, glTF/GLB import, and the Forge3D
-workspace adapter (capability report, engine probe, viewer process, camera/sun
-sync, diagnostics).
+**Phases 1–6 are implemented**: the desktop shell, project schema and migration,
+open/save/autosave/recovery, command-based undo/redo, a Three.js viewport with
+Solid / Material / Rendered modes, orbit/pan/zoom and a camera view,
+Blender-style move/rotate/scale tools, an orientation gizmo, add/duplicate/delete,
+glTF/GLB import, the Forge3D workspace adapter (capability report, engine probe,
+camera/sun sync), and the animation timeline with keyframes and PNG sequence
+export.
 
 > The pre-existing `../studio/` tree is the earlier terrain-focused eframe/egui
 > Studio. It is a separate application and a separate Cargo workspace. This
@@ -50,8 +51,13 @@ sync, diagnostics).
 | Environment/IBL controls (sky background, environment intensity) | `RenderSettings`, `RenderSettingsEditor` | done |
 | Basic lights & camera properties (direction/intensity/colour, fov/clip) | `Inspector.tsx`, `render.rs` | done |
 | Asset relinking and dependency counts | `Inspector.tsx`, `command.rs` | done |
-| Solid-view albedo drape (raster → PNG via engine python) | `raster_preview`, `Viewport3D.tsx` | done |
+| Material-preview albedo drape (raster → PNG via engine python) | `raster_preview`, `Viewport3D.tsx` | done |
 | glTF node selection (`SetGltfNode`, runtime-derived node names, Inspector picker) | `assets.ts`, `command.rs`, `Inspector.tsx` | done |
+| **Phase 6** — timeline, keyframes, interpolation | `crates/studio-core/src/timeline.rs`, `src/components/Timeline.tsx` | done |
+| Playhead / scrub / playback (one clock in `playback.ts`) | `setPlayhead` → `Session::set_playhead` | done |
+| Per-channel keys (`SetChannelKeys`), 9 transform channels + camera FOV | `command.rs`, `timeline.rs` | done |
+| Offline PNG sequence export (`renderAnimationFrame` per frame) | `src/state/session.tsx`, `render.rs` | done |
+| Camera animation reaches Forge3D (`camera_render_view` → `with_view`) | `workspace.rs`, `commands.rs` | done |
 
 Exit criteria — *edits change the canonical model, reloading preserves them* and
 *no viewport-only copies* — are covered by `crates/studio-core/tests/phase1.rs`
@@ -66,22 +72,26 @@ studio-tauri/
 │   ├── scene.rs               Scene graph: objects, transforms, mesh sources
 │   ├── command.rs             Every mutation as a reversible Command
 │   ├── editor.rs              Session: revision, dirty flag, undo/redo stacks
-│   ├── persist.rs             Version gate, v1→v2 migration, atomic save
+│   ├── persist.rs             Version gate, v1→v2→…→v4 migrations, atomic save
 │   ├── autosave.rs            Recovery envelopes + pruning
 │   ├── session.rs             One open project: open, save, autosave, recovery
-│   └── workspace.rs           Capability report, camera/sun handoff payload
+│   ├── timeline.rs            Keyframes, interpolation, the one evaluate()
+│   └── workspace.rs           Capability report, camera/sun + render-view handoff
 ├── src-tauri/                 Tauri v2 shell
-│   ├── src/commands.rs        IPC surface (mesh files, Forge3D adapter)
+│   ├── src/commands.rs        IPC surface (mesh files, Forge3D adapter, animation)
 │   ├── src/forge3d.rs         Engine probe, viewer process, diagnostics
-│   ├── src/studio_bridge.py   Embedded Python bridge (relays viewer IPC)
+│   ├── src/render.rs          Embedded renderer service + render request
+│   ├── src/studio_render.py   Embedded Python bridge (relays viewer IPC)
 │   ├── src/session.rs         Mutex around the core session
 │   └── src/lib.rs             App wiring + background autosave thread
 └── src/                       React + TypeScript UI
     ├── bridge/                Tauri IPC, with a browser preview harness
-    ├── components/            Top bar, tree, inspector, toolbar, Forge3D panel
+    ├── components/            Top bar, tree, inspector, toolbar, timeline
     ├── state/session.tsx      Session actions + active tool/space
+    ├── state/playback.ts      Tested timeline playback clock (no React)
     ├── viewport/
-    │   ├── Viewport3D.tsx     Three.js scene, picking, gizmos, asset loading
+    │   ├── Viewport3D.tsx     Three.js scene, modes, picking, gizmos, assets
+    │   ├── viewMath.ts        Viewport → renderer camera mapping (+ test)
     │   ├── AxisGizmo.tsx      SVG orientation widget (no second WebGL context)
     │   └── assets.ts          glTF parsing and per-path scene cache
     └── styles.css
@@ -178,11 +188,17 @@ The tool strip also holds **Global/Local** axis orientation and the **Add** menu
 (cube, sphere, plane, DEM terrain from a GeoTIFF — which also works from an
 empty scene — and import glTF/GLB).
 
-## Solid and Rendered modes (Phase 4)
+## Solid, Material and Rendered modes
 
-The Studio viewport has two modes, toggled in the viewport toolbar:
+The Studio viewport has three modes, toggled in the viewport toolbar:
 
-- **Solid** — the Three.js editor view: orbit, gizmos, instant selection.
+- **Solid** — a Blender-style clay view: neutral shading under the scene's sun,
+  with **no albedo, textures or material colours**. Fast orbit/pan/zoom, gizmos,
+  and instant selection. This is the editing view.
+- **Material** — a lightweight material preview, not an engine render: the
+  three.js scene lit by a prefiltered studio HDRI (`RoomEnvironment`, via PMREM)
+  plus soft sun shadows, showing the albedo (terrain drape, mesh base colour and
+  texture, glTF materials). The camera orbits freely here exactly like Solid.
 - **Rendered** — the Forge3D terrain pipeline, rendered offscreen and displayed
   in the viewport. Same engine, same shaders, same PBR/POM/shadows/sky settings
   as the golden-tested renders; no second window.
@@ -195,12 +211,12 @@ Frames are requested on demand and coalesced: entering the mode, orbiting
 (throttled), and every scene edit (sun, exposure, overlay — debounced) trigger at
 most one queued frame. The frame's **Size** control in the render bar picks the
 resolution — 1×/2×/4× the viewport, the DEM's own pixels (`DEM (1024 × 1024)`),
-or the project's output size. **Material** mode keeps its **own** Size control
-(½×, 1×, DEM, Project) and renders without sky, shadows, or POM against a dark
-backdrop: a look-dev pass whose size you can match to Rendered exactly for a 1:1
-comparison. The top-bar **Render** button opens a save dialog defaulting to
-`<project>/renders/<name>-<timestamp>.png` with a JSON sidecar describing every
-setting that produced it.
+or the project's output size. The top-bar **Render** button opens a save dialog
+defaulting to `<project>/renders/<name>-<timestamp>.png` with a JSON sidecar
+describing every setting that produced it.
+
+Mode changes only re-shade the built content (Solid swaps in a clay material and
+back); they never rebuild geometry or re-fetch textures.
 
 ## The default scene is a DEM (Phase 4)
 
@@ -216,11 +232,12 @@ the original GeoTIFF.
 Rendered frames use the camera you are looking through. The viewport maps its
 camera onto the renderer's frame (east = +X, north = −Z in the viewport; +X/+Y/+Z
 east/north/up in the renderer, terrain centred on the origin) and passes
-`{phiDeg, thetaDeg, radius, target, fovDeg}` with every render request, so what
-you see in Solid is what the engine draws. Pressing `End` captures the view into
-the active camera object, which is what camera view (`0`) shows. When no viewport
-camera is available (e.g. the shell renders without one), the fallback frames the
-terrain at `radius = 1.5·max(span)` aimed at the mesh centre.
+`{phiDeg, thetaDeg, radius, target, fovDeg}` with every render request, so a
+Rendered frame is framed like the viewport instead of a canned shot. Pressing
+`End` captures the view into the active camera object, which is what camera view
+(`0`) shows. When no viewport camera is available (e.g. the shell renders without
+one), the fallback frames the terrain at `radius = 1.5·max(span)` aimed at the
+mesh centre.
 
 Two things were needed to make the viewer agree with Studio, both of which look
 like "nothing happened" if you get them wrong:
@@ -253,10 +270,11 @@ the render handoff.
   references external `.bin`/texture files fails with an explicit message,
   because the webview cannot read neighbouring files.
 - **Imported meshes are transform-editable, relinkable, and node-selectable.**
-  Solid draws them with their glTF materials; meshes do not reach Rendered at
-  all yet (see Primitives below).
-- **No shadows or PBR environment** in the solid viewport; it is a modelling
-  view, not the Forge3D render (Phase 4).
+  Solid draws them as clay; the Material preview draws their glTF materials.
+  Meshes do not reach Rendered at all yet (see Primitives below).
+- **No shadows or PBR environment** in the Solid viewport; it is a modelling
+  view, not the Forge3D render. The Material preview is where HDRI lighting and
+  soft shadows live (Phase 4).
 - **The engine probe needs only an importable `forge3d`.** Rendering runs
   in-process (`studio_render.py`), so no viewer binary is required; the probe
   still looks for `interactive_viewer` and reports what it finds as optional
@@ -265,6 +283,12 @@ the render handoff.
 - **Primitives still do not reach Forge3D.** The Phase 4 default scene is terrain
   precisely because that path is complete; exporting primitive meshes as glTF is
   the remaining piece of Rendered mode.
+- **Object animation (Phases 6) is evaluated in the model and exported per frame,
+  but the engine cannot draw those objects**, so only camera animation shows up
+  in Rendered frames.
+- **Rendered shows one still frame at a time.** Playback animates the Solid and
+  Material viewports live; Rendered re-renders on edits and camera changes
+  (throttled), not per playback frame. Use **Export frames…** for the sequence.
 - **Country-scale DEMs render through a scale budget.** The studio renderer
   scales any DEM into a 30 000-unit world, so wide maps frame correctly
   (verified end-to-end with Switzerland, 353 km — its relief is only ~1 % of
@@ -273,33 +297,63 @@ the render handoff.
   (`experiments/swiss-land-cover.py` documents the engine-level case).
 - **Raster overlays are the terrain's albedo.** The engine has no other terrain
   material override; a draped raster (the Bryce NAIP orthophoto) is how the
-  surface gets imagery — Solid, Material, and Rendered all drape it (Solid
-  decodes the raster through the shell's `raster_preview`). The inspector
-  shows it under the terrain's **Material** section — `Add albedo raster…` /
-  `Replace…` / `Remove` — alongside what the engine actually uses
-  (`MaterialSet.terrain_default()`, four triplanar layers, no texture maps
-  shipped in this checkout, so the default is flat colours until an albedo is
-  attached or maps appear in `assets/materials/`).
+  surface gets imagery — the Material preview and Rendered drape it (Material
+  decodes the raster through the shell's `raster_preview`), while Solid stays
+  neutral clay. The inspector shows it under the terrain's **Material**
+  section — `Add albedo raster…` / `Replace…` / `Remove` — alongside what the
+  engine actually uses (`MaterialSet.terrain_default()`, four triplanar layers,
+  no texture maps shipped in this checkout, so the default is flat colours until
+  an albedo is attached or maps appear in `assets/materials/`).
+
+## Timeline (Phase 6)
+
+The strip under the viewport is the animation timeline. The model lives in
+`crates/studio-core/src/timeline.rs` and is persisted with the document (schema
+v4; older builds reject a v4 file rather than silently dropping its tracks).
+
+- One `evaluate(project, frame)` samples every keyed channel into the project's
+  object transforms. **Playback and frame export both call it** — the session's
+  playhead through `Session::set_playhead`, the export through a project clone in
+  `render_animation_frame` — so what you scrub is what renders.
+- Moving the playhead is **view state**: it does not bump the revision, dirty the
+  project, or push undo, so scrubbing never floods the undo stack or autosave.
+- Channels are the nine transform scalars plus a camera's FOV, with linear,
+  constant, and smooth (smoothstep) interpolation. Terrain cannot be animated
+  (its transform is georeferenced); its track is refused with a reason.
+- **Key selected** keys the selected object's current values at the playhead;
+  **Clear keys** removes the track; **Export frames…** writes one PNG per frame
+  into a chosen folder, with live progress and a working Stop.
+- Playback is a fixed-rate clock (`src/state/playback.ts`, unit-tested). It
+  advances at most one frame per animation tick, so a slow shell runs playback
+  slow instead of queueing IPC calls.
+- A camera animation reaches Forge3D through `workspace::camera_render_view`:
+  the exported frame uses the evaluated camera's eye, rotation, distance, and
+  FOV — matching a camera-view still — rather than the terrain's canned framing.
+- **Only camera animation is Forge3D-native.** The engine draws terrain, so a
+  mesh's animation is visible in the Studio viewport and evaluated for export,
+  but it does not appear in Rendered frames (the same geometry-export gap as
+  primitives). The UI does not claim otherwise.
 
 ## Browser preview harness
 
 `src/bridge/` selects the Tauri bridge when `__TAURI_INTERNALS__` exists, and
 otherwise an in-memory mock with the same command semantics. That keeps `npm run
 dev` useful for UI work on machines without webkit. The mock implements no file
-I/O, no recovery, and no glTF import — anything that matters is mirrored by a
-Rust test.
+I/O, no recovery, no glTF import, and no frame export — anything that matters is
+mirrored by a Rust test (`crates/studio-core/tests/phase6.rs` covers the timeline;
+the viewport clock and camera math have dependency-free `node` tests run by
+`npm test`).
 
 ## Not yet implemented (deliberately)
 
 - Geometry export for primitives — Rendered still draws terrain only
-- Shared material library — **Phase 5** (environment/IBL controls, capability badges, the Solid albedo drape, and glTF node selection shipped)
+- Shared material library — **Phase 5** (environment/IBL controls, capability badges, the Material-preview albedo drape, and glTF node selection shipped)
 - Render queue and cancellation — **Phase 7**
-- Timeline, keyframes, frame export — **Phase 6**
 
 Relinking, the material inspector (terrain albedo, mesh base colour and
-texture), and the render settings UI already shipped; there is no Forge3D
-workspace tab (Phase 3 was dropped) — the top-bar **Render** button renders to
-a chosen path with a JSON sidecar.
+texture), the render settings UI, and the Phase 6 timeline already shipped; there
+is no Forge3D workspace tab (Phase 3 was dropped) — the top-bar **Render** button
+renders to a chosen path with a JSON sidecar.
 
 ## Regenerating the app icon
 

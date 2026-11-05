@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 
 import { bridge } from "../bridge/env";
 import type {
@@ -10,6 +11,7 @@ import type {
   Primitive,
   SceneObject,
   Transform,
+  ViewportMode,
 } from "../bridge/types";
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session-context";
@@ -21,8 +23,16 @@ import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
 const ACCENT = 0xf0a94a;
-const MESH_COLOUR = 0x9fb0c8;
+/**
+ * Solid is a Blender-style clay view: no albedo, no textures, no material
+ * colour. Shape comes from the scene light only.
+ */
+const CLAY_COLOUR = 0x8b95a4;
 const CAMERA_COLOUR = 0x6fa8ff;
+const SOLID_BACKGROUND = 0x101318;
+/** Material preview backdrop: the studio HDRI provides the light, this the
+ *  neutral surround, so nothing hides the albedo. */
+const MATERIAL_BACKGROUND = 0x1c2129;
 
 type Quaternion = [number, number, number, number];
 
@@ -33,11 +43,35 @@ interface Runtime {
   orbit: OrbitControls;
   gizmo: TransformControls;
   sun: THREE.DirectionalLight;
+  hemi: THREE.HemisphereLight;
   grid: THREE.GridHelper;
   objects: Map<string, THREE.Group>;
   helpers: THREE.BoxHelper[];
+  /** Selection + camera-view identity the current helpers were built for. */
+  helperKey: string;
+  /** Prefiltered studio environment for the Material preview (PMREM). */
+  environment: THREE.Texture | null;
+  pmrem: THREE.PMREMGenerator | null;
   /** Latest selection, so the canvas click handler is not a stale closure. */
   selection: string[];
+}
+
+/** Per-mesh shading state: what the built content looks like, and its clay. */
+interface ShadingRecord {
+  studioMaterial?: THREE.Material | THREE.Material[];
+  clayMaterial?: THREE.Material | THREE.Material[];
+  /** Terrain only: decoded albedo drape and its opacity. */
+  drape?: THREE.Texture | null;
+  drapeOpacity?: number;
+}
+
+function clayMaterial(side: THREE.Side = THREE.FrontSide): THREE.MeshStandardMaterial {
+  return new THREE.MeshStandardMaterial({
+    color: CLAY_COLOUR,
+    roughness: 0.62,
+    metalness: 0.0,
+    side,
+  });
 }
 
 function buildPrimitive(primitive: Primitive, material?: Material): THREE.Object3D {
@@ -53,18 +87,97 @@ function buildPrimitive(primitive: Primitive, material?: Material): THREE.Object
       geometry = new THREE.PlaneGeometry(primitive.size, primitive.size);
       break;
   }
+  const side = primitive.type === "plane" ? THREE.DoubleSide : THREE.FrontSide;
   const standard = new THREE.MeshStandardMaterial({
     color: material
       ? new THREE.Color(material.baseColor[0], material.baseColor[1], material.baseColor[2])
-      : MESH_COLOUR,
+      : CLAY_COLOUR,
     roughness: material?.roughness ?? 0.62,
     metalness: material?.metallic ?? 0.04,
-    side: primitive.type === "plane" ? THREE.DoubleSide : THREE.FrontSide,
+    side,
   });
   const mesh = new THREE.Mesh(geometry, standard);
-  if (primitive.type === "plane") mesh.rotation.x = -Math.PI / 2;
+  // Both materials live on the mesh: Solid swaps in the clay, Material swaps
+  // the authored material back. Neither is rebuilt when the mode changes.
   mesh.userData.owned = true;
+  mesh.userData.studioMaterial = standard;
+  mesh.userData.clayMaterial = clayMaterial(side);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  if (primitive.type === "plane") mesh.rotation.x = -Math.PI / 2;
   return mesh;
+}
+
+/**
+ * Swap a subtree between its authored materials and Solid's clay.
+ *
+ * Imported glTF scenes share materials with the asset cache, so the original
+ * is only referenced (never disposed) and restored verbatim. Terrain has its
+ * own drape-aware path ([`applyTerrainShading`]).
+ */
+function setSolidShading(root: THREE.Object3D, solid: boolean): void {
+  root.traverse((node) => {
+    const mesh = node as THREE.Mesh;
+    if (!(mesh as { isMesh?: boolean }).isMesh) return;
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    const record = node.userData as ShadingRecord;
+    if (!record.studioMaterial || !record.clayMaterial) {
+      record.studioMaterial = mesh.material;
+      record.clayMaterial = clayMaterial(THREE.DoubleSide);
+    }
+    mesh.material = solid ? record.clayMaterial : record.studioMaterial;
+  });
+}
+
+/** Solid is clay; Material shows the albedo drape (or clay without one). */
+function applyTerrainShading(mesh: THREE.Mesh, solid: boolean): void {
+  const material = mesh.material as THREE.MeshStandardMaterial;
+  const { drape = null, drapeOpacity = 1 } = mesh.userData as ShadingRecord;
+  const draped = !solid && drape !== null;
+  const map = draped ? drape : null;
+  const colour = draped ? 0xffffff : CLAY_COLOUR;
+  const transparent = draped && drapeOpacity < 1;
+  const opacity = draped ? drapeOpacity : 1;
+  // Playback re-applies shading on every snapshot; only touch the material
+  // when the mode (or the drape) actually changed, so `needsUpdate` does not
+  // rebuild the program every frame.
+  let changed = false;
+  if (material.map !== map) {
+    material.map = map;
+    changed = true;
+  }
+  if (material.color.getHex() !== colour) {
+    material.color.setHex(colour);
+    changed = true;
+  }
+  if (material.transparent !== transparent) {
+    material.transparent = transparent;
+    changed = true;
+  }
+  if (Math.abs(material.opacity - opacity) > 1e-6) {
+    material.opacity = opacity;
+    changed = true;
+  }
+  if (changed) material.needsUpdate = true;
+}
+
+/** Re-apply the mode's shading to one object's built content. */
+function applyShading(
+  runtime: Runtime,
+  object: SceneObject,
+  mode: ViewportMode,
+): void {
+  const group = runtime.objects.get(object.id);
+  if (!group) return;
+  const solid = mode === "solid";
+  if (object.kind.type === "terrain") {
+    for (const child of group.children) {
+      if (child instanceof THREE.Mesh) applyTerrainShading(child, solid);
+    }
+    return;
+  }
+  if (object.kind.type === "mesh") setSolidShading(group, solid);
 }
 
 /** A small frustum, drawn where the project's active camera sits. */
@@ -149,6 +262,10 @@ function buildLightGizmo(light: LightObject): THREE.Group {
  * The Studio viewport is a preview: this is real elevation data at reduced
  * resolution, scaled so the scene fits the viewport. Forge3D still receives the
  * original GeoTIFF and renders the full-resolution surface.
+ *
+ * The surface is neutral clay here. Elevation shading used to double as a fake
+ * albedo ramp; Solid must show no colour at all, and Material supplies the real
+ * drape ([`applyTerrainShading`]).
  */
 function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
   const resolution = preview.resolution;
@@ -157,38 +274,28 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
 
   const [spanX, spanZ] = preview.spanXz;
   const horizontal = TERRAIN_VIEW_SIZE / Math.max(spanX, spanZ);
-  const [minElevation, maxElevation] = [preview.minElevation, preview.maxElevation];
-  const relief = Math.max(1e-3, maxElevation - minElevation);
+  const [minElevation] = [preview.minElevation];
 
   const position = geometry.attributes.position as THREE.BufferAttribute;
-  const colours = new Float32Array(position.count * 3);
-  const low = new THREE.Color(0x4a5545);
-  const high = new THREE.Color(0xc4cbd2);
-
   for (let index = 0; index < position.count; index += 1) {
     const row = Math.floor(index / resolution);
     const column = index % resolution;
     const elevation = preview.heights[row * resolution + column] ?? minElevation;
-    const normalized = (elevation - minElevation) / relief;
     position.setY(index, (elevation - minElevation) * zScale * horizontal);
-    const colour = low.clone().lerp(high, Math.min(1, Math.max(0, normalized)));
-    colours[index * 3] = colour.r;
-    colours[index * 3 + 1] = colour.g;
-    colours[index * 3 + 2] = colour.b;
   }
 
-  geometry.setAttribute("color", new THREE.BufferAttribute(colours, 3));
   geometry.computeVertexNormals();
-  const material = new THREE.MeshStandardMaterial({
-    vertexColors: true,
-    roughness: 0.95,
-    metalness: 0.0,
-    side: THREE.DoubleSide,
-  });
+  const material = clayMaterial(THREE.DoubleSide);
+  material.roughness = 0.95;
   const mesh = new THREE.Mesh(geometry, material);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
   // The grid is built in unit space; the footprint is what gives it metres.
   mesh.scale.set(spanX * horizontal, 1, spanZ * horizontal);
   mesh.userData.owned = true;
+  mesh.userData.studioMaterial = mesh.material;
+  mesh.userData.drape = null;
+  mesh.userData.drapeOpacity = 1;
   return mesh;
 }
 
@@ -241,20 +348,35 @@ function readTransform(object: THREE.Object3D): Transform {
 /**
  * Remove a group's contents. Only geometry this crate created is disposed:
  * imported glTF scenes share geometry and materials with the asset cache, and
- * disposing them would break every other object using the same file.
+ * disposing them would break every other object using the same file. The one
+ * material we always own is the Solid clay we put on that clone.
  */
 function disposeChildren(group: THREE.Group): void {
   for (const child of [...group.children]) {
     group.remove(child);
-    if (!child.userData.owned) continue;
+    const owned = Boolean(child.userData.owned);
+    const seen = new Set<THREE.Material>();
+    const disposeMaterial = (material: unknown) => {
+      if (!material) return;
+      const entries = Array.isArray(material) ? material : [material];
+      for (const entry of entries as THREE.Material[]) {
+        if (seen.has(entry)) continue;
+        seen.add(entry);
+        entry.dispose();
+      }
+    };
     child.traverse((node) => {
       const mesh = node as {
         geometry?: { dispose(): void };
         material?: THREE.Material | THREE.Material[];
+        userData?: ShadingRecord;
       };
-      mesh.geometry?.dispose();
-      if (Array.isArray(mesh.material)) mesh.material.forEach((entry) => entry.dispose());
-      else mesh.material?.dispose();
+      if (owned) {
+        mesh.geometry?.dispose();
+        disposeMaterial(mesh.material);
+        disposeMaterial(mesh.userData?.studioMaterial);
+      }
+      disposeMaterial(mesh.userData?.clayMaterial);
     });
   }
 }
@@ -275,6 +397,12 @@ export function Viewport3D() {
   const runtimeRef = useRef<Runtime | null>(null);
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+
+  /** Current viewport mode: Solid is clay, Material is the lit preview, and
+   *  only Rendered composes an engine frame. */
+  const mode = state?.project.viewport.mode ?? "solid";
+  const viewportModeRef = useRef<ViewportMode>(mode);
+  viewportModeRef.current = mode;
 
   const [quaternion, setQuaternion] = useState<Quaternion>([0, 0, 0, 1]);
   const [size, setSize] = useState({ width: 960, height: 600 });
@@ -392,13 +520,16 @@ export function Viewport3D() {
     }
     renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
-    // The renderer tone-maps (ACES, exposure 1.35); without this the solid view
+    // The renderer tone-maps (ACES, exposure 1.35); without this the viewport
     // reads much brighter than the Rendered frame.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 0.95;
+    // Material preview only, but the map must exist before any light casts.
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x101318);
+    scene.background = new THREE.Color(SOLID_BACKGROUND);
 
     const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 2000);
     camera.position.set(9.5, 7, 11);
@@ -410,7 +541,9 @@ export function Viewport3D() {
     orbit.screenSpacePanning = false;
     orbit.minDistance = 0.8;
     orbit.maxDistance = 150;
-    orbit.maxPolarAngle = Math.PI * 0.497;
+    // Free orbit, Blender-style: the old 89.5° cap made it impossible to look
+    // at the scene from below the ground plane.
+    orbit.maxPolarAngle = Math.PI;
     orbit.update();
 
     const gizmo = new TransformControls(camera, canvas);
@@ -420,9 +553,33 @@ export function Viewport3D() {
     const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1b1f26, 0.32);
     const sun = new THREE.DirectionalLight(0xffffff, 3);
     sun.position.set(6, 9, 4);
+    // Soft sun shadows are the Material preview's "light and shadow"; Solid
+    // leaves `castShadow` off, so it costs nothing there.
+    sun.castShadow = false;
+    sun.shadow.mapSize.set(1024, 1024);
+    sun.shadow.bias = -0.0008;
+    sun.shadow.camera.near = 0.5;
+    sun.shadow.camera.far = 80;
+    const shadowExtent = TERRAIN_VIEW_SIZE;
+    sun.shadow.camera.left = -shadowExtent;
+    sun.shadow.camera.right = shadowExtent;
+    sun.shadow.camera.top = shadowExtent;
+    sun.shadow.camera.bottom = -shadowExtent;
+    sun.shadow.camera.updateProjectionMatrix();
     const fill = new THREE.DirectionalLight(0x93a8c8, 0.16);
     fill.position.set(-7, 4, -6);
     scene.add(hemi, sun, fill);
+
+    // The Material preview's studio HDRI: prefiltered once at mount, then
+    // swapped in with the mode. A device without the required float target
+    // simply keeps the directional lights (the environment is optional).
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    let environment: THREE.Texture | null = null;
+    try {
+      environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    } catch {
+      environment = null;
+    }
 
     const grid = new THREE.GridHelper(20, 40, 0x2f3744, 0x1d222a);
     const gridMaterial = grid.material as THREE.Material;
@@ -440,9 +597,13 @@ export function Viewport3D() {
       orbit,
       gizmo,
       sun,
+      hemi,
       grid,
       objects: new Map(),
       helpers: [],
+      helperKey: "",
+      environment,
+      pmrem,
       selection: [],
     };
     runtimeRef.current = runtime;
@@ -479,22 +640,14 @@ export function Viewport3D() {
       const now = performance.now();
       if (now - lastRenderRequest < 120) return;
       lastRenderRequest = now;
-      const target = requestSizeRef.current(renderQualityRef.current);
-      void actionsRef.current.renderViewport(
-        target.width,
-        target.height,
-        renderQualityRef.current,
-      );
+      const target = requestSizeRef.current();
+      void actionsRef.current.renderViewport(target.width, target.height, "preview");
     });
 
     orbit.addEventListener("end", () => {
       if (!modeRef.current) return;
-      const target = requestSizeRef.current(renderQualityRef.current);
-      void actionsRef.current.renderViewport(
-        target.width,
-        target.height,
-        renderQualityRef.current,
-      );
+      const target = requestSizeRef.current();
+      void actionsRef.current.renderViewport(target.width, target.height, "preview");
     });
 
     gizmo.addEventListener("mouseUp", () => {
@@ -631,6 +784,8 @@ export function Viewport3D() {
       }
       grid.geometry.dispose();
       (grid.material as THREE.Material).dispose();
+      runtime.environment?.dispose();
+      runtime.pmrem?.dispose();
       renderer.dispose();
       runtimeRef.current = null;
     };
@@ -656,6 +811,7 @@ export function Viewport3D() {
         (helper.material as THREE.Material).dispose();
       }
       runtime.helpers = [];
+      runtime.helperKey = "";
       return;
     }
 
@@ -681,9 +837,15 @@ export function Viewport3D() {
       applyTransform(group, object.transform);
 
       const signature = contentSignature(object, terrainResolution);
-      if (group.userData.signature === signature) continue;
-      group.userData.signature = signature;
-      disposeChildren(group);
+      if (group.userData.signature !== signature) {
+        group.userData.signature = signature;
+        disposeChildren(group);
+      } else {
+        // Rebuilt content keeps its geometry; a mode switch (or a material
+        // edit) only changes how it is shaded.
+        applyShading(runtime, object, viewportModeRef.current);
+        continue;
+      }
 
       if (object.kind.type === "mesh") {
         const meshKind = object.kind;
@@ -724,6 +886,9 @@ export function Viewport3D() {
               }
               disposeChildren(group);
               group.add(loaded);
+              // glTF materials are the Material preview's albedo; Solid draws
+              // the same geometry as clay.
+              setSolidShading(loaded, viewportModeRef.current === "solid");
               setProblem(null);
             })
             .catch((cause) => {
@@ -755,20 +920,17 @@ export function Viewport3D() {
             const mesh = buildTerrainMesh(preview, zScale);
             group.add(mesh);
             setProblem(null);
-            // Drape the albedo like Material/Rendered do, so all three views
-            // show the same ground. The shell decodes the raster; the browser
-            // preview has no file access and keeps the elevation ramp.
+            applyTerrainShading(mesh, viewportModeRef.current === "solid");
+            // The drape is the terrain's albedo: Material shows it, Solid
+            // stays clay. The shell decodes the raster; the browser preview has
+            // no file access and shows clay in both.
             if (overlay && overlayAsset?.path && bridge.kind === "tauri") {
               loadOverlayTexture(overlayAsset.path)
                 .then((texture) => {
                   if (group.userData.signature !== expected) return;
-                  const material = mesh.material as THREE.MeshStandardMaterial;
-                  material.map = texture;
-                  material.vertexColors = false;
-                  material.color.setRGB(1, 1, 1);
-                  material.transparent = overlay.opacity < 1;
-                  material.opacity = overlay.opacity;
-                  material.needsUpdate = true;
+                  mesh.userData.drape = texture;
+                  mesh.userData.drapeOpacity = overlay.opacity;
+                  applyTerrainShading(mesh, viewportModeRef.current === "solid");
                 })
                 .catch((cause) => {
                   setProblem(
@@ -787,6 +949,7 @@ export function Viewport3D() {
       } else {
         group.add(buildLightGizmo(object.kind));
       }
+      applyShading(runtime, object, viewportModeRef.current);
     }
 
     // Camera view: the render camera *is* the project's active camera, so an
@@ -831,6 +994,7 @@ export function Viewport3D() {
     }
 
     // The scene's directional light drives the actual lighting.
+    const solidView = viewportModeRef.current === "solid";
     const sunObject = project.scene.objects.find(
       (object) => object.kind.type === "light" && object.kind.kind === "directional" && object.visible,
     );
@@ -843,31 +1007,55 @@ export function Viewport3D() {
           "ZYX",
         ),
       );
-      runtime.sun.position.copy(direction.multiplyScalar(-12));
+      // Far enough out that the shadow camera encloses the terrain.
+      runtime.sun.position.copy(direction.multiplyScalar(-20));
       const [r, g, b] = sunObject.kind.color;
       runtime.sun.color.setRGB(r, g, b, THREE.SRGBColorSpace);
       // The engine's lit-sun intensity and three's directional intensity do not
-      // share a scale; 0.85 keeps the solid view close to the Rendered frame.
-      runtime.sun.intensity = Math.max(0.1, sunObject.kind.intensity * 0.85);
+      // share a scale; ~0.9 keeps the viewport close to the Rendered frame.
+      runtime.sun.intensity = Math.max(0.1, sunObject.kind.intensity * 0.9);
     }
+
+    // Viewport mode owns the light rig: Solid is flat clay under the scene sun;
+    // Material adds the studio HDRI and soft shadows. Rendered shows the engine
+    // frame instead, but keeping the rig consistent avoids a bright flash when
+    // switching back.
+    runtime.scene.environment = solidView ? null : runtime.environment;
+    // A gentle environment: the HDRI is a fill, the scene sun still decides
+    // the form, and the albedo must stay readable.
+    runtime.scene.environmentIntensity = 0.45;
+    runtime.scene.background = new THREE.Color(
+      solidView ? SOLID_BACKGROUND : MATERIAL_BACKGROUND,
+    );
+    runtime.sun.castShadow = !solidView;
+    runtime.hemi.intensity = solidView ? 0.28 : 0.12;
 
     runtime.grid.visible = project.viewport.gridVisible;
 
-    for (const helper of runtime.helpers) {
-      runtime.scene.remove(helper);
-      helper.geometry.dispose();
-      (helper.material as THREE.Material).dispose();
-    }
-    runtime.helpers = [];
-    for (const id of project.selection) {
-      const group = runtime.objects.get(id);
-      if (!group) continue;
-      // The box around the camera we are looking through is drawn from inside
-      // itself and reads as stray lines across the view.
-      if (cameraView && id === activeCameraId) continue;
-      const helper = new THREE.BoxHelper(group, ACCENT);
-      runtime.scene.add(helper);
-      runtime.helpers.push(helper);
+    // Selection boxes follow their objects every tick (playback moves them at
+    // the timeline's rate), so only rebuild them when the selection or the
+    // camera view changes.
+    const helperKey = `${project.selection.join(",")}|${cameraView ? activeCameraId ?? "" : ""}`;
+    if (runtime.helperKey === helperKey) {
+      for (const helper of runtime.helpers) helper.update();
+    } else {
+      runtime.helperKey = helperKey;
+      for (const helper of runtime.helpers) {
+        runtime.scene.remove(helper);
+        helper.geometry.dispose();
+        (helper.material as THREE.Material).dispose();
+      }
+      runtime.helpers = [];
+      for (const id of project.selection) {
+        const group = runtime.objects.get(id);
+        if (!group) continue;
+        // The box around the camera we are looking through is drawn from inside
+        // itself and reads as stray lines across the view.
+        if (cameraView && id === activeCameraId) continue;
+        const helper = new THREE.BoxHelper(group, ACCENT);
+        runtime.scene.add(helper);
+        runtime.helpers.push(helper);
+      }
     }
 
     const single =
@@ -939,58 +1127,36 @@ export function Viewport3D() {
     runtime.orbit.update();
   }, []);
 
-  const mode = state?.project.viewport.mode ?? "solid";
-
-  /** Viewport render resolution per mode. Options: 1×/2×/4× the viewport,
-   *  the DEM's own pixel size (so Material and Rendered can be compared at
-   *  identical, native resolution), or the project's output size. Material
-   *  keeps its own scale so the two modes can be set independently. */
-  type RenderScale = "0.5" | "1" | "2" | "4" | "project" | "dem";
+  /** Viewport render resolution for Rendered mode. Options: 1×/2×/4× the
+   *  viewport, the DEM's own pixel size, or the project's output size. */
+  type RenderScale = "1" | "2" | "4" | "project" | "dem";
   const [renderScale, setRenderScale] = useState<RenderScale>("1");
-  const [materialScale, setMaterialScale] = useState<RenderScale>("0.5");
 
   const terrainObject = state?.project.scene.objects.find((object) => object.kind.type === "terrain");
   const demDims = terrainObject?.kind.type === "terrain" ? terrainObject.kind.dimensions : null;
 
-  /** Frame size for one quality tier: material uses its own scale selector;
-   *  everything else uses the rendered-mode one. No hidden multipliers — what
+  /** Frame size for a Rendered viewport frame. No hidden multipliers — what
    *  the selector shows is the size the engine renders. */
-  const requestSize = useCallback(
-    (quality: "preview" | "material" | "final") => {
-      const scale: RenderScale = quality === "material" ? materialScale : renderScale;
-      const base =
-        scale === "project"
-          ? { width: state?.project.render.width ?? 1920, height: state?.project.render.height ?? 1080 }
-          : scale === "dem" && demDims
-            ? { width: demDims[0], height: demDims[1] }
-            : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
-      const factor = scale === "project" || scale === "dem" ? 1 : Number(scale);
-      return {
-        width: Math.min(4096, Math.max(320, Math.round(base.width * factor))),
-        height: Math.min(4096, Math.max(240, Math.round(base.height * factor))),
-      };
-    },
-    [
-      demDims,
-      materialScale,
-      renderScale,
-      size.height,
-      size.width,
-      state?.project.render.height,
-      state?.project.render.width,
-    ],
-  );
-  // Material preview and Rendered both show rendered frames; only the quality
-  // preset differs.
-  const renderedMode = mode === "rendered" || mode === "material";
-  const renderQuality: "preview" | "material" | "final" =
-    mode === "material" ? "material" : "preview";
+  const requestSize = useCallback(() => {
+    const base =
+      renderScale === "project"
+        ? { width: state?.project.render.width ?? 1920, height: state?.project.render.height ?? 1080 }
+        : renderScale === "dem" && demDims
+          ? { width: demDims[0], height: demDims[1] }
+          : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
+    const factor = renderScale === "project" || renderScale === "dem" ? 1 : Number(renderScale);
+    return {
+      width: Math.min(4096, Math.max(320, Math.round(base.width * factor))),
+      height: Math.min(4096, Math.max(240, Math.round(base.height * factor))),
+    };
+  }, [demDims, renderScale, size.height, size.width, state?.project.render.height, state?.project.render.width]);
+  // Only Rendered composes an engine frame. Solid and Material are the live
+  // three.js scene — that is what keeps Material's orbit free and instant.
+  const renderedMode = mode === "rendered";
   const modeRef = useRef(renderedMode);
   modeRef.current = renderedMode;
   const cameraViewRef = useRef(cameraView);
   cameraViewRef.current = cameraView;
-  const renderQualityRef = useRef(renderQuality);
-  renderQualityRef.current = renderQuality;
   const requestSizeRef = useRef(requestSize);
   requestSizeRef.current = requestSize;
   const sizeRef = useRef(size);
@@ -1085,8 +1251,8 @@ export function Viewport3D() {
     }
     if (renderedOnce.current || render.busy) return;
     renderedOnce.current = true;
-    const target = requestSizeRef.current(renderQualityRef.current);
-    void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+    const target = requestSizeRef.current();
+    void actions.renderViewport(target.width, target.height, "preview");
   }, [actions, render.busy, renderedMode, render.error, size.height, size.width]);
 
   // Scene edits (sun, exposure, overlay, z-scale, transforms…) re-render the
@@ -1100,25 +1266,24 @@ export function Viewport3D() {
     revisionRef.current = revision;
     if (!renderedMode || revision === previous || previous === -1) return;
     const timer = window.setTimeout(() => {
-      const target = requestSizeRef.current(renderQualityRef.current);
-      void actionsRef.current.renderViewport(target.width, target.height, renderQualityRef.current);
+      const target = requestSizeRef.current();
+      void actionsRef.current.renderViewport(target.width, target.height, "preview");
     }, 350);
     return () => window.clearTimeout(timer);
   }, [revision, renderedMode]);
 
-  // Changing either mode's render scale asks for a frame at the new size
-  // right away.
+  // Changing the render scale asks for a frame at the new size right away.
   useEffect(() => {
     if (!renderedMode) return;
     const timer = window.setTimeout(() => {
-      const target = requestSizeRef.current(renderQualityRef.current);
-      void actionsRef.current.renderViewport(target.width, target.height, renderQualityRef.current);
+      const target = requestSizeRef.current();
+      void actionsRef.current.renderViewport(target.width, target.height, "preview");
     }, 50);
     return () => window.clearTimeout(timer);
-    // Only the scales themselves; size/mode changes already flow through the
+    // Only the scale itself; size/mode changes already flow through the
     // effects above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [renderScale, materialScale]);
+  }, [renderScale]);
 
   const scene = state?.project.scene;
   const camera = scene?.objects.find((object) => object.id === scene.activeCamera);
@@ -1161,22 +1326,13 @@ export function Viewport3D() {
               <span>Size</span>
               <select
                 className="input input--select"
-                value={renderQuality === "material" ? materialScale : renderScale}
-                title="Material and Rendered keep independent sizes; DEM renders at the DEM's own pixels so both modes can be compared 1:1"
-                onChange={(event) => {
-                  const value = event.target.value as RenderScale;
-                  if (renderQuality === "material") setMaterialScale(value);
-                  else setRenderScale(value);
-                }}
+                value={renderScale}
+                title="Viewport frames render at this size; DEM renders at the DEM's own pixels"
+                onChange={(event) => setRenderScale(event.target.value as RenderScale)}
               >
-                {renderQuality === "material" && <option value="0.5">½× viewport</option>}
                 <option value="1">1× viewport</option>
-                {renderQuality !== "material" && (
-                  <>
-                    <option value="2">2× viewport</option>
-                    <option value="4">4× viewport</option>
-                  </>
-                )}
+                <option value="2">2× viewport</option>
+                <option value="4">4× viewport</option>
                 {demDims && (
                   <option value="dem">DEM ({demDims[0]} × {demDims[1]})</option>
                 )}
@@ -1190,8 +1346,8 @@ export function Viewport3D() {
               className="button button--small"
               disabled={render.busy}
               onClick={() => {
-                const target = requestSizeRef.current(renderQualityRef.current);
-                void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+                const target = requestSizeRef.current();
+                void actions.renderViewport(target.width, target.height, "preview");
               }}
             >
               {render.busy ? "Rendering…" : "Re-render"}
@@ -1201,8 +1357,8 @@ export function Viewport3D() {
       )}
       <ViewportToolbar
         onRender={() => {
-          const target = requestSizeRef.current(renderQualityRef.current);
-          void actions.renderViewport(target.width, target.height, renderQualityRef.current);
+          const target = requestSizeRef.current();
+          void actions.renderViewport(target.width, target.height, "preview");
         }}
       />
       <AxisGizmo quaternion={quaternion} onPick={viewAlong} />
@@ -1216,6 +1372,7 @@ export function Viewport3D() {
         </span>
         <span className="viewport-camera">
           {camera ? `Active camera: ${camera.name}` : "No active camera"}
+          {mode === "material" ? " · Material preview" : ""}
         </span>
       </div>
       {problem && !renderedMode && <div className="viewport-problem">{problem}</div>}

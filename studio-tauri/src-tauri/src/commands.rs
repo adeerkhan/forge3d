@@ -175,6 +175,28 @@ pub fn set_selection(
         .map_err(|error| error.to_string())
 }
 
+/// Move the playhead and evaluate the timeline into the project (view state:
+/// not undoable, no autosave). Returns the snapshot so the UI re-renders with
+/// the evaluated transforms, plus the clamped frame that was applied.
+#[tauri::command]
+pub fn set_playhead(state: State<'_, AppState>, frame: f32) -> Result<PlayheadResult, String> {
+    let (frame, project_state) = lock(&state)?
+        .set_playhead(frame)
+        .map_err(|error| error.to_string())?;
+    Ok(PlayheadResult {
+        frame,
+        state: project_state,
+    })
+}
+
+/// What `set_playhead` returns: the new snapshot plus the clamped frame.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayheadResult {
+    pub frame: f32,
+    pub state: SessionState,
+}
+
 #[tauri::command]
 pub fn autosave_now(state: State<'_, AppState>) -> Result<Option<AutosaveReport>, String> {
     lock(&state)?
@@ -532,7 +554,7 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
     })
 }
 
-/// Decoded, downsampled PNG of a raster overlay for the Solid viewport's
+/// Decoded, downsampled PNG of a raster overlay for the Material preview's
 /// terrain drape — the webview cannot decode GeoTIFF, so the engine python
 /// does it and hands back a PNG the canvas can display.
 #[tauri::command]
@@ -706,6 +728,85 @@ pub fn render_still(
 #[tauri::command]
 pub fn render_status(render: State<'_, RenderState>) -> RenderStatus {
     render.status()
+}
+
+/// One frame of an offline sequence export: what the frontend's per-frame
+/// loop calls. The shell evaluates the timeline on a **clone** at `frame`,
+/// hands the evaluated camera to Forge3D, renders, and writes `output`.
+///
+/// The clone matters: exporting must not move the session's playhead or
+/// dirty the project. Evaluation runs through the same
+/// `studio_core::timeline::evaluate` the playhead uses, so the sequence is
+/// byte-for-byte the state you scrubbed (the Phase 6 exit criterion).
+///
+/// One frame per IPC call keeps the command short-lived: the UI gets
+/// progress and a working Stop for free, instead of one long blocking call.
+// Tauri commands take their IPC fields as arguments; the wire schema is the
+// point, so the argument count is not a code smell here.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub fn render_animation_frame(
+    render: State<'_, RenderState>,
+    forge: State<'_, Forge3dState>,
+    state: State<'_, AppState>,
+    frame: f32,
+    width: u32,
+    height: u32,
+    quality: Option<String>,
+    output: String,
+) -> Result<WrittenFrame, String> {
+    // Evaluate a clone: the session's own playhead stays where the user left it.
+    let (mut project, revision) = {
+        let session = lock(&state)?;
+        let snapshot = session
+            .state()
+            .ok_or_else(|| "no project is open".to_owned())?;
+        (snapshot.project, snapshot.revision)
+    };
+    let frame = studio_core::timeline::evaluate(&mut project, frame);
+
+    let handoff = studio_core::workspace::handoff(&project, revision, Workspace::Forge3d);
+    // The evaluated camera's own view, not the viewport's live orbit: a frame
+    // must match a camera-view still of the same object (the export used to
+    // fall back to `terrain_camera`, which ignores the camera's rotation and
+    // distance). `with_view` also carries the FOV and the terrain-centred aim.
+    let view = studio_core::workspace::camera_render_view(&project);
+    let request =
+        RenderRequest::from_handoff(&handoff, width.clamp(64, 4096), height.clamp(64, 4096))?
+            .with_view(view.as_ref())
+            .with_settings(&project.render);
+
+    let target = std::path::PathBuf::from(&output);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
+    }
+
+    let python = forge.probe(false).python;
+    let quality = quality.unwrap_or_else(|| "final".to_owned());
+    let mut written = render.render(
+        &python,
+        &request.dem,
+        request.to_payload(&quality, Some(&target.to_string_lossy())),
+    )?;
+    written.path = Some(target.display().to_string());
+
+    Ok(WrittenFrame {
+        path: target.display().to_string(),
+        ms: written.ms,
+        evaluated_frame: frame,
+    })
+}
+
+/// One rendered frame of a sequence: where it landed and how long it took.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WrittenFrame {
+    pub path: String,
+    pub ms: f64,
+    /// The clamped timeline frame actually rendered (differs from the
+    /// request only when the request was out of range).
+    pub evaluated_frame: f32,
 }
 
 #[tauri::command]

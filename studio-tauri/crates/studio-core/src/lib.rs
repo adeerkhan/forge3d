@@ -41,6 +41,7 @@ pub mod persist;
 pub mod project;
 pub mod scene;
 pub mod session;
+pub mod timeline;
 pub mod workspace;
 
 pub use autosave::{AutosaveStore, RecoveryEntry, DEFAULT_AUTOSAVE_KEEP};
@@ -58,9 +59,14 @@ pub use scene::{
     Scene, SceneObject, TerrainObject, TerrainOverlay,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
+pub use timeline::{
+    evaluate, sample_keys, Channel, ChannelKeys, Interpolation, Keyframe, ObjectTrack, Timeline,
+    DEFAULT_FRAME_RATE, DEFAULT_LENGTH,
+};
 pub use workspace::{
-    capability_report, handoff, parameter_capabilities, CameraSync, CapabilityLevel,
-    CapabilityReport, CapabilityTable, Handoff, ObjectCapability, ParameterCapability, SunAngles,
+    camera_render_view, capability_report, compute_render_view, handoff, parameter_capabilities,
+    CameraSync, CapabilityLevel, CapabilityReport, CapabilityTable, Handoff, ObjectCapability,
+    ParameterCapability, RenderView, SunAngles, TerrainView,
 };
 
 /// Wall-clock milliseconds since the Unix epoch.

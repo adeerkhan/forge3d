@@ -7,6 +7,7 @@ import type {
   EditResult,
   EngineStatus,
   MeshFilePayload,
+  PlayheadResult,
   RecoveryEntry,
   RenderFrame,
   RenderStatus,
@@ -14,6 +15,7 @@ import type {
   SessionState,
   ShellInfo,
   TerrainPreview,
+  WrittenFrame,
 } from "./types";
 
 /** The real bridge: Tauri IPC. Argument names match the Rust command params. */
@@ -47,6 +49,17 @@ export const tauriBridge: StudioBridge = {
   redo: () => invoke<EditResult>("redo"),
 
   setSelection: (ids) => invoke<SessionState>("set_selection", { ids }),
+
+  setPlayhead: (frame) => invoke<PlayheadResult>("set_playhead", { frame }),
+
+  renderAnimationFrame: (request) =>
+    invoke<WrittenFrame>("render_animation_frame", {
+      frame: request.frame,
+      width: request.width,
+      height: request.height,
+      quality: request.quality ?? null,
+      output: request.output,
+    }),
 
   autosaveNow: () => invoke("autosave_now"),
 

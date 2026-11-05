@@ -186,6 +186,21 @@ pub enum Command {
         node: Option<String>,
     },
 
+    /// Replace an object's animation channels wholesale (empty = clear the
+    /// whole track). The inverse carries the previous channel list, so undo
+    /// restores it exactly.
+    SetChannelKeys {
+        id: ObjectId,
+        channels: Vec<crate::timeline::ChannelKeys>,
+    },
+
+    /// Change the timeline's frame rate and length (view configuration; the
+    /// keyframes themselves are untouched).
+    SetTimelineConfig {
+        frame_rate: u32,
+        length: u32,
+    },
+
     /// Attach, change, or remove a terrain's draped overlay.
     SetTerrainOverlay {
         id: ObjectId,
@@ -749,6 +764,78 @@ impl Command {
                 })
             }
 
+            Command::SetChannelKeys { id, channels } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                if object.is_terrain() {
+                    return Err(CommandError::invalid(
+                        "channel keys",
+                        "terrain position is fixed (the DEM is georeferenced)",
+                    ));
+                }
+                // FOV is a camera-only channel; reject it anywhere else so a
+                // track can never claim to animate something that ignores it.
+                for keys in channels {
+                    if keys.channel == crate::timeline::Channel::FovDeg
+                        && !matches!(object.kind, crate::scene::ObjectKind::Camera(_))
+                    {
+                        return Err(CommandError::invalid(
+                            "channel keys",
+                            "field of view can only be keyed on a camera",
+                        ));
+                    }
+                }
+                let previous = project
+                    .timeline
+                    .track(*id)
+                    .map(|track| track.channels.clone())
+                    .unwrap_or_default();
+                // Validate the whole resulting document, not just the keys:
+                // ordering, finiteness, and FOV range live in Timeline::validate.
+                let mut probe = project.clone();
+                crate::timeline::set_track_channels(&mut probe.timeline, *id, channels.clone());
+                probe
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("channel keys", reason))?;
+
+                crate::timeline::set_track_channels(&mut project.timeline, *id, channels.clone());
+                Ok(Outcome {
+                    inverse: Command::SetChannelKeys {
+                        id: *id,
+                        channels: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
+            Command::SetTimelineConfig { frame_rate, length } => {
+                let previous = (project.timeline.frame_rate, project.timeline.length);
+                let mut probe = project.clone();
+                probe.timeline.frame_rate = *frame_rate;
+                probe.timeline.length = *length;
+                // Shortening the timeline parks the playhead inside it. The
+                // playhead is view state (like the selection), so the inverse
+                // restores only the configuration.
+                probe.timeline.current_frame =
+                    probe.timeline.clamp_frame(probe.timeline.current_frame);
+                probe
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("timeline", reason))?;
+
+                project.timeline.frame_rate = *frame_rate;
+                project.timeline.length = *length;
+                project.timeline.current_frame = probe.timeline.current_frame;
+                Ok(Outcome {
+                    inverse: Command::SetTimelineConfig {
+                        frame_rate: previous.0,
+                        length: previous.1,
+                    },
+                    affected: Vec::new(),
+                })
+            }
+
             Command::SetTerrainOverlay { id, overlay } => {
                 let object = project
                     .scene
@@ -975,8 +1062,11 @@ impl Command {
             | Command::SetTerrainOverlay { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. }
-            | Command::SetGltfNode { id, .. } => vec![*id],
-            Command::SetRenderSettings { .. } | Command::SetAssetPath { .. } => Vec::new(),
+            | Command::SetGltfNode { id, .. }
+            | Command::SetChannelKeys { id, .. } => vec![*id],
+            Command::SetRenderSettings { .. }
+            | Command::SetAssetPath { .. }
+            | Command::SetTimelineConfig { .. } => Vec::new(),
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -1032,6 +1122,14 @@ impl Command {
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),
             Command::SetGltfNode { id, .. } => format!("Select node of {}", name_of(id)),
+            Command::SetChannelKeys { id, channels } => {
+                if channels.is_empty() {
+                    format!("Clear animation of {}", name_of(id))
+                } else {
+                    format!("Key {}", name_of(id))
+                }
+            }
+            Command::SetTimelineConfig { .. } => "Timeline settings".to_owned(),
             Command::SetAssetPath { id, .. } => {
                 format!("Relink asset {}", crate::ids::short_id(id))
             }

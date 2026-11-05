@@ -319,22 +319,9 @@ fn spawn_stderr(stderr: impl std::io::Read + Send + 'static, log: Arc<Mutex<VecD
 }
 
 /// Camera override from the Studio viewport, so Rendered frames look like what
-/// the solid view shows instead of a different framing.
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RenderView {
-    pub phi_deg: f64,
-    pub theta_deg: f64,
-    pub radius: f64,
-    /// Aim point in the renderer's mesh frame: metres, terrain centred on the
-    /// origin, Z up. Optional so older shells keep working; when absent the
-    /// handoff's framing stands.
-    #[serde(default)]
-    pub target: Option<[f64; 3]>,
-    /// Vertical field of view in degrees.
-    #[serde(default)]
-    pub fov_deg: Option<f64>,
-}
+/// the solid view shows instead of a different framing. The type lives in the
+/// core so the animation export and the viewport agree on it by construction.
+pub use studio_core::workspace::RenderView;
 
 /// Everything the shell needs for one frame, derived from the project.
 #[derive(Debug, Clone, Serialize)]
@@ -358,7 +345,7 @@ pub struct RenderRequest {
     pub exposure: f64,
     pub shadows: bool,
     pub ambient_occlusion: bool,
-    /// Render the sky background; Material mode drops it regardless (look-dev).
+    /// Render the sky background; the project can turn it off for Rendered.
     pub sky: bool,
     /// Environment/IBL intensity multiplier (0 = environment light off).
     pub ibl_intensity: f64,
@@ -405,7 +392,6 @@ impl RenderRequest {
 
     pub fn to_payload(&self, quality: &str, output: Option<&str>) -> serde_json::Value {
         let final_quality = quality == "final";
-        let material = quality == "material";
         json!({
             "width": self.width,
             "height": self.height,
@@ -425,14 +411,12 @@ impl RenderRequest {
             },
             "quality": {
                 "samples": 1,
-                // Material preview: lit terrain + overlay, no shadows or POM,
-                // and no sky background — the flat dark backdrop is what makes
-                // it read as a look-dev pass instead of the beauty frame.
-                // Quality presets; the project settings can only *add* cost —
-                // except the sky, which the project can turn off for Rendered.
-                "shadows": !material && self.shadows,
-                "pom": !material,
-                "sky": !material && self.sky,
+                // Quality presets: interactive previews skip POM and any AO;
+                // finals honour the project's settings. Shadows and sky follow
+                // the project in both.
+                "shadows": self.shadows,
+                "pom": final_quality,
+                "sky": self.sky,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
                 "heightAo": final_quality && self.ambient_occlusion,
             },

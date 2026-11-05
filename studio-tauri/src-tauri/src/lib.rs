@@ -66,6 +66,8 @@ pub fn run() {
             commands::undo,
             commands::redo,
             commands::set_selection,
+            commands::set_playhead,
+            commands::render_animation_frame,
             commands::autosave_now,
             commands::autosave_status,
             commands::list_recovery,

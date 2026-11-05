@@ -367,9 +367,9 @@ function RenderSettingsEditor() {
       />
       <p className="hint">
         Settings are stored with the project and applied to both the Rendered
-        viewport and the Render button. Material mode always renders without
-        sky or shadows (look-dev); lower the environment intensity to let the
-        sun dominate the frame.
+        viewport and the Render button. Solid is a neutral clay view; the
+        Material preview lights the scene with a studio HDRI plus soft sun
+        shadows and never renders through the engine.
       </p>
     </Section>
   );

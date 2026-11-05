@@ -43,6 +43,7 @@ fn project_document_key_shape_is_stable() {
             "workspace",
             "viewport",
             "render",
+            "timeline",
         ],
     );
     assert_eq!(value["format"], "studio3d");
@@ -63,6 +64,13 @@ fn project_document_key_shape_is_stable() {
             "iblIntensity",
         ],
     );
+
+    let timeline = &value["timeline"];
+    expect_keys(timeline, &["frameRate", "length", "currentFrame", "tracks"]);
+    assert_eq!(timeline["frameRate"], studio_core::DEFAULT_FRAME_RATE);
+    assert_eq!(timeline["length"], studio_core::DEFAULT_LENGTH);
+    assert_eq!(timeline["currentFrame"], 0.0);
+    assert!(timeline["tracks"].as_array().unwrap().is_empty());
 }
 
 #[test]

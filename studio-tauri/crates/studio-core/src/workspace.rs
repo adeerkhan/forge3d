@@ -119,6 +119,127 @@ pub struct TerrainCamera {
     pub target: Option<[f64; 3]>,
 }
 
+/// Studio's viewport camera in the Forge3D renderer's terms.
+///
+/// This is the transfer type between `src/viewport/viewMath.ts` (live viewport
+/// renders) and [`compute_render_view`] (the Rust twin used by camera-view
+/// stills and the animation export). Keeping it in the core means the shell
+/// deserializes exactly what the core produces — there is no second definition
+/// that can drift.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderView {
+    /// Azimuth east → north in the renderer's geographic frame (degrees).
+    pub phi_deg: f64,
+    /// Polar angle down from vertical (0 = straight above, 90 = horizon).
+    pub theta_deg: f64,
+    /// Distance in the renderer's metres.
+    pub radius: f64,
+    /// Aim point in the renderer's mesh frame: metres, terrain centred on the
+    /// origin, Z up.
+    #[serde(default)]
+    pub target: Option<[f64; 3]>,
+    /// Vertical field of view in degrees.
+    #[serde(default)]
+    pub fov_deg: Option<f64>,
+}
+
+/// Inputs to the Studio-viewport → renderer camera mapping.
+///
+/// Mirrors `TerrainViewInput` in `src/viewport/viewMath.ts`; `camera` and
+/// `aim` are in the viewport's units (Y up, north at −Z), the span and the
+/// elevation range in metres.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TerrainView {
+    pub camera: [f64; 3],
+    pub aim: [f64; 3],
+    pub fov_deg: f64,
+    /// DEM footprint in metres, or `None` when it is not georeferenced.
+    pub span_xz: Option<[f64; 2]>,
+    /// DEM pixel dimensions — the span fallback for local DEMs.
+    pub dimensions: Option<[u32; 2]>,
+    /// Elevation range `[min, max]` in metres.
+    pub elevation_range: Option<[f32; 2]>,
+    pub z_scale: f32,
+}
+
+/// Map a Studio viewport camera onto the renderer's frame.
+///
+/// This is the Rust twin of `computeRenderView` in `viewMath.ts` and must
+/// return the same numbers: the viewport east = +X, north = −Z, up = +Y, while
+/// the renderer is +X east, +Y north, +Z up with the terrain centred on the
+/// origin. Horizontal and vertical deltas both scale by
+/// `maxSpan / SCENE_TERRAIN_SIZE`; the vertical datum shifts because the
+/// viewport terrain sits on its base while the renderer centres its relief on
+/// zero. Returns `None` when there is no terrain footprint to map onto or the
+/// camera sits on the aim point.
+pub fn compute_render_view(input: &TerrainView) -> Option<RenderView> {
+    let span = input
+        .span_xz
+        .or_else(|| input.dimensions.map(|[w, h]| [w as f64, h as f64]))?;
+    let max_span = span[0].max(span[1]);
+    if !max_span.is_finite() || max_span <= 0.0 {
+        return None;
+    }
+    let scale = max_span / f64::from(crate::project::SCENE_TERRAIN_SIZE);
+    let [low, high] = input.elevation_range.unwrap_or([0.0, 0.0]);
+    let half_relief = (f64::from(high) - f64::from(low)) * f64::from(input.z_scale) / 2.0;
+
+    let d_east = (input.camera[0] - input.aim[0]) * scale;
+    let d_north = -(input.camera[2] - input.aim[2]) * scale;
+    let d_up = (input.camera[1] - input.aim[1]) * scale;
+    let radius = (d_east * d_east + d_north * d_north + d_up * d_up).sqrt();
+    if !radius.is_finite() || radius <= 1e-6 {
+        return None;
+    }
+
+    let mut phi_deg = d_north.atan2(d_east).to_degrees();
+    if phi_deg < 0.0 {
+        phi_deg += 360.0;
+    }
+    let theta_deg = (d_up / radius).clamp(-1.0, 1.0).acos().to_degrees();
+    Some(RenderView {
+        phi_deg,
+        theta_deg,
+        radius,
+        target: Some([
+            input.aim[0] * scale,
+            -input.aim[2] * scale,
+            input.aim[1] * scale - half_relief,
+        ]),
+        fov_deg: Some(input.fov_deg),
+    })
+}
+
+/// The project's active camera as the renderer's orbit view.
+///
+/// Aiming ten units ahead mirrors [`camera_sync`] and the viewport's camera
+/// view, where the view axis (not the orbit target) frames the picture. That
+/// makes an exported animation frame reproduce a camera-view still of the same
+/// object instead of the terrain's canned framing.
+pub fn camera_render_view(project: &Project) -> Option<RenderView> {
+    let terrain = project.terrain_object()?.terrain()?;
+    let camera = project.scene.camera()?;
+    let ObjectKind::Camera(camera_object) = &camera.kind else {
+        return None;
+    };
+    let eye = camera.transform.translation;
+    let forward = camera.transform.forward();
+    compute_render_view(&TerrainView {
+        camera: [f64::from(eye.x), f64::from(eye.y), f64::from(eye.z)],
+        aim: [
+            f64::from(eye.x + forward.x * 10.0),
+            f64::from(eye.y + forward.y * 10.0),
+            f64::from(eye.z + forward.z * 10.0),
+        ],
+        fov_deg: f64::from(camera_object.fov_deg),
+        span_xz: terrain.world_span_xz,
+        dimensions: terrain.dimensions,
+        elevation_range: terrain.elevation_range,
+        z_scale: terrain.z_scale,
+    })
+}
+
 /// A DEM handed to the viewer's terrain pipeline.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -409,34 +530,34 @@ pub fn parameter_capabilities() -> CapabilityTable {
             parameter(
                 "base colour",
                 CapabilityLevel::Partial,
-                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+                "Solid and the Material preview — meshes do not reach Rendered yet (geometry export pending).",
             ),
             parameter(
                 "roughness",
                 CapabilityLevel::Partial,
-                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+                "Solid and the Material preview — meshes do not reach Rendered yet (geometry export pending).",
             ),
             parameter(
                 "metallic",
                 CapabilityLevel::Partial,
-                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+                "Solid and the Material preview — meshes do not reach Rendered yet (geometry export pending).",
             ),
             parameter(
                 "texture",
                 CapabilityLevel::Partial,
-                "Solid only — meshes do not reach Rendered yet (geometry export pending).",
+                "Solid and the Material preview — meshes do not reach Rendered yet (geometry export pending).",
             ),
         ],
         terrain_material: vec![
             parameter(
                 "albedo raster (overlay)",
                 CapabilityLevel::Full,
-                "Draped in Solid, Material, and Rendered; composited after lighting so categorical palettes survive.",
+                "Draped in the Material preview and in Rendered frames; composited after lighting so categorical palettes survive. Solid is a neutral clay view.",
             ),
             parameter(
                 "engine material set",
                 CapabilityLevel::Partial,
-                "Material and Rendered shade with terrain_default's four layers; Solid shows the drape over an elevation ramp.",
+                "Material and Rendered shade with terrain_default's four layers; the Material preview drapes the albedo over a neutral clay surface.",
             ),
             parameter(
                 "texture maps",
@@ -852,13 +973,14 @@ mod tests {
         {
             assert_eq!(row.level, CapabilityLevel::Full, "{}", row.parameter);
         }
-        // Mesh materials stay Solid-only until geometry reaches the renderer.
+        // Mesh materials show in Solid/Clay and in the Material preview, but
+        // geometry still does not reach Rendered.
         assert!(!table.mesh_material.is_empty());
         assert!(table
             .mesh_material
             .iter()
             .all(|row| row.level == CapabilityLevel::Partial));
-        // The terrain drape reaches every view.
+        // The terrain drape reaches the Material preview and Rendered.
         let drape = table
             .terrain_material
             .iter()
@@ -883,6 +1005,167 @@ mod tests {
         {
             assert!(!row.detail.trim().is_empty(), "{}", row.parameter);
         }
+    }
+
+    #[test]
+    fn compute_render_view_matches_the_viewport_golden_vector() {
+        // The starter scene's camera, exactly as `viewMath.test.ts` pins it.
+        // Both implementations must agree, or Rendered frames and exported
+        // frames stop matching the viewport.
+        let view = compute_render_view(&TerrainView {
+            camera: [11.0, 7.5, 13.0],
+            aim: [0.0, 0.8, 0.0],
+            fov_deg: 45.0,
+            span_xz: Some([4000.0, 3800.0]),
+            dimensions: None,
+            elevation_range: Some([2099.23, 2553.58]),
+            z_scale: 1.0,
+        })
+        .expect("the starter view maps");
+        assert!((view.phi_deg - 310.21).abs() < 0.05, "{view:?}");
+        assert!((view.theta_deg - 68.52).abs() < 0.05, "{view:?}");
+        assert!((view.radius - 6100.0).abs() < 0.5, "{view:?}");
+        let target = view.target.expect("target is always present");
+        assert!(target[0].abs() < 1e-9, "{target:?}");
+        assert!(target[1].abs() < 1e-9, "{target:?}");
+        assert!((target[2] - 39.49).abs() < 0.01, "{target:?}");
+        assert_eq!(view.fov_deg, Some(45.0));
+    }
+
+    #[test]
+    fn compute_render_view_uses_the_viewport_axis_conventions() {
+        let square = TerrainView {
+            camera: [10.0, 5.0, 0.0],
+            aim: [0.0, 5.0, 0.0],
+            fov_deg: 40.0,
+            span_xz: Some([1200.0, 1200.0]),
+            dimensions: None,
+            elevation_range: Some([0.0, 100.0]),
+            z_scale: 1.0,
+        };
+
+        // Camera east of the aim: phi 0; level camera: theta 90; the scale is
+        // maxSpan / SCENE_TERRAIN_SIZE, so 10 viewport units are 1000 m.
+        let east = compute_render_view(&square).unwrap();
+        assert!(east.phi_deg.abs() < 1e-9, "{east:?}");
+        assert!((east.theta_deg - 90.0).abs() < 1e-9, "{east:?}");
+        assert!((east.radius - 1000.0).abs() < 1e-9, "{east:?}");
+        // The renderer centres relief on zero: 500 m aim − half relief.
+        assert!((east.target.unwrap()[2] - 450.0).abs() < 1e-9);
+
+        // +Z is south in the viewport, so a camera at −Z stands north: phi 90.
+        let north = compute_render_view(&TerrainView {
+            camera: [0.0, 5.0, -10.0],
+            ..square
+        })
+        .unwrap();
+        assert!((north.phi_deg - 90.0).abs() < 1e-9, "{north:?}");
+
+        let top = compute_render_view(&TerrainView {
+            camera: [0.0, 20.0, 0.0],
+            ..square
+        })
+        .unwrap();
+        assert!(top.theta_deg.abs() < 1e-9, "{top:?}");
+
+        let stretched = compute_render_view(&TerrainView {
+            z_scale: 2.0,
+            ..square
+        })
+        .unwrap();
+        assert!((stretched.target.unwrap()[2] - 400.0).abs() < 1e-9);
+
+        let no_range = compute_render_view(&TerrainView {
+            elevation_range: None,
+            ..square
+        })
+        .unwrap();
+        assert!((no_range.target.unwrap()[2] - 500.0).abs() < 1e-9);
+
+        // A local DEM falls back to its pixel dimensions.
+        let local = compute_render_view(&TerrainView {
+            span_xz: None,
+            dimensions: Some([1024, 1024]),
+            camera: [1.0, 0.0, 0.0],
+            aim: [0.0, 0.0, 0.0],
+            ..square
+        })
+        .unwrap();
+        assert!((local.radius - 1024.0 / 12.0).abs() < 1e-9, "{local:?}");
+
+        // Guards mirror the TypeScript.
+        assert!(compute_render_view(&TerrainView {
+            camera: [0.0, 5.0, 0.0],
+            ..square
+        })
+        .is_none());
+        assert!(compute_render_view(&TerrainView {
+            span_xz: None,
+            ..square
+        })
+        .is_none());
+        assert!(compute_render_view(&TerrainView {
+            span_xz: Some([0.0, 0.0]),
+            ..square
+        })
+        .is_none());
+    }
+
+    fn terrain_project() -> Project {
+        Project::starter(
+            "Camera view",
+            Some(crate::project::TerrainSeed {
+                title: Some("Bryce Canyon".to_owned()),
+                name: "Bryce_Canyon_1024.tif".to_owned(),
+                path: "/data/Bryce_Canyon_1024.tif".to_owned(),
+                byte_size: 3_321_356,
+                dimensions: Some([1024, 1024]),
+                elevation_range: Some([2099.23, 2553.58]),
+                world_origin_xz: Some([395_998.5, -4_165_574.5]),
+                world_span_xz: Some([4000.0, 3800.0]),
+                overlay: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn camera_render_view_follows_the_camera_object() {
+        let mut project = terrain_project();
+        let camera_id = project.scene.camera().unwrap().id;
+        let view = camera_render_view(&project).expect("terrain + camera");
+        // Aim is ten viewport units ahead, so the radius is exactly ten units
+        // of the mapping (10 * 4000/12 m) — the camera's distance is honoured,
+        // which `terrain_camera`'s viewer framing ignored.
+        assert!(
+            (view.radius - 10.0 * 4000.0 / 12.0).abs() < 1e-3,
+            "{view:?}"
+        );
+        let fov = project.scene.camera().unwrap();
+        let ObjectKind::Camera(camera) = &fov.kind else {
+            unreachable!()
+        };
+        assert_eq!(view.fov_deg, Some(f64::from(camera.fov_deg)));
+
+        // Rotating the camera turns the aim, which moves the orbit angle and
+        // the target — a rotation-only animation must reach the renderer.
+        let before = view.target.unwrap();
+        project
+            .scene
+            .object_mut(camera_id)
+            .unwrap()
+            .transform
+            .rotation_deg
+            .y += 90.0;
+        let rotated = camera_render_view(&project).expect("still a valid view");
+        let after = rotated.target.unwrap();
+        assert!(
+            (after[0] - before[0]).abs() > 1.0 || (after[1] - before[1]).abs() > 1.0,
+            "camera rotation must move the aim: {before:?} vs {after:?}"
+        );
+        assert!(
+            (rotated.phi_deg - view.phi_deg).abs() > 1.0,
+            "camera rotation must move the orbit azimuth"
+        );
     }
 
     #[test]

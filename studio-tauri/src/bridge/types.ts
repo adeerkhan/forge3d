@@ -103,7 +103,7 @@ export type Workspace = "studio" | "forge3d";
 export type ViewportMode = "solid" | "rendered" | "material";
 
 /** Renderer quality preset: preview/material are interactive, final is a still. */
-export type RenderQuality = "preview" | "material" | "final";
+export type RenderQuality = "preview" | "final";
 
 export interface ViewportState {
   mode: ViewportMode;
@@ -116,8 +116,7 @@ export interface RenderSettings {
   exposure: number;
   shadows: boolean;
   ambientOcclusion: boolean;
-  /** Sky background in preview and still frames (Material mode always drops
-   *  it — the look-dev backdrop). */
+  /** Sky background in Rendered preview and still frames. */
   sky: boolean;
   /** Environment/IBL intensity multiplier; 0 turns the environment light off. */
   iblIntensity: number;
@@ -144,6 +143,75 @@ export interface Project {
   workspace: Workspace;
   viewport: ViewportState;
   render: RenderSettings;
+  timeline: Timeline;
+}
+
+// ---------------------------------------------------------------- timeline
+
+/** How the value moves between two keyframes. */
+export type Interpolation = "linear" | "constant" | "smooth";
+
+/** One animatable scalar: the nine transform components + camera FOV. */
+export type Channel =
+  | "translationX"
+  | "translationY"
+  | "translationZ"
+  | "rotationX"
+  | "rotationY"
+  | "rotationZ"
+  | "scaleX"
+  | "scaleY"
+  | "scaleZ"
+  | "fovDeg";
+
+export interface Keyframe {
+  frame: number;
+  value: number;
+  interpolation: Interpolation;
+}
+
+export interface ChannelKeys {
+  channel: Channel;
+  /** Sorted by frame, strictly increasing. */
+  keys: Keyframe[];
+}
+
+export interface ObjectTrack {
+  objectId: string;
+  channels: ChannelKeys[];
+}
+
+/** The project's animation timeline (studio-core `Timeline`). */
+export interface Timeline {
+  frameRate: number;
+  length: number;
+  /** Playhead position. View state: scrubbing is not an edit. */
+  currentFrame: number;
+  tracks: ObjectTrack[];
+}
+
+/** What `setPlayhead` returns: the new snapshot plus the clamped frame. */
+export interface PlayheadResult {
+  frame: number;
+  state: SessionState;
+}
+
+/** One frame of an offline sequence export. */
+export interface AnimationFrameRequest {
+  frame: number;
+  width: number;
+  height: number;
+  quality?: RenderQuality;
+  /** Absolute output path (the frontend picks the directory). */
+  output: string;
+}
+
+/** One rendered frame of a sequence. */
+export interface WrittenFrame {
+  path: string;
+  ms: number;
+  /** The clamped timeline frame actually rendered. */
+  evaluatedFrame: number;
 }
 
 export interface SessionState {
@@ -390,6 +458,8 @@ export type Command =
   | { type: "setPrimitive"; id: string; primitive: Primitive }
   | { type: "setMeshMaterial"; id: string; material: Material }
   | { type: "setGltfNode"; id: string; node: string | null }
+  | { type: "setChannelKeys"; id: string; channels: ChannelKeys[] }
+  | { type: "setTimelineConfig"; frameRate: number; length: number }
   | { type: "setRenderSettings"; render: RenderSettings }
   | { type: "setAssetPath"; id: string; path: string; byteSize: number }
   | { type: "setTerrainZScale"; id: string; zScale: number }

@@ -421,9 +421,9 @@ pub fn sample_terrain(
     Ok(value)
 }
 
-/// Decoded raster preview for the Solid viewport's terrain drape: a
+/// Decoded raster preview for the Material preview's terrain drape: a
 /// downsampled RGBA PNG, colour handling mirroring
-/// `studio_render.build_overlay`'s preserve-colours path so Solid and
+/// `studio_render.build_overlay`'s preserve-colours path so Material and
 /// Rendered drape the same pixels. The webview cannot decode GeoTIFF, hence
 /// the engine-python round trip.
 const RASTER_PREVIEW_SCRIPT: &str = r#"

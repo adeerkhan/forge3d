@@ -14,6 +14,7 @@ import type {
   Command,
   EditResult,
   EngineStatus,
+  PlayheadResult,
   Project,
   RecoveryEntry,
   SessionState,
@@ -24,6 +25,8 @@ import type {
   RenderView,
   ShellInfo,
   TerrainPreview,
+  AnimationFrameRequest,
+  WrittenFrame,
 } from "./types";
 
 export interface StudioBridge {
@@ -42,6 +45,14 @@ export interface StudioBridge {
   undo(): Promise<EditResult>;
   redo(): Promise<EditResult>;
   setSelection(ids: string[]): Promise<SessionState>;
+  /** Move the playhead and evaluate the timeline into the project (view
+   *  state: not undoable, no autosave). Returns the snapshot plus the
+   *  clamped frame that was applied. */
+  setPlayhead(frame: number): Promise<PlayheadResult>;
+  /** Render one frame of an offline sequence to `output` (PNG). The shell
+   *  evaluates the timeline on a clone, so the session's playhead does not
+   *  move. Desktop shell only. */
+  renderAnimationFrame(request: AnimationFrameRequest): Promise<WrittenFrame>;
   autosaveNow(): Promise<unknown>;
   autosaveStatus(): Promise<AutosaveStatus>;
   listRecovery(): Promise<RecoveryEntry[]>;
@@ -51,7 +62,7 @@ export interface StudioBridge {
   readMeshFile(path: string): Promise<MeshFilePayload>;
   /** Read a PNG/JPEG for a viewport texture. */
   readImageAsset(path: string): Promise<MeshFilePayload>;
-  /** Decoded, downsampled PNG of a raster overlay — the Solid viewport
+  /** Decoded, downsampled PNG of a raster overlay — the Material preview
    *  drapes this on the terrain (the webview cannot decode GeoTIFF). */
   rasterPreview(path: string, width?: number): Promise<MeshFilePayload>;
   /** Size of a file on disk — asset registration validates non-empty files. */
@@ -71,7 +82,7 @@ export interface StudioBridge {
   renderFrame(
     width: number,
     height: number,
-    quality?: "preview" | "material" | "final",
+    quality?: "preview" | "final",
     view?: RenderView,
   ): Promise<RenderFrame>;
   /** Render a full-resolution still; without a path it goes to renders/. */

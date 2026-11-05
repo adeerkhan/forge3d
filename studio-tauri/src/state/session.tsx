@@ -60,6 +60,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     busy: false,
     error: null,
   });
+  const [exporting, setExporting] = useState<{ done: number; total: number } | null>(null);
+  const exportCancelled = useRef(false);
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((message: string) => {
@@ -168,6 +170,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail]);
 
+  const setPlayhead = useCallback(
+    async (frame: number) => {
+      try {
+        const result = await bridge.setPlayhead(frame);
+        setState(result.state);
+      } catch (cause) {
+        fail(cause);
+      }
+    },
+    [fail],
+  );
+
   const addPrimitive = useCallback(
     async (shape: PrimitiveShape) => {
       const applied = await applyCommand({
@@ -274,7 +288,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const pendingRender = useRef<{
     width: number;
     height: number;
-    quality: "preview" | "material" | "final";
+    quality: "preview" | "final";
     /** The viewport camera at the moment the frame was requested. */
     view: RenderView | undefined;
   } | null>(null);
@@ -305,7 +319,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const renderViewport = useCallback(
-    async (width: number, height: number, quality: "preview" | "material" | "final" = "preview") => {
+    async (width: number, height: number, quality: "preview" | "final" = "preview") => {
       pendingRender.current = { width, height, quality, view: viewStore.current ?? undefined };
       await pumpRender();
     },
@@ -475,6 +489,50 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [flash]);
 
+  /**
+   * Render the whole timeline as a PNG sequence, one IPC per frame so progress
+   * is real and Stop works between frames. The shell evaluates a clone per
+   * frame — the same studio-core `evaluate` the playhead uses — so the
+   * session's playhead and dirty state never move during export.
+   */
+  const exportFrames = useCallback(
+    async (directory: string) => {
+      const snapshot = state;
+      if (!snapshot || bridge.kind !== "tauri") return;
+      const { timeline, render: renderSettings } = snapshot.project;
+      const total = timeline.length + 1;
+      exportCancelled.current = false;
+      setExporting({ done: 0, total });
+      try {
+        for (let index = 0; index <= timeline.length; index += 1) {
+          if (exportCancelled.current) {
+            flash(`Export stopped at frame ${index} of ${total}`);
+            return;
+          }
+          const output = `${directory}/frame_${String(index).padStart(4, "0")}.png`;
+          await bridge.renderAnimationFrame({
+            frame: index,
+            width: renderSettings.width,
+            height: renderSettings.height,
+            quality: "final",
+            output,
+          });
+          setExporting({ done: index + 1, total });
+        }
+        flash(`Exported ${total} frames to ${directory}`);
+      } catch (cause) {
+        fail(cause);
+      } finally {
+        setExporting(null);
+      }
+    },
+    [state, flash, fail],
+  );
+
+  const cancelExport = useCallback(() => {
+    exportCancelled.current = true;
+  }, []);
+
   const setViewportMode = useCallback(
     async (mode: ViewportMode) => {
       const project = state?.project;
@@ -575,6 +633,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         await renderStillTo(picked);
       },
 
+      exportFrames,
+      cancelExport,
+
       async saveProject(saveAs = false) {
         if (!state) return;
         try {
@@ -635,6 +696,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       },
 
       select,
+      setPlayhead,
       addPrimitive,
       duplicateSelection,
       deleteSelection,
@@ -701,7 +763,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       refreshRecovery,
       renderStillTo,
       renderViewport,
+      exportFrames,
+      cancelExport,
       select,
+      setPlayhead,
       setTerrainOverlayOpacity,
       setViewportMode,
       state,
@@ -727,6 +792,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setCameraView,
     engine,
     render,
+    exporting,
     terrainResolution,
     setTerrainResolution,
     actions,

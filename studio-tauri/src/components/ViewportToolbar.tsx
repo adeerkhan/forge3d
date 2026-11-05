@@ -207,7 +207,7 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
         <button
           type="button"
           className={`segment-button ${mode === "material" ? "is-active" : ""}`}
-          title="Material preview — lit terrain and overlay, no shadows or POM"
+          title="Material preview — studio HDRI and soft shadows, free orbit"
           onClick={() => void actions.setViewportMode("material")}
         >
           Material
@@ -222,7 +222,7 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
         </button>
       </div>
 
-      {mode !== "solid" && (
+      {mode === "rendered" && (
         <button
           type="button"
           className="tool-button tool-button--wide"

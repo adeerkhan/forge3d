@@ -45,6 +45,8 @@ export interface SessionApi {
     busy: boolean;
     error: string | null;
   };
+  /** Frame-sequence export progress, or null when idle. */
+  exporting: { done: number; total: number } | null;
   /** Starter scenes for the New Project dialog (empty until probed). */
   presets: ScenePreset[];
   newProjectOpen: boolean;
@@ -60,6 +62,8 @@ export interface SessionApi {
     undo(): Promise<void>;
     redo(): Promise<void>;
     select(ids: string[]): Promise<void>;
+    /** Move the playhead and evaluate the timeline (view state: not an edit). */
+    setPlayhead(frame: number): Promise<void>;
     addPrimitive(shape: PrimitiveShape): Promise<void>;
     duplicateSelection(): Promise<void>;
     deleteSelection(): Promise<void>;
@@ -69,7 +73,7 @@ export interface SessionApi {
     renderViewport(
       width: number,
       height: number,
-      quality?: "preview" | "material" | "final",
+      quality?: "preview" | "final",
     ): Promise<void>;
     /** Pick and import a DEM, replacing the terrain's source. */
     importTerrainDem(): Promise<void>;
@@ -86,6 +90,13 @@ export interface SessionApi {
     clearTerrainOverlay(): Promise<void>;
     /** Render a full-resolution still into the project's renders/ directory. */
     renderStill(): Promise<void>;
+    /** Render the whole timeline as a PNG sequence into `directory`.
+     *  One IPC per frame: progress shows in `exporting`, and `cancelExport`
+     *  stops between frames. The shell evaluates a clone per frame, so the
+     *  session's playhead does not move. Desktop shell only. */
+    exportFrames(directory: string): Promise<void>;
+    /** Stop a running frame-sequence export between frames. */
+    cancelExport(): void;
     restoreRecovery(id: string): Promise<void>;
     discardRecovery(id: string): Promise<void>;
     dismissError(): void;

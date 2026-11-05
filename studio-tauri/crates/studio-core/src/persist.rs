@@ -85,6 +85,8 @@ fn migrate(mut value: Value, from_version: u32, context: &str) -> Result<Value, 
             // v3 adds DEM-backed terrain objects. v2 documents remain valid
             // as-is: no field changed, only new object kinds became possible.
             2 => migrate_v2_to_v3(value),
+            // v4 adds the animation timeline (defaulted on load).
+            3 => migrate_v3_to_v4(value),
             other => {
                 return Err(StudioError::UnsupportedSchema {
                     context: context.to_owned(),
@@ -135,6 +137,19 @@ fn migrate_v1_to_v2(mut value: Value) -> Value {
 /// is what stops an older build from opening a file it cannot render.
 fn migrate_v2_to_v3(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
+        object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
+    }
+    value
+}
+
+/// v3 → v4: adds the animation timeline. v3 documents simply gain the default
+/// (empty) timeline — the version tag is what stops an older build from
+/// opening a file whose keyframes it would silently drop.
+fn migrate_v3_to_v4(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("timeline")
+            .or_insert_with(|| serde_json::to_value(crate::timeline::Timeline::default()).unwrap());
         object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
     }
     value

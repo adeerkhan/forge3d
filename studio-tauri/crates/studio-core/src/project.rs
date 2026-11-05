@@ -31,7 +31,7 @@ pub const FORMAT: &str = "studio3d";
 /// v1 carried `kind.primitive` on meshes; v2 adds imported glTF/GLB meshes
 /// (`kind.source`) and the project asset registry; v3 adds DEM-backed terrain
 /// objects. Earlier files are migrated on load — see [`crate::persist::migrate`].
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Default project name for `File → New`.
 pub const UNTITLED: &str = "Untitled";
@@ -59,6 +59,11 @@ pub struct Project {
     pub workspace: Workspace,
     pub viewport: ViewportState,
     pub render: RenderSettings,
+    /// Animation timeline (Phase 6). `default` so v3 documents load; the
+    /// v3→v4 migration stamps the version so older builds reject them
+    /// instead of silently dropping keyframes.
+    #[serde(default)]
+    pub timeline: crate::timeline::Timeline,
 }
 
 impl Project {
@@ -132,6 +137,7 @@ impl Project {
             workspace: Workspace::Studio,
             viewport: ViewportState::default(),
             render: RenderSettings::default(),
+            timeline: crate::timeline::Timeline::default(),
         }
     }
 
@@ -392,6 +398,7 @@ impl Project {
         {
             return Err("environment/IBL intensity must be between 0 and 4".to_owned());
         }
+        self.timeline.validate()?;
 
         Ok(())
     }
@@ -511,7 +518,7 @@ pub struct RenderSettings {
     /// deliberate choice for finals rather than the interactive default.
     #[serde(default)]
     pub ambient_occlusion: bool,
-    /// Render the sky background (Material mode always drops it — look-dev).
+    /// Render the sky background in Rendered frames.
     #[serde(default = "default_true")]
     pub sky: bool,
     /// Environment/IBL intensity multiplier: the environment light's

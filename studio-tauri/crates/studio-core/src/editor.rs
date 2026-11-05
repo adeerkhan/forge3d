@@ -224,6 +224,20 @@ impl Editor {
         Ok(())
     }
 
+    /// Move the playhead: evaluate the timeline into the project's object
+    /// state at `frame` and store it. Like selection this is **view state** —
+    /// not an undoable edit, no revision bump, no dirty flag — so scrubbing
+    /// never floods the undo stack or triggers autosave. The same
+    /// [`crate::timeline::evaluate`] the frame-sequence export uses runs here,
+    /// which is what keeps playback and rendering in step.
+    ///
+    /// Returns the clamped frame that was applied.
+    pub fn preview_playhead(&mut self, frame: f32) -> f32 {
+        let frame = crate::timeline::evaluate(&mut self.project, frame);
+        self.project.touch();
+        frame
+    }
+
     /// Swap in different project state (recovery) without touching the path.
     pub fn replace_project(&mut self, project: Project, dirty: bool) {
         self.project = project;

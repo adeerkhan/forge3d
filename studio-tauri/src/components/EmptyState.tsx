@@ -36,7 +36,7 @@ export function EmptyState() {
         <dl className="empty__facts">
           <div>
             <dt>Phase</dt>
-            <dd>2 — solid viewport and editing tools</dd>
+            <dd>6 — timeline, keyframes, frame export</dd>
           </div>
           <div>
             <dt>Shell</dt>

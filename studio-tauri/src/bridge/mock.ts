@@ -144,7 +144,7 @@ function starterProject(name: string, preset: string = "bryce"): Project {
   };
   return {
     format: "studio3d",
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: newId(),
     name,
     createdUnixMs: now,
@@ -173,12 +173,75 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       sky: true,
       iblIntensity: 1,
     },
+    timeline: {
+      frameRate: 24,
+      length: 96,
+      currentFrame: 0,
+      tracks: [],
+    },
   };
 }
 
 interface Snapshot {
   label: string;
   project: Project;
+}
+
+/**
+ * Preview-only timeline evaluation, mirroring `studio-core/src/timeline.rs`.
+ *
+ * The Rust tests are the source of truth: this exists so the browser preview
+ * can scrub a timeline without a shell, and it is deliberately NOT a second
+ * implementation to keep in lockstep — if the two disagree, the Rust side
+ * wins and this file gets corrected.
+ */
+function evaluateTimeline(project: Project, frame: number): number {
+  const timeline = project.timeline;
+  const clamped = Number.isFinite(frame)
+    ? Math.min(Math.max(frame, 0), timeline.length)
+    : 0;
+  for (const track of timeline.tracks) {
+    const object = project.scene.objects.find((entry) => entry.id === track.objectId);
+    if (!object || object.kind.type === "terrain") continue;
+    for (const { channel, keys } of track.channels) {
+      if (keys.length === 0) continue;
+      const first = keys[0];
+      const last = keys[keys.length - 1];
+      let value: number;
+      if (clamped <= first.frame) value = first.value;
+      else if (clamped >= last.frame) value = last.value;
+      else {
+        let left = first;
+        let right = first;
+        for (let i = 1; i < keys.length; i += 1) {
+          if (keys[i].frame > clamped) {
+            right = keys[i];
+            break;
+          }
+          left = keys[i];
+        }
+        const span = right.frame - left.frame;
+        let t = span <= 0 ? 0 : (clamped - left.frame) / span;
+        if (left.interpolation === "constant") t = 0;
+        else if (left.interpolation === "smooth") t = t * t * (3 - 2 * t);
+        value = left.value + (right.value - left.value) * t;
+      }
+      if (channel === "fovDeg") {
+        if (object.kind.type === "camera") object.kind.fovDeg = value;
+        continue;
+      }
+      const axis = channel.endsWith("X") ? "x" : channel.endsWith("Y") ? "y" : "z";
+      const target =
+        channel.startsWith("translation")
+          ? object.transform.translation
+          : channel.startsWith("rotation")
+            ? object.transform.rotationDeg
+            : object.transform.scale;
+      target[axis] = value;
+    }
+  }
+  timeline.currentFrame = clamped;
+  return clamped;
 }
 
 export function createMockBridge(): StudioBridge {
@@ -266,6 +329,12 @@ export function createMockBridge(): StudioBridge {
           return `Material of ${find(command.id).name}`;
         case "setGltfNode":
           return `Select node of ${find(command.id).name}`;
+        case "setChannelKeys":
+          return command.channels.length === 0
+            ? `Clear animation of ${find(command.id).name}`
+            : `Key ${find(command.id).name}`;
+        case "setTimelineConfig":
+          return "Timeline settings";
         case "setRenderSettings":
           return "Render settings";
         case "setAssetPath":
@@ -464,6 +533,48 @@ export function createMockBridge(): StudioBridge {
         return { label, affected: [command.id] };
       }
 
+      case "setChannelKeys": {
+        const object = find(command.id);
+        if (object.kind.type === "terrain")
+          throw new Error("terrain position is fixed (the DEM is georeferenced)");
+        for (const keys of command.channels) {
+          if (keys.channel === "fovDeg" && object.kind.type !== "camera")
+            throw new Error("field of view can only be keyed on a camera");
+          if (keys.keys.length === 0) throw new Error("channel has no keyframes");
+          let previous: number | null = null;
+          for (const key of keys.keys) {
+            if (!Number.isFinite(key.value)) throw new Error("keyframe must be a finite value");
+            if (keys.channel === "fovDeg" && !(key.value >= 1 && key.value < 179))
+              throw new Error("keyframe is outside the valid range");
+            if (previous !== null && key.frame <= previous)
+              throw new Error("keyframes must be strictly increasing");
+            previous = key.frame;
+          }
+        }
+        const timeline = requireProject().timeline;
+        const index = timeline.tracks.findIndex((track) => track.objectId === command.id);
+        if (command.channels.length === 0) {
+          if (index >= 0) timeline.tracks.splice(index, 1);
+        } else if (index >= 0) {
+          timeline.tracks[index].channels = structuredClone(command.channels);
+        } else {
+          timeline.tracks.push({ objectId: command.id, channels: structuredClone(command.channels) });
+        }
+        return { label, affected: [command.id] };
+      }
+
+      case "setTimelineConfig": {
+        if (command.frameRate < 1 || command.frameRate > 240)
+          throw new Error("timeline frame rate must be between 1 and 240");
+        if (command.length < 1 || command.length > 100_000)
+          throw new Error("timeline length must be between 1 and 100000 frames");
+        const timeline = requireProject().timeline;
+        timeline.frameRate = command.frameRate;
+        timeline.length = command.length;
+        timeline.currentFrame = Math.min(timeline.currentFrame, timeline.length);
+        return { label, affected: [] };
+      }
+
       case "setRenderSettings":
         requireProject().render = { ...command.render };
         return { label, affected: [] };
@@ -639,6 +750,15 @@ export function createMockBridge(): StudioBridge {
       return state();
     },
 
+    setPlayhead: async (frame) => {
+      const applied = evaluateTimeline(requireProject(), frame);
+      return { frame: applied, state: state() };
+    },
+
+    renderAnimationFrame: async () => {
+      throw new Error("frame export needs the desktop shell");
+    },
+
     autosaveNow: async () => null,
 
     autosaveStatus: async () =>
@@ -723,7 +843,7 @@ export function createMockBridge(): StudioBridge {
         "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),
 
-    renderFrame: async (_width: number, _height: number, _quality?: "preview" | "material" | "final", _view?: RenderView): Promise<RenderFrame> => {
+    renderFrame: async (_width: number, _height: number, _quality?: "preview" | "final", _view?: RenderView): Promise<RenderFrame> => {
       throw new Error(
         "Rendered mode runs the Forge3D pipeline, which needs the desktop shell",
       );
