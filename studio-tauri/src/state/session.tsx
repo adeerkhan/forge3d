@@ -61,6 +61,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [tool, setTool] = useState<Tool>("select");
   const [space, setSpace] = useState<ToolSpace>("world");
   const [cameraView, setCameraView] = useState(false);
+  /** Animation timeline visibility. UI state, not project state. */
+  const [timelineOpen, setTimelineOpen] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [terrainResolution, setTerrainResolution] = useState(96);
   const [presets, setPresets] = useState<ScenePreset[]>([]);
@@ -372,6 +374,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     },
     [pumpRender],
   );
+
+  /**
+   * Drop the last Rendered frame. A frame belongs to the camera and scene that
+   * produced it, so a mode switch or project change must not leave it covering
+   * the live view until the next render lands.
+   */
+  const clearRenderFrame = useCallback(() => {
+    setRender({ frame: null, busy: false, error: null });
+  }, []);
+
+  // A new project (or a close) has no rendered frame yet.
+  const projectId = state?.project.id ?? null;
+  useEffect(() => {
+    setRender({ frame: null, busy: false, error: null });
+  }, [projectId]);
 
   const selectedMesh = useCallback(() => {
     const project = state?.project;
@@ -958,6 +975,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       clearTerrainOverlay,
       setViewportMode,
       renderViewport,
+      clearRenderFrame,
 
       async restoreRecovery(id) {
         setBusy(true);
@@ -1012,6 +1030,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       refreshRecovery,
       enqueueStill,
       renderViewport,
+      clearRenderFrame,
       exportFrames,
       cancelExport,
       cancelRenderJob,
@@ -1041,6 +1060,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setSpace,
     cameraView,
     setCameraView,
+    timelineOpen,
+    setTimelineOpen,
     engine,
     render,
     exporting,

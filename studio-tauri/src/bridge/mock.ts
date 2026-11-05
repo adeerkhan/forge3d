@@ -174,6 +174,7 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       sky: true,
       iblIntensity: 1,
       environment: null,
+      environmentBackgroundIntensity: 1,
     },
     timeline: {
       frameRate: 24,

@@ -338,6 +338,12 @@ impl Project {
 
         // A mesh or terrain may only reference an asset the project carries;
         // dangling references are what "missing asset" panics are made of.
+        let background_intensity = self.render.environment_background_intensity;
+        if !background_intensity.is_finite() || !(0.0..=1.0).contains(&background_intensity) {
+            return Err(
+                "render background intensity must be a finite number between 0 and 1".to_owned(),
+            );
+        }
         if let Some(environment) = self.render.environment {
             let Some(asset) = self.asset(environment) else {
                 return Err(format!(
@@ -556,6 +562,11 @@ pub struct RenderSettings {
     /// work like every other file reference.
     #[serde(default)]
     pub environment: Option<AssetId>,
+    /// Brightness of the HDRI background in the Material preview, 0..=1.
+    /// 0 hides it and shows the neutral studio backdrop. Rendered frames keep
+    /// the engine's procedural sky, so this does not affect them.
+    #[serde(default = "default_one")]
+    pub environment_background_intensity: f32,
 }
 
 fn default_exposure() -> f32 {
@@ -570,6 +581,10 @@ fn default_ibl_intensity() -> f32 {
     1.0
 }
 
+fn default_one() -> f32 {
+    1.0
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -581,6 +596,7 @@ impl Default for RenderSettings {
             sky: true,
             ibl_intensity: default_ibl_intensity(),
             environment: None,
+            environment_background_intensity: default_one(),
         }
     }
 }

@@ -1009,7 +1009,9 @@ kbd {
 
 .viewport-rendered.has-frame {
   background: #0c0f13;
-  pointer-events: auto;
+  /* The image is a result, not a widget: let orbit/pan/zoom reach the canvas
+     underneath. The bar and notices re-enable pointer events for themselves. */
+  pointer-events: none;
 }
 
 .viewport-rendered__bar,
@@ -1922,4 +1924,31 @@ kbd {
   margin: 4px 0 0;
   color: var(--danger);
   font-size: 11.5px;
+}
+
+/* Top-bar toggles that hold a state (the timeline drawer). */
+.topbar__actions .button[aria-pressed="true"] {
+  background: var(--accent-quiet);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Background-intensity slider under the HDRI control. */
+.field--range .field-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.field--range input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.field-range__value {
+  min-width: 34px;
+  text-align: right;
+  font-size: 10.5px;
+  color: var(--text-dim);
 }

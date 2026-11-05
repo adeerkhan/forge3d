@@ -137,6 +137,9 @@ export interface RenderSettings {
   /** Radiance .hdr environment asset for image-based lighting, or null for
    *  the built-in studio sky. Shared by the Material preview and Rendered. */
   environment: string | null;
+  /** HDRI backdrop brightness in the Material preview (0..1). Rendered frames
+   *  keep the engine's procedural sky. */
+  environmentBackgroundIntensity: number;
 }
 
 /** Studio-side material. The terrain renderer does not consume it. */

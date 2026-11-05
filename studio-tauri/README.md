@@ -190,6 +190,7 @@ npx tsc --noEmit               # UI types
 | `X`, `Del` | Delete selection |
 | `Esc` | Clear selection |
 | `0` or the camera button | Toggle camera view (look through the active camera) |
+| `T` or the Timeline button | Show/hide the animation timeline (hidden by default) |
 | Click the corner gizmo | Snap the view to an axis |
 
 The tool strip also holds **Global/Local** axis orientation and the **Add** menu
@@ -245,9 +246,18 @@ setting used by two consumers:
 
 `Environment / IBL intensity` scales the image-based light in both views (0
 turns it off; the built-in studio fallback is additionally dimmed so it reads as
-fill, the project HDRI is used as authored). Removing the HDRI returns both views
-to the studio sky. The asset cannot be deleted while it is the environment — the
-Assets panel reports it as in use.
+fill, the project HDRI is used as authored). **Background intensity** is the
+backdrop's own brightness, 0..1: it scales the HDRI sky in the Material preview
+(`scene.backgroundIntensity`) and 0 swaps it for the neutral studio backdrop.
+Removing the HDRI returns both views to the studio sky. The asset cannot be
+deleted while it is the environment — the Assets panel reports it as in use.
+
+**Rendered uses the HDRI for lighting, not as its sky.** The terrain pipeline
+draws one of its own procedural skies (Hosek-Wilkie / AETHER); its
+`SkySettings` has no HDRI-background mode, so the backdrop slider applies to the
+Material preview and Rendered frames keep the procedural sky. The HDRI still
+drives image-based lighting in both views (`IBL.from_hdr`), which is what makes
+the terrain respond to it.
 
 ## The default scene is a DEM (Phase 4)
 
@@ -318,8 +328,14 @@ the render handoff.
   but the engine cannot draw those objects**, so only camera animation shows up
   in Rendered frames.
 - **Rendered shows one still frame at a time.** Playback animates the Solid and
-  Material viewports live; Rendered re-renders on edits and camera changes
-  (throttled), not per playback frame. Use **Export frames…** for the sequence.
+  Material viewports live; Rendered re-renders on edits, orbit/zoom, and camera
+  changes (throttled), not per playback frame. Use **Export frames…** for the
+  sequence. Entering Rendered drops the previous frame, so a stale view never
+  covers the scene while the new one renders.
+- **Rendered has no HDRI sky.** The engine's terrain pipeline draws a
+  procedural sky; the project HDRI lights it (IBL) but does not appear as the
+  background. That needs a `SkySettings` HDRI-background mode in the engine, not
+  a Studio setting.
 - **HDRI environments are Radiance `.hdr` only.** Both consumers read RGBE
   (three's `HDRLoader` and the engine's `IBL.from_hdr`); `.exr` is rejected with
   a specific message rather than silently mis-lighting. The viewport reads the
@@ -350,7 +366,9 @@ the render handoff.
 
 ## Timeline (Phase 6)
 
-The strip under the viewport is the animation timeline. The model lives in
+The animation timeline is a drawer under the viewport, hidden by default. Open
+it with the **Timeline** button in the top bar or `T`; **Hide** (or `T` again)
+closes it. While closed, the viewport gets the whole centre column. The model lives in
 `crates/studio-core/src/timeline.rs` and is persisted with the document (schema
 v4; older builds reject a v4 file rather than silently dropping its tracks).
 

@@ -81,13 +81,85 @@ export function NumberField({
   );
 }
 
+interface RangeFieldProps {
+  label: string;
+  value: number;
+  min?: number;
+  max?: number;
+  step?: number;
+  disabled?: boolean;
+  onCommit(value: number): void;
+}
+
+/**
+ * Slider that previews while dragging and commits once on release.
+ *
+ * Committing per input event would push one undo entry per pixel of the drag;
+ * the published value is what the model accepts, and the drag still reads
+ * live in the label. Keyboard use commits on key-up.
+ */
+export function RangeField({
+  label,
+  value,
+  min = 0,
+  max = 1,
+  step = 0.01,
+  disabled,
+  onCommit,
+}: RangeFieldProps) {
+  const id = useId();
+  const [draft, setDraft] = useState(value);
+  const dragging = useRef(false);
+
+  useEffect(() => {
+    // A model update (undo, project open) wins once the pointer is released.
+    if (!dragging.current) setDraft(value);
+  }, [value]);
+
+  const publish = (next: number) => {
+    const clamped = Math.min(max, Math.max(min, Number.isFinite(next) ? next : value));
+    setDraft(clamped);
+    if (Math.abs(clamped - value) > 1e-9) onCommit(clamped);
+  };
+
+  return (
+    <label className="field field--range" htmlFor={id}>
+      <span className="field-label">{label}</span>
+      <div className="field-range">
+        <input
+          id={id}
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={draft}
+          disabled={disabled}
+          onPointerDown={() => {
+            dragging.current = true;
+          }}
+          onChange={(event) => setDraft(Number(event.target.value))}
+          onPointerUp={(event) => {
+            dragging.current = false;
+            publish(Number(event.currentTarget.value));
+          }}
+          onKeyUp={(event) => publish(Number(event.currentTarget.value))}
+          onBlur={(event) => {
+            dragging.current = false;
+            publish(Number(event.currentTarget.value));
+          }}
+        />
+        <span className="field-range__value mono">{draft.toFixed(2)}</span>
+      </div>
+    </label>
+  );
+}
+
 interface TextFieldProps {
   label: string;
   value: string;
   disabled?: boolean;
   onCommit(value: string): void;
 }
-
 export function TextField({ label, value, disabled, onCommit }: TextFieldProps) {
   const id = useId();
   const [draft, setDraft] = useState(value);

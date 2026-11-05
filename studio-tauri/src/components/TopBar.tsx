@@ -10,7 +10,7 @@ import {
 } from "./icons";
 
 export function TopBar() {
-  const { state, actions, busy } = useSession();
+  const { state, actions, busy, timelineOpen, setTimelineOpen } = useSession();
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -151,6 +151,20 @@ export function TopBar() {
           onClick={() => void actions.redo()}
         >
           <RedoIcon />
+        </button>
+        <button
+          type="button"
+          className="button"
+          disabled={!state}
+          aria-pressed={timelineOpen}
+          title={
+            timelineOpen
+              ? "Hide the animation timeline (T)"
+              : "Show the animation timeline (T)"
+          }
+          onClick={() => setTimelineOpen(!timelineOpen)}
+        >
+          Timeline
         </button>
         <button
           type="button"

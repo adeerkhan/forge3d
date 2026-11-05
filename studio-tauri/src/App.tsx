@@ -14,7 +14,7 @@ import { CloseIcon } from "./components/icons";
 import { useSession } from "./state/session-context";
 
 export default function App() {
-  const { state, error, notice, actions } = useSession();
+  const { state, error, notice, actions, timelineOpen } = useSession();
 
   useKeyboardShortcuts();
 
@@ -36,7 +36,7 @@ export default function App() {
             <aside className="workspace__panel workspace__panel--right">
               <Inspector />
             </aside>
-            <Timeline />
+            {timelineOpen && <Timeline />}
           </>
         ) : (
           <>
@@ -70,7 +70,14 @@ export default function App() {
 }
 
 function useKeyboardShortcuts() {
-  const { actions, setTool, cameraView, setCameraView } = useSession();
+  const {
+    actions,
+    setTool,
+    cameraView,
+    setCameraView,
+    timelineOpen,
+    setTimelineOpen,
+  } = useSession();
 
   useEffect(() => {
     const isEditable = (target: EventTarget | null) => {
@@ -100,6 +107,10 @@ function useKeyboardShortcuts() {
         if (event.key === "0") {
           // Blender's camera-view toggle; numpad 0 reports the same key.
           setCameraView(!cameraView);
+          return;
+        }
+        if (key === "t") {
+          setTimelineOpen(!timelineOpen);
           return;
         }
         // Blender-style manipulation tools and object actions.
@@ -159,5 +170,5 @@ function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions, cameraView, setCameraView, setTool]);
+  }, [actions, cameraView, setCameraView, setTool, timelineOpen, setTimelineOpen]);
 }

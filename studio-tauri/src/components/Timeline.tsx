@@ -59,7 +59,7 @@ function currentValue(object: SceneObject, channel: Channel): number | null {
  * render one (`exportFrames`), so what you scrub is what renders.
  */
 export function Timeline() {
-  const { state, actions, exporting } = useSession();
+  const { state, actions, exporting, setTimelineOpen } = useSession();
   const [playing, setPlaying] = useState(false);
   const [interpolation, setInterpolation] = useState<Interpolation>("linear");
 
@@ -216,6 +216,14 @@ export function Timeline() {
         <span className="timeline__frame mono">
           {Math.round(frame)} / {length}
         </span>
+        <button
+          type="button"
+          className="text-button"
+          title="Hide the timeline (T)"
+          onClick={() => setTimelineOpen(false)}
+        >
+          Hide
+        </button>
       </div>
 
       {keyFrames.length > 0 && (

@@ -199,3 +199,34 @@ fn the_environment_is_a_fully_supported_parameter() {
     assert!(row.detail.contains("Material preview"), "{row:?}");
     assert!(row.detail.contains("Rendered"), "{row:?}");
 }
+
+#[test]
+fn the_hdri_background_intensity_is_validated() {
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    for value in [-0.1f32, 1.5, f32::NAN] {
+        let render = RenderSettings {
+            environment_background_intensity: value,
+            ..editor.project().render
+        };
+        let error = editor
+            .apply(Command::SetRenderSettings { render })
+            .expect_err("out-of-range background intensity")
+            .to_string();
+        assert!(error.contains("background intensity"), "{value}: {error}");
+    }
+
+    let render = RenderSettings {
+        environment_background_intensity: 0.35,
+        ..editor.project().render
+    };
+    editor.apply(Command::SetRenderSettings { render }).unwrap();
+    assert_eq!(
+        editor.project().render.environment_background_intensity,
+        0.35
+    );
+    editor.undo().unwrap();
+    assert_eq!(
+        editor.project().render.environment_background_intensity,
+        1.0
+    );
+}

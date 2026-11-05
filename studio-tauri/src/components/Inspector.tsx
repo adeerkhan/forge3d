@@ -16,7 +16,7 @@ import { objectKindLabel } from "../bridge/types";
 import { bridge } from "../bridge/env";
 import { base64ToArrayBuffer, listGltfNodes } from "../viewport/assets";
 import { useSession } from "../state/session-context";
-import { NumberField, Section, TextField, Toggle } from "./fields";
+import { NumberField, RangeField, Section, TextField, Toggle } from "./fields";
 
 // ---------------------------------------------------------------- capability
 
@@ -432,12 +432,30 @@ function RenderSettingsEditor() {
           </button>
         )}
       </div>
+      <RangeField
+        label="Background intensity"
+        value={render.environmentBackgroundIntensity}
+        min={0}
+        max={1}
+        step={0.01}
+        disabled={!environment}
+        onCommit={(environmentBackgroundIntensity) =>
+          commit({ environmentBackgroundIntensity })
+        }
+      />
+      {!environment && (
+        <p className="hint">
+          Add an HDRI to control its backdrop brightness here.
+        </p>
+      )}
       <CapabilityBadges rows={caps?.environment} />
       <p className="hint">
         Settings are stored with the project and applied to both the Rendered
         viewport and the Render button. Solid is a neutral clay view; the
         Material preview lights the scene with this HDRI (or the built-in studio
         sky) plus soft sun shadows and never renders through the engine.
+        Rendered uses the HDRI for lighting but draws the engine's procedural
+        sky, so the backdrop slider affects the Material preview only.
       </p>
     </Section>
   );

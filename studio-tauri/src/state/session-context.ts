@@ -36,6 +36,9 @@ export interface SessionApi {
   /** Look through the scene's active camera instead of the free view. */
   cameraView: boolean;
   setCameraView(enabled: boolean): void;
+  /** Animation timeline visibility (hidden by default). */
+  timelineOpen: boolean;
+  setTimelineOpen(open: boolean): void;
   /** Forge3D engine discovery (renderer + probe). */
   engine: EngineStatus | null;
   /** Heightfield resolution used by the Solid terrain preview. */
@@ -81,6 +84,8 @@ export interface SessionApi {
       height: number,
       quality?: "preview" | "final",
     ): Promise<void>;
+    /** Forget the last Rendered frame (mode switch / project change). */
+    clearRenderFrame(): void;
     /** Pick and import a DEM, replacing the terrain's source. */
     importTerrainDem(): Promise<void>;
     /** Pick an albedo texture (PNG/JPEG) for the selected mesh. */

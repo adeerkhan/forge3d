@@ -63,8 +63,10 @@ fn project_document_key_shape_is_stable() {
             "sky",
             "iblIntensity",
             "environment",
+            "environmentBackgroundIntensity",
         ],
     );
+    assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
     // The default project uses the built-in studio sky.
     assert_eq!(value["render"]["environment"], serde_json::Value::Null);
 

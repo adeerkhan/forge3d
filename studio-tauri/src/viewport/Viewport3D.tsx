@@ -209,14 +209,26 @@ function applyShading(
  * Material preview — or the built-in studio sky. The project's IBL intensity
  * scales the light; the fallback is additionally dimmed so it reads as fill.
  */
-function applyEnvironment(runtime: Runtime, solid: boolean, iblIntensity: number): void {
+function applyEnvironment(
+  runtime: Runtime,
+  solid: boolean,
+  iblIntensity: number,
+  backgroundIntensity: number,
+): void {
   runtime.scene.environment = solid ? null : runtime.environment;
   runtime.scene.environmentIntensity = solid
     ? 0
     : iblIntensity * (runtime.customEnvironment ? 1 : STUDIO_ENVIRONMENT_INTENSITY);
-  runtime.scene.background = solid
-    ? SOLID_BG
-    : runtime.environmentBackground ?? MATERIAL_BG;
+  const backdrop = runtime.environmentBackground;
+  if (solid || !backdrop || backgroundIntensity <= 0.001) {
+    // Solid stays neutral; 0 on the slider hides the HDRI and leaves the
+    // neutral studio backdrop rather than fading to black.
+    runtime.scene.background = solid ? SOLID_BG : MATERIAL_BG;
+    runtime.scene.backgroundIntensity = 1;
+  } else {
+    runtime.scene.background = backdrop;
+    runtime.scene.backgroundIntensity = backgroundIntensity;
+  }
 }
 
 /** A small frustum, drawn where the project's active camera sits. */
@@ -751,6 +763,10 @@ export function Viewport3D() {
       const travelled = Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y);
       pressed = null;
       if (travelled > 4 || gizmo.dragging) return;
+      // In Rendered the engine image covers this canvas; a click would select
+      // whatever happens to sit under the pointer in the hidden scene. Orbit
+      // and zoom still work because the overlay no longer eats them.
+      if (modeRef.current) return;
 
       const rect = canvas.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1096,7 +1112,12 @@ export function Viewport3D() {
     // Material adds the environment (project HDRI or studio sky) and soft
     // shadows. Rendered shows the engine frame instead, but keeping the rig
     // consistent avoids a bright flash when switching back.
-    applyEnvironment(runtime, solidView, project.render.iblIntensity);
+    applyEnvironment(
+      runtime,
+      solidView,
+      project.render.iblIntensity,
+      project.render.environmentBackgroundIntensity,
+    );
     runtime.sun.castShadow = !solidView;
     runtime.hemi.intensity = solidView ? 0.28 : 0.12;
 
@@ -1161,9 +1182,14 @@ export function Viewport3D() {
     const runtime = runtimeRef.current;
     if (!runtime) return;
     let cancelled = false;
-    const intensity = stateRef.current?.project.render.iblIntensity ?? 1;
+    const settings = stateRef.current?.project.render;
     const apply = () =>
-      applyEnvironment(runtime, viewportModeRef.current === "solid", intensity);
+      applyEnvironment(
+        runtime,
+        viewportModeRef.current === "solid",
+        settings?.iblIntensity ?? 1,
+        settings?.environmentBackgroundIntensity ?? 1,
+      );
 
     if (!environmentPath) {
       const previous = environmentRef.current;
@@ -1376,6 +1402,17 @@ export function Viewport3D() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [captureCamera]);
+
+  // A frame belongs to the camera and scene that produced it. Entering Rendered
+  // drops the previous image so a stale view cannot cover the live scene while
+  // the first engine frame is produced.
+  const wasRendered = useRef(false);
+  useEffect(() => {
+    if (renderedMode && !wasRendered.current) {
+      actionsRef.current.clearRenderFrame();
+    }
+    wasRendered.current = renderedMode;
+  }, [renderedMode]);
 
   // Entering Rendered mode renders once at the current viewport size; orbiting
   // in this mode does not re-render (each frame costs seconds), so the toolbar
