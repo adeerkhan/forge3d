@@ -299,16 +299,17 @@ function AssetsPanel() {
     <Section title="Assets">
       <ul className="multi-list">
         {project.assets.map((asset) => {
-          const usage = project.scene.objects.filter(
-            (object) =>
-              (object.kind.type === "mesh" &&
-                (object.kind.source.type === "gltf"
-                  ? object.kind.source.asset === asset.id
-                  : object.kind.material.texture === asset.id)) ||
-              (object.kind.type === "terrain" &&
-                (object.kind.asset === asset.id ||
-                  object.kind.overlay?.asset === asset.id)),
-          ).length;
+          const usage =
+            project.scene.objects.filter(
+              (object) =>
+                (object.kind.type === "mesh" &&
+                  (object.kind.source.type === "gltf"
+                    ? object.kind.source.asset === asset.id
+                    : object.kind.material.texture === asset.id)) ||
+                (object.kind.type === "terrain" &&
+                  (object.kind.asset === asset.id ||
+                    object.kind.overlay?.asset === asset.id)),
+            ).length + (project.render.environment === asset.id ? 1 : 0);
           return (
             <li key={asset.id}>
               <span title={asset.path}>{asset.name}</span>
@@ -325,8 +326,9 @@ function AssetsPanel() {
         })}
       </ul>
       <p className="hint">
-        Missing files surface when the project opens; relinking points the asset
-        at a new path without touching scene references.
+        Relinking points an asset at a new path without touching scene
+        references. A file that moved is reported by the viewport or renderer
+        the next time it reads it.
       </p>
     </Section>
   );
