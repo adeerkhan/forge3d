@@ -129,7 +129,7 @@ pub fn compute_render_view(input: &TerrainView) -> Option<RenderView> {
     let d_east = (input.camera[0] - input.aim[0]) * scale;
     let d_north = -(input.camera[2] - input.aim[2]) * scale;
     let d_up = (input.camera[1] - input.aim[1]) * scale;
-    let radius = (d_east * d_east + d_north * d_north + d_up * d_up).sqrt();
+    let radius = glam::DVec3::new(d_east, d_north, d_up).length();
     if !radius.is_finite() || radius <= 1e-6 {
         return None;
     }
@@ -496,7 +496,7 @@ pub fn terrain_camera(project: &Project) -> Option<TerrainCamera> {
         camera.transform.translation.y - terrain.transform.translation.y,
         camera.transform.translation.z - terrain.transform.translation.z,
     );
-    let length = (offset.x * offset.x + offset.y * offset.y + offset.z * offset.z).sqrt();
+    let length = offset.geometry().length();
     if length < 1e-3 {
         return None;
     }

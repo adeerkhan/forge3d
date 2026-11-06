@@ -1,11 +1,16 @@
-//! Minimal 3D math for the canonical model.
+//! 3D math for the canonical model.
 //!
-//! Deliberately dependency-free: the model stores plain data, and any viewport
-//! adapter converts it to its own math types. Rotation is Euler degrees in
-//! X, Y, Z order, applied as `Rz * Ry * Rx` to a camera that looks down -Z.
-//! Both the TypeScript preview and any future Three.js viewport must use the
-//! same convention; `scene::tests` pins the camera default against it.
+//! `Vec3` and `Transform` are the *wire* types — plain data with the camelCase
+//! serde shape the schema and the TypeScript bridge depend on — and they stay
+//! that way. The arithmetic behind them is `glam`, the same crate the engine
+//! uses, so a rotation is one quaternion instead of three hand-rolled matrices.
+//!
+//! Rotation is Euler degrees in X, Y, Z order, applied as `Rz * Ry * Rx` to a
+//! camera that looks down -Z. Both the TypeScript preview and the Three.js
+//! viewport must use the same convention; `scene::tests` pins the camera
+//! default against it.
 
+use glam::{EulerRot, Quat};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -33,7 +38,16 @@ impl Vec3 {
     }
 
     pub fn is_finite(self) -> bool {
-        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+        self.geometry().is_finite()
+    }
+
+    /// The model vector as geometry, for the `glam` computations below.
+    pub(crate) fn geometry(self) -> glam::Vec3 {
+        glam::Vec3::new(self.x, self.y, self.z)
+    }
+
+    pub(crate) fn from_geometry(vector: glam::Vec3) -> Self {
+        Self::new(vector.x, vector.y, vector.z)
     }
 }
 
@@ -63,46 +77,29 @@ impl Default for Transform {
 }
 
 impl Transform {
-    /// Rotate a local vector by this transform's Euler angles (X, then Y, then
-    /// Z — the model's `Rz·Ry·Rx` convention, shared with the viewport).
+    /// The rotation as a quaternion, in the model's `Rz * Ry * Rx` order.
+    pub fn rotation(&self) -> Quat {
+        Quat::from_euler(
+            EulerRot::ZYX,
+            self.rotation_deg.z.to_radians(),
+            self.rotation_deg.y.to_radians(),
+            self.rotation_deg.x.to_radians(),
+        )
+    }
+
+    /// Rotate a local vector by this transform's Euler angles.
     pub fn rotate_vector(&self, vector: Vec3) -> Vec3 {
-        let (sin_x, cos_x) = (
-            self.rotation_deg.x.to_radians().sin(),
-            self.rotation_deg.x.to_radians().cos(),
-        );
-        let (sin_y, cos_y) = (
-            self.rotation_deg.y.to_radians().sin(),
-            self.rotation_deg.y.to_radians().cos(),
-        );
-        let (sin_z, cos_z) = (
-            self.rotation_deg.z.to_radians().sin(),
-            self.rotation_deg.z.to_radians().cos(),
-        );
-
-        // Rx
-        let y = vector.y * cos_x - vector.z * sin_x;
-        let z = vector.y * sin_x + vector.z * cos_x;
-        let x = vector.x;
-
-        // Ry — both outputs must use the *old* x and z, hence the temporaries.
-        let x_ry = x * cos_y + z * sin_y;
-        let z_ry = -x * sin_y + z * cos_y;
-
-        // Rz
-        let x_rz = x_ry * cos_z - y * sin_z;
-        let y_rz = x_ry * sin_z + y * cos_z;
-
-        Vec3::new(x_rz, y_rz, z_ry)
+        Vec3::from_geometry(self.rotation().mul_vec3(vector.geometry()))
     }
 
     /// Local forward axis (`-Z`) in parent space.
     pub fn forward(&self) -> Vec3 {
-        self.rotate_vector(Vec3::new(0.0, 0.0, -1.0))
+        Vec3::from_geometry(self.rotation() * glam::Vec3::NEG_Z)
     }
 
     /// Local up axis (`+Y`) in parent space.
     pub fn up(&self) -> Vec3 {
-        self.rotate_vector(Vec3::new(0.0, 1.0, 0.0))
+        Vec3::from_geometry(self.rotation() * glam::Vec3::Y)
     }
 
     /// Euler rotation (degrees, the model's ZYX order) that points the local
