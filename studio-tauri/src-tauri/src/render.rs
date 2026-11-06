@@ -361,6 +361,9 @@ pub struct RenderRequest {
     pub aov_depth: bool,
     /// Final-quality OIDN denoise of the beauty pass.
     pub still_denoise: bool,
+    /// Shadow filter (`PCF` | `PCSS`) and shadow-map edge length in texels.
+    pub shadow_technique: String,
+    pub shadow_resolution: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -384,6 +387,8 @@ impl RenderRequest {
         self.aov_normal = settings.still_aov.normal;
         self.aov_depth = settings.still_aov.depth;
         self.still_denoise = settings.still_denoise;
+        self.shadow_technique = settings.shadow_technique.engine_name().to_owned();
+        self.shadow_resolution = settings.shadow_resolution;
         self
     }
 
@@ -445,6 +450,8 @@ impl RenderRequest {
                     "depth": final_quality && self.aov_depth,
                 },
                 "denoise": final_quality && self.still_denoise,
+                "shadowTechnique": self.shadow_technique,
+                "shadowResolution": self.shadow_resolution,
             },
             "overlay": self.overlay,
             "exposure": self.exposure,
@@ -535,6 +542,8 @@ impl RenderRequest {
             aov_normal: false,
             aov_depth: false,
             still_denoise: false,
+            shadow_technique: "PCF".to_owned(),
+            shadow_resolution: 4096,
         })
     }
 }
@@ -570,6 +579,8 @@ mod tests {
             aov_normal: false,
             aov_depth: false,
             still_denoise: false,
+            shadow_technique: "PCF".to_owned(),
+            shadow_resolution: 4096,
         }
     }
 
@@ -616,6 +627,20 @@ mod tests {
         assert_eq!(preview["quality"]["aov"]["albedo"], false);
         assert_eq!(preview["quality"]["aov"]["depth"], false);
         assert_eq!(preview["quality"]["denoise"], false);
+    }
+
+    #[test]
+    fn payload_carries_the_shadow_filter_and_map_size() {
+        let settings = studio_core::RenderSettings {
+            shadow_technique: studio_core::ShadowTechnique::Pcss,
+            shadow_resolution: 2048,
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request()
+            .with_settings(&settings)
+            .to_payload("preview", None);
+        assert_eq!(payload["quality"]["shadowTechnique"], "PCSS");
+        assert_eq!(payload["quality"]["shadowResolution"], 2048);
     }
 
     #[test]

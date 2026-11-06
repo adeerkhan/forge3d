@@ -236,7 +236,7 @@ back); they never rebuild geometry or re-fetch textures.
 
 ### Environment (HDRI)
 
-`Inspector → Render output → Environment (HDRI)` adds a Radiance `.hdr` file to
+`Lighting → Environment` adds a Radiance `.hdr` file to
 the project as an asset and makes it the scene's image-based light. It is one
 setting used by two consumers:
 
@@ -265,9 +265,34 @@ background, the IBL lighting and the Material preview's orientation all agree.
 Z-up terrain directions are permuted into that frame for the sky pass only; the
 terrain shading and its Z-up hash are untouched.
 
+## Properties sidebar
+
+The right side is a Blender-style properties panel: a vertical tab rail and a
+stack of collapsible sections, toggled with **N** (the workspace gives the
+viewport the extra width when it is hidden).
+
+| Tab | What lives there |
+|---|---|
+| **Render** | output size, exposure, shadows (filter + map size), quality (final AO), still extras (AOV, denoise) |
+| **Scene** | project and scene facts, the asset list with relinking |
+| **Lighting** | the sun (type, intensity, linear colour, pitch/yaw/roll, solar placement) and the environment (sky toggle, IBL intensity, HDRI map, backdrop intensity) |
+| **Object** | the selected object: identity, transform, and its kind-specific editors |
+
+Sections remember whether they were open, and the panel remembers its tab,
+between runs (`localStorage`) — a settings panel whose sections forget their
+state is one you re-open by hand every time. Settings stay one command per
+edit (`setRenderSettings` with the whole object), so undo is one step per
+change, not one per keystroke.
+
+The tabs split a single long scroll into the four questions you actually ask:
+what comes out (Render), what the project is (Scene), what lights it
+(Lighting), and what is selected (Object). Light *colour and intensity* live
+in the Lighting tab even when the sun is selected, so the rig is edited in one
+place; the Object tab keeps the sun's generic transform.
+
 ## Final stills and sequence frames (Phase 10)
 
-`Inspector → Render output` has two final-quality toggles that viewport
+`Render → Stills` has two final-quality toggles that viewport
 previews never pay for (they apply to Still and to the frames of an
 animation sequence):
 
@@ -332,7 +357,7 @@ like "nothing happened" if you get them wrong:
 
 ## Sun from date and place
 
-Select the Sun (a directional light) and use **Inspector → Light → Sun from
+Use **Lighting → Sun → Sun from
 date & place**: latitude, longitude, and a local date/time, then **Set sun**.
 The shell asks the engine's SIDERA ephemeris (`forge3d.sun_position`) for the
 direction, converts it into the light's rotation (`workspace::sun_rotation`,

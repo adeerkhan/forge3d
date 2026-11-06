@@ -429,6 +429,9 @@ impl Project {
         {
             return Err("environment/IBL intensity must be between 0 and 4".to_owned());
         }
+        if !(256..=8192).contains(&self.render.shadow_resolution) {
+            return Err("shadow resolution must be between 256 and 8192 texels".to_owned());
+        }
         self.timeline.validate()?;
 
         Ok(())
@@ -603,6 +606,36 @@ pub struct RenderSettings {
     /// an explicit message when it is missing. Same scope as `still_aov`.
     #[serde(default)]
     pub still_denoise: bool,
+    /// Shadow filter. PCF is the cheap inset filter; PCSS samples the blocker
+    /// search, so contact shadows soften with distance at roughly twice the
+    /// cost. Applies to previews and finals alike.
+    #[serde(default)]
+    pub shadow_technique: ShadowTechnique,
+    /// Shadow-map edge length in texels. The engine default is 4096, which is
+    /// generous for a 960×600 preview; 1024–2048 trades crispness for cost.
+    #[serde(default = "default_shadow_resolution")]
+    pub shadow_resolution: u32,
+}
+
+/// Shadow filter the renderer applies to the sun's shadow map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShadowTechnique {
+    /// Percentage-closer filtering: fixed-width, cheap, crisp.
+    #[default]
+    Pcf,
+    /// Percentage-closer soft shadows: blocker search, contact-hardening.
+    Pcss,
+}
+
+impl ShadowTechnique {
+    /// The engine's technique name (`ShadowSettings.technique`).
+    pub fn engine_name(self) -> &'static str {
+        match self {
+            ShadowTechnique::Pcf => "PCF",
+            ShadowTechnique::Pcss => "PCSS",
+        }
+    }
 }
 
 fn default_exposure() -> f32 {
@@ -621,6 +654,10 @@ fn default_one() -> f32 {
     1.0
 }
 
+fn default_shadow_resolution() -> u32 {
+    4096
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -635,6 +672,8 @@ impl Default for RenderSettings {
             environment_background_intensity: default_one(),
             still_aov: StillAov::default(),
             still_denoise: false,
+            shadow_technique: ShadowTechnique::default(),
+            shadow_resolution: default_shadow_resolution(),
         }
     }
 }

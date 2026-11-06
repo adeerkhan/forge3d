@@ -397,11 +397,15 @@ class StudioRenderer:
             ),
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))
+        # Shadow filter and map size are the project's, not the service's: PCF
+        # is the cheap inset filter, PCSS trades a blocker search for
+        # contact-hardening, and the map size is the quality/cost dial.
+        settings.shadows.technique = str(quality.get("shadowTechnique") or "PCF").upper()
+        settings.shadows.resolution = int(quality.get("shadowResolution") or 4096)
         # The camera orbits far outside the 4000 m default max_distance
         # (6+ km away), so every fragment beyond it faded to unshadowed —
         # the entire terrain rendered without a single shadow.
         settings.shadows.max_distance = 30000.0
-        settings.shadows.technique = "PCF"
         # The bias defaults (0.0005/0.001/0.0002 in NORMALIZED depth) were
         # sized for small scenes; over this engine's ~6 km light box they eat
         # ~10 m of world depth and swallow every shadow. Keep them near zero so

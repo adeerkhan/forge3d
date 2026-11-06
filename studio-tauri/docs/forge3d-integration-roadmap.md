@@ -31,6 +31,8 @@ be a payload field: vector layers and meshes.
 | Studio HDR is a valid Radiance file (biased RGBE exponents, sky above ground) | done |
 | Engine backend/adapter in the probe (first half of 8.0) | done |
 | HDRI/sky axis fix (Z-up terrain → Y-up environment frame for the sky pass) | done |
+| Properties sidebar (Render / Scene / Lighting / Object tabs, N, remembered sections) | done |
+| 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
 | Everything below (§3–§6, except 9.0) | **not started** |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
@@ -136,10 +138,15 @@ All use §2. Nothing new is introduced beyond the settings below.
 - Defer DoF, motion blur, TAA: costly and rarely wanted.
 - Check: round-trip.
 
-### 5.5 Shadows (0.5 day)
-- Settings: `shadowTechnique` (`pcf` | `pcss`), `shadowSoftness`, `cascades`.
-- Service: `ShadowSettings` fields; keep the existing tuned biases.
-- Check: round-trip; one GPU smoke only if the pixel is the deliverable.
+### 5.5 Shadows (0.5 day) — **partly done**
+- Shipped: `shadowTechnique` (`pcf` | `pcss`) and `shadowResolution`
+  (256–8192) on `RenderSettings`, through `to_payload` → `ShadowSettings`;
+  verified on the GPU (PCSS and a 512² map change the frame).
+- Not shipped: `shadowSoftness` and `ShadowSettings.intensity` are decoded but
+  **inert** in `render_terrain_pbr_pom` (measured: softness 0.05 vs 8.0 and
+  intensity 0 vs 1 produce identical pixels), so exposing them would be a
+  silent no-op. The shader has to consume them first.
+- Deferred: `cascades` (the terrain path keeps the engine's 3).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

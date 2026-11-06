@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
+import { ChevronIcon } from "./icons";
+
 interface NumberFieldProps {
   label: string;
   value: number;
@@ -206,15 +208,105 @@ export function TextField({ label, value, disabled, onCommit }: TextFieldProps) 
   );
 }
 
-export function Section({ title, children, actions }: { title: string; children: ReactNode; actions?: ReactNode }) {
+/**
+ * A properties panel. Collapsible, like every Blender panel: the header is the
+ * toggle, and an `id` remembers the state between runs (a settings sidebar whose
+ * sections forget their state is a settings sidebar you re-open by hand).
+ */
+export function Section({
+  title,
+  children,
+  actions,
+  id,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: ReactNode;
+  actions?: ReactNode;
+  /** Stable key for the remembered open/closed state. */
+  id?: string;
+  defaultOpen?: boolean;
+}) {
+  const storageKey = id ? `studio.section.${id}` : null;
+  const [open, setOpen] = useState(() => {
+    if (!storageKey) return defaultOpen;
+    try {
+      const stored = window.localStorage.getItem(storageKey);
+      return stored === null ? defaultOpen : stored === "1";
+    } catch {
+      return defaultOpen;
+    }
+  });
+
+  const toggle = () => {
+    setOpen((value) => {
+      const next = !value;
+      if (storageKey) {
+        try {
+          window.localStorage.setItem(storageKey, next ? "1" : "0");
+        } catch {
+          // Storage disabled: the section still toggles, it just forgets.
+        }
+      }
+      return next;
+    });
+  };
+
   return (
-    <section className="inspector-section">
+    <section className={`inspector-section${open ? "" : " is-collapsed"}`}>
       <header className="inspector-section__header">
-        <h3>{title}</h3>
+        <button
+          type="button"
+          className="inspector-section__toggle"
+          aria-expanded={open}
+          onClick={toggle}
+        >
+          <ChevronIcon open={open} size={12} />
+          <h3>{title}</h3>
+        </button>
         {actions}
       </header>
-      {children}
+      {open && <div className="inspector-section__body">{children}</div>}
     </section>
+  );
+}
+
+/** A small segmented control — the two-or-three option cases (a select is
+ *  heavier and hides the alternatives). */
+export function ChoiceField<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+  hint,
+}: {
+  label: string;
+  value: T;
+  options: { value: T; label: string; title?: string }[];
+  onChange(value: T): void;
+  hint?: string;
+}) {
+  return (
+    <div className="field">
+      <span className="field-label">{label}</span>
+      <div className="segmented" role="group" aria-label={label}>
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            className={`segmented__option${option.value === value ? " is-active" : ""}`}
+            aria-pressed={option.value === value}
+            title={option.title ?? option.label}
+            onClick={() => {
+              if (option.value !== value) onChange(option.value);
+            }}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+      {hint && <span className="hint">{hint}</span>}
+    </div>
   );
 }
 

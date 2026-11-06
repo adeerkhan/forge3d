@@ -9,6 +9,7 @@ import type {
   LightKind,
   LightObject,
   Primitive,
+  RenderSettings,
   SceneObject,
   SolarResult,
   Transform,
@@ -17,7 +18,7 @@ import { objectKindLabel } from "../bridge/types";
 import { bridge } from "../bridge/env";
 import { base64ToArrayBuffer, listGltfNodes } from "../viewport/assets";
 import { useSession } from "../state/session-context";
-import { NumberField, RangeField, Section, TextField, Toggle } from "./fields";
+import { ChoiceField, NumberField, RangeField, Section, TextField, Toggle } from "./fields";
 
 // ---------------------------------------------------------------- capability
 
@@ -357,8 +358,19 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
     commit({ ...light, color });
   };
 
+  const rotation = object.transform.rotationDeg;
+  const setRotation = (axis: "x" | "y" | "z", value: number) =>
+    void actions.apply({
+      type: "setTransform",
+      id: object.id,
+      transform: {
+        ...object.transform,
+        rotationDeg: { ...rotation, [axis]: value },
+      },
+    });
+
   return (
-    <Section title="Light">
+    <Section title="Sun" id="light-sun">
       <label className="field">
         <span className="field-label">Type</span>
         <select
@@ -387,13 +399,19 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
         <NumberField label="B" value={light.color[2]} step={0.02} min={0} max={1} onCommit={channel(2)} />
       </div>
       <span className="group-label">Colour (linear RGB)</span>
+      <div className="triple">
+        <NumberField label="Pitch" value={rotation.x} step={1} min={-90} max={90} disabled={light.kind !== "directional"} onCommit={(value) => setRotation("x", value)} />
+        <NumberField label="Yaw" value={rotation.y} step={1} min={-180} max={180} disabled={light.kind !== "directional"} onCommit={(value) => setRotation("y", value)} />
+        <NumberField label="Roll" value={rotation.z} step={1} min={-180} max={180} disabled={light.kind !== "directional"} onCommit={(value) => setRotation("z", value)} />
+      </div>
+      <span className="group-label">Direction (degrees)</span>
       {light.kind === "directional" && <SolarPositionEditor object={object} />}
       <CapabilityBadges rows={caps?.light} />
     </Section>
   );
 }
 
-function AssetsPanel() {
+export function AssetsPanel() {
   const { state, actions, assetIntegrity } = useSession();
   const project = state?.project;
   if (!project || project.assets.length === 0) return null;
@@ -468,50 +486,121 @@ function AssetsPanel() {
   );
 }
 
-function RenderSettingsEditor() {
-  const { state, actions, bridgeKind, engine } = useSession();
-  const caps = useCapabilities();
+/** The project's render settings plus a whole-object commit (every settings
+ *  edit is one command, like `setChannelKeys`). */
+function useRenderSettings() {
+  const { state, actions } = useSession();
   const render = state?.project.render;
-  if (!render) return null;
-  const environment = render.environment
-    ? state?.project.assets.find((asset) => asset.id === render.environment)
-    : undefined;
-  const commit = (patch: Partial<typeof render>) => {
-    void actions.apply({ type: "setRenderSettings", render: { ...render, ...patch } });
+  if (!render || !state) return null;
+  const commit = (patch: Partial<RenderSettings>) => {
+    void actions.apply({
+      type: "setRenderSettings",
+      render: { ...render, ...patch },
+    });
   };
+  return { project: state.project, render, commit };
+}
+
+/** Render tab: what the still and the Rendered frame are made of. */
+export function RenderSettingsEditor() {
+  const { engine } = useSession();
+  const settings = useRenderSettings();
+  if (!settings) return null;
+  const { render, commit } = settings;
+
   return (
-    <Section title="Render output">
-      <div className="pair">
-        <NumberField label="Width" value={render.width} step={16} min={64} max={16384} onCommit={(width) => commit({ width: Math.round(width) })} />
-        <NumberField label="Height" value={render.height} step={16} min={64} max={16384} onCommit={(height) => commit({ height: Math.round(height) })} />
-      </div>
-      <NumberField label="Exposure" value={render.exposure} step={0.05} min={0.05} max={8} onCommit={(exposure) => commit({ exposure })} />
-      <Toggle label="Shadows" checked={render.shadows} onChange={(shadows) => commit({ shadows })} />
-      <Toggle
-        label="Ambient occlusion (final, ~5 s)"
-        checked={render.ambientOcclusion}
-        onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
-      />
-      <Toggle
-        label="AOVs next to the still (albedo · normal · depth)"
-        checked={render.stillAov.albedo || render.stillAov.normal || render.stillAov.depth}
-        onChange={(value) =>
-          commit({ stillAov: { albedo: value, normal: value, depth: value } })
-        }
-      />
-      <Toggle
-        label="Denoise the still with OIDN"
-        checked={render.stillDenoise}
-        onChange={(stillDenoise) => commit({ stillDenoise })}
-      />
-      {render.stillDenoise && engine?.available && engine.denoise === false && (
-        <p className="hint hint--boxed">
-          The engine's interpreter has no OIDN runtime, so a denoised still
-          fails instead of rendering. Install it with{" "}
-          <code>pip install -e .[denoise]</code> for{" "}
-          <code>{engine.python}</code>.
+    <>
+      <Section title="Output" id="render-output">
+        <div className="pair">
+          <NumberField label="Width" value={render.width} step={16} min={64} max={16384} onCommit={(width) => commit({ width: Math.round(width) })} />
+          <NumberField label="Height" value={render.height} step={16} min={64} max={16384} onCommit={(height) => commit({ height: Math.round(height) })} />
+        </div>
+        <NumberField label="Exposure" value={render.exposure} step={0.05} min={0.05} max={8} onCommit={(exposure) => commit({ exposure })} />
+        <p className="hint">
+          The renderer tone-maps with ACES at this exposure; the previews use
+          the same value, so a still matches what you were looking at.
         </p>
-      )}
+      </Section>
+
+      <Section title="Shadows" id="render-shadows">
+        <Toggle label="Sun shadows" checked={render.shadows} onChange={(shadows) => commit({ shadows })} />
+        <ChoiceField
+          label="Filter"
+          value={render.shadowTechnique}
+          options={[
+            { value: "pcf", label: "PCF", title: "Fixed-width filter: crisp and cheap" },
+            { value: "pcss", label: "PCSS", title: "Blocker search: softer contact shadows, roughly 2× the cost" },
+          ]}
+          onChange={(shadowTechnique) => commit({ shadowTechnique })}
+        />
+        <ChoiceField
+          label="Map size"
+          value={String(render.shadowResolution)}
+          options={[512, 1024, 2048, 4096].map((size) => ({
+            value: String(size),
+            label: String(size),
+            title: `${size}² shadow map: ${size < 2048 ? "faster, chunkier edges" : "crisper, more memory and fill"}`,
+          }))}
+          onChange={(value) => commit({ shadowResolution: Number(value) })}
+          hint="Applies to previews too: the Rendered viewport re-renders on orbit, so a big map costs frame time."
+        />
+      </Section>
+
+      <Section title="Quality" id="render-quality">
+        <Toggle
+          label="Ambient occlusion (final, ~5 s)"
+          checked={render.ambientOcclusion}
+          onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
+        />
+        <p className="hint">
+          SSAO is final-only: it costs seconds per frame, and nobody watches a
+          preview's occlusion pass.
+        </p>
+      </Section>
+
+      <Section title="Stills" id="render-stills">
+        <Toggle
+          label="AOVs next to the still (albedo · normal · depth)"
+          checked={render.stillAov.albedo || render.stillAov.normal || render.stillAov.depth}
+          onChange={(value) =>
+            commit({ stillAov: { albedo: value, normal: value, depth: value } })
+          }
+        />
+        <Toggle
+          label="Denoise the still with OIDN"
+          checked={render.stillDenoise}
+          onChange={(stillDenoise) => commit({ stillDenoise })}
+        />
+        {render.stillDenoise && engine?.available && engine.denoise === false && (
+          <p className="hint hint--boxed">
+            The engine's interpreter has no OIDN runtime, so a denoised still
+            fails instead of rendering. Install it with{" "}
+            <code>pip install -e .[denoise]</code> for{" "}
+            <code>{engine.python}</code>.
+          </p>
+        )}
+        <p className="hint">
+          Both apply to sequence frames as well (they are final renders) and to
+          viewport previews never.
+        </p>
+      </Section>
+    </>
+  );
+}
+
+/** Light tab: the scene's environment — the map that lights everything. */
+export function EnvironmentSettings() {
+  const { actions, bridgeKind } = useSession();
+  const caps = useCapabilities();
+  const settings = useRenderSettings();
+  if (!settings) return null;
+  const { project, render, commit } = settings;
+  const environment = render.environment
+    ? project.assets.find((asset) => asset.id === render.environment)
+    : undefined;
+
+  return (
+    <Section title="Environment" id="light-environment">
       <Toggle
         label="Sky background"
         checked={render.sky}
@@ -525,7 +614,6 @@ function RenderSettingsEditor() {
         max={4}
         onCommit={(iblIntensity) => commit({ iblIntensity })}
       />
-      <span className="group-label">Environment (HDRI)</span>
       <div className="readout readout--compact">
         <dt>Map</dt>
         <dd>{environment?.name ?? "built-in studio sky"}</dd>
@@ -535,11 +623,7 @@ function RenderSettingsEditor() {
           type="button"
           className="button button--small"
           disabled={bridgeKind !== "tauri"}
-          title={
-            bridgeKind === "tauri"
-              ? "Pick a Radiance .hdr for image-based lighting; both Material and Rendered use it"
-              : "HDRI environments need the desktop shell"
-          }
+          title="Pick a Radiance .hdr for image-based lighting; both Material and Rendered use it"
           onClick={() => void actions.importEnvironment()}
         >
           {environment ? "Replace HDRI…" : "Add HDRI…"}
@@ -565,20 +649,19 @@ function RenderSettingsEditor() {
           commit({ environmentBackgroundIntensity })
         }
       />
-      {!environment && (
+      {!environment ? (
         <p className="hint">
-          Add an HDRI to control its backdrop brightness here.
+          The built-in sky gives the terrain its blue fill and the viewport its
+          neutral backdrop. Add an HDRI to light and backdrop your own
+          environment, and to control the backdrop brightness here.
+        </p>
+      ) : (
+        <p className="hint">
+          Rendered draws this map as its sky; Material uses it behind the scene
+          and as the light. Background intensity moves only the backdrop.
         </p>
       )}
       <CapabilityBadges rows={caps?.environment} />
-      <p className="hint">
-        Settings are stored with the project and applied to both the Rendered
-        viewport and the Render button. Solid is a neutral clay view; the
-        Material preview lights the scene with this HDRI (or the built-in studio
-        sky) plus soft sun shadows and never renders through the engine.
-        Rendered draws the same HDRI as its sky and lights with it, so the
-        backdrop intensity applies to both views.
-      </p>
     </Section>
   );
 }
@@ -880,7 +963,12 @@ function ImportedMesh({ object, asset }: { object: SceneObject; asset: Asset | u
   );
 }
 
-export function Inspector() {
+/**
+ * Object tab: the selected object's own properties. Scene-wide and
+ * light-rig settings live in their own tabs, so this stays about the thing
+ * that is selected.
+ */
+export function ObjectProperties() {
   const { state, actions } = useSession();
   if (!state) return null;
 
@@ -891,70 +979,36 @@ export function Inspector() {
 
   if (selectedObjects.length === 0) {
     return (
-      <div className="panel">
-        <header className="panel__header">
-          <h2>Project</h2>
-        </header>
-        <div className="inspector-body">
-          <Section title="Project">
-            <div className="readout">
-              <dt>Name</dt>
-              <dd>{project.name}</dd>
-              <dt>Format</dt>
-              <dd className="mono">
-                {project.format} v{project.schemaVersion}
-              </dd>
-              <dt>Project ID</dt>
-              <dd className="mono">{project.id.slice(0, 8)}</dd>
-              <dt>Scene ID</dt>
-              <dd className="mono">{project.scene.id.slice(0, 8)}</dd>
-              <dt>Revision</dt>
-              <dd className="mono">{state.revision}</dd>
-            </div>
-          </Section>
-          <Section title="Scene">
-            <div className="readout">
-              <dt>Objects</dt>
-              <dd>{project.scene.objects.length}</dd>
-              <dt>Meshes</dt>
-              <dd>{project.scene.objects.filter((o) => o.kind.type === "mesh").length}</dd>
-              <dt>Terrains</dt>
-              <dd>{project.scene.objects.filter((o) => o.kind.type === "terrain").length}</dd>
-              <dt>Cameras</dt>
-              <dd>{project.scene.objects.filter((o) => o.kind.type === "camera").length}</dd>
-              <dt>Lights</dt>
-              <dd>{project.scene.objects.filter((o) => o.kind.type === "light").length}</dd>
-            </div>
-          </Section>
-          <RenderSettingsEditor />
-          <AssetsPanel />
-          <p className="hint">Select an object to edit its properties.</p>
-        </div>
-      </div>
+      <Section title="Object" id="object-none">
+        <p className="hint">
+          Nothing is selected. Pick an object in the scene tree (or the
+          viewport) to edit its transform, material and kind-specific settings.
+        </p>
+        <p className="hint">
+          Render output and shadows are in the <strong>Render</strong> tab, the
+          sun and environment in <strong>Lighting</strong>, and the project
+          itself in <strong>Scene</strong>.
+        </p>
+      </Section>
     );
   }
 
   if (selectedObjects.length > 1) {
     return (
-      <div className="panel">
-        <header className="panel__header">
-          <h2>Inspector</h2>
-          <span className="panel__meta">{selectedObjects.length} selected</span>
-        </header>
-        <div className="inspector-body">
-          <p className="hint">
-            Multi-object editing arrives with the solid viewport in Phase 2.
-          </p>
-          <ul className="multi-list">
-            {selectedObjects.map((object) => (
-              <li key={object.id}>
-                <span>{object.name}</span>
-                <span className="mono">{objectKindLabel(object.kind)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
+      <Section title="Object" id="object-multi">
+        <p className="hint">
+          {selectedObjects.length} objects selected. Transform editing is
+          one object at a time for now.
+        </p>
+        <ul className="multi-list">
+          {selectedObjects.map((object) => (
+            <li key={object.id}>
+              <span>{object.name}</span>
+              <span className="mono">{objectKindLabel(object.kind)}</span>
+            </li>
+          ))}
+        </ul>
+      </Section>
     );
   }
 
@@ -971,64 +1025,142 @@ export function Inspector() {
       : undefined;
 
   return (
-    <div className="panel">
-      <header className="panel__header">
-        <h2>Inspector</h2>
-        <span className="panel__meta">{objectKindLabel(object.kind)}</span>
-      </header>
-      <div className="inspector-body">
-        <Section title="Identity">
-          <TextField
-            label="Name"
-            value={object.name}
-            onCommit={(name) =>
-              void actions.apply({ type: "renameObject", id: object.id, name })
-            }
-          />
-          <div className="readout readout--compact">
-            <dt>ID</dt>
-            <dd className="mono">{object.id.slice(0, 8)}</dd>
-            <dt>Parent</dt>
-            <dd className="mono">
-              {object.parent
-                ? project.scene.objects.find((entry) => entry.id === object.parent)?.name ??
-                  "missing"
-                : "scene root"}
-            </dd>
-          </div>
-        </Section>
-
-        <TransformEditor
-          object={object}
-          transform={object.transform}
-          disabled={locked || object.kind.type === "terrain"}
+    <>
+      <Section title="Identity" id="object-identity">
+        <TextField
+          label="Name"
+          value={object.name}
+          onCommit={(name) =>
+            void actions.apply({ type: "renameObject", id: object.id, name })
+          }
         />
+        <div className="readout readout--compact">
+          <dt>ID</dt>
+          <dd className="mono">{object.id.slice(0, 8)}</dd>
+          <dt>Parent</dt>
+          <dd className="mono">
+            {object.parent
+              ? project.scene.objects.find((entry) => entry.id === object.parent)?.name ??
+                "missing"
+              : "scene root"}
+          </dd>
+        </div>
+      </Section>
 
-        {meshSource?.type === "primitive" && (
-          <MeshEditor object={object} primitive={meshSource.primitive} />
-        )}
-        {/* A Studio material only reaches primitives today (the glTF loader
-            draws the file's own materials), so showing the editor for glTF
-            assets would be a control that does nothing — the shared material
-            library owns it (README "not yet implemented"). */}
-        {object.kind.type === "mesh" && meshSource?.type === "primitive" && (
-          <MaterialEditor object={object} material={object.kind.material} />
-        )}
-        {meshSource?.type === "gltf" && (
-          <ImportedMesh object={object} asset={meshAsset} />
-        )}
-        {object.kind.type === "terrain" && (
-          <TerrainEditor object={object} terrain={object.kind} asset={terrainAsset} />
-        )}
-        {object.kind.type === "camera" && (
-          <CameraEditor
-            object={object}
-            camera={object.kind}
-            active={project.scene.activeCamera === object.id}
-          />
-        )}
-        {object.kind.type === "light" && <LightEditor object={object} light={object.kind} />}
-      </div>
-    </div>
+      <TransformEditor
+        object={object}
+        transform={object.transform}
+        disabled={locked || object.kind.type === "terrain"}
+      />
+
+      {meshSource?.type === "primitive" && (
+        <MeshEditor object={object} primitive={meshSource.primitive} />
+      )}
+      {/* A Studio material only reaches primitives today (the glTF loader
+          draws the file's own materials), so showing the editor for glTF
+          assets would be a control that does nothing — the shared material
+          library owns it (README "not yet implemented"). */}
+      {object.kind.type === "mesh" && meshSource?.type === "primitive" && (
+        <MaterialEditor object={object} material={object.kind.material} />
+      )}
+      {meshSource?.type === "gltf" && (
+        <ImportedMesh object={object} asset={meshAsset} />
+      )}
+      {object.kind.type === "terrain" && (
+        <TerrainEditor object={object} terrain={object.kind} asset={terrainAsset} />
+      )}
+      {object.kind.type === "camera" && (
+        <CameraEditor
+          object={object}
+          camera={object.kind}
+          active={project.scene.activeCamera === object.id}
+        />
+      )}
+      {object.kind.type === "light" && (
+        <Section title="Light" id="object-light">
+          <p className="hint">
+            Intensity, colour, direction and solar placement are the scene's
+            lighting rig — they live in the <strong>Lighting</strong> tab so the
+            same sun is edited in one place.
+          </p>
+        </Section>
+      )}
+    </>
+  );
+}
+
+/** Scene tab: the project and scene facts, and the asset list. */
+export function ProjectFacts() {
+  const { state } = useSession();
+  const project = state?.project;
+  if (!state || !project) return null;
+
+  return (
+    <>
+      <Section title="Project" id="scene-project">
+        <div className="readout">
+          <dt>Name</dt>
+          <dd>{project.name}</dd>
+          <dt>Format</dt>
+          <dd className="mono">
+            {project.format} v{project.schemaVersion}
+          </dd>
+          <dt>Project ID</dt>
+          <dd className="mono">{project.id.slice(0, 8)}</dd>
+          <dt>Scene ID</dt>
+          <dd className="mono">{project.scene.id.slice(0, 8)}</dd>
+          <dt>Revision</dt>
+          <dd className="mono">{state.revision}</dd>
+          <dt>Saved</dt>
+          <dd>{state.dirty ? "unsaved changes" : "saved"}</dd>
+        </div>
+      </Section>
+      <Section title="Scene" id="scene-facts">
+        <div className="readout">
+          <dt>Objects</dt>
+          <dd>{project.scene.objects.length}</dd>
+          <dt>Meshes</dt>
+          <dd>{project.scene.objects.filter((o) => o.kind.type === "mesh").length}</dd>
+          <dt>Terrains</dt>
+          <dd>{project.scene.objects.filter((o) => o.kind.type === "terrain").length}</dd>
+          <dt>Cameras</dt>
+          <dd>{project.scene.objects.filter((o) => o.kind.type === "camera").length}</dd>
+          <dt>Lights</dt>
+          <dd>{project.scene.objects.filter((o) => o.kind.type === "light").length}</dd>
+        </div>
+      </Section>
+      <AssetsPanel />
+    </>
+  );
+}
+
+/** Light tab: the scene's sun, edited wherever the selection happens to be. */
+export function LightRig() {
+  const { state } = useSession();
+  const sun = state?.project.scene.objects.find(
+    (object) =>
+      object.kind.type === "light" && object.kind.kind === "directional" && object.visible,
+  );
+
+  if (!sun || sun.kind.type !== "light") {
+    return (
+      <Section title="Sun" id="light-sun">
+        <p className="hint">
+          The scene has no visible directional light. Both the preview and the
+          renderer need one: add it from the scene tree, or undo the change that
+          hid it.
+        </p>
+      </Section>
+    );
+  }
+
+  return (
+    <>
+      <LightEditor object={sun} light={sun.kind} />
+      <p className="hint">
+        This is the same sun Solid, Material and Rendered light with. Solar
+        placement writes one rotation, so a single undo puts the old sun back.
+      </p>
+    </>
   );
 }

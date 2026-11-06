@@ -684,6 +684,88 @@ kbd {
   color: var(--text);
 }
 
+/* ------------------------------------------------- properties sidebar */
+
+/* A Blender-style properties panel: a vertical tab rail on the edge that faces
+   the viewport, then collapsible sections. The rail is only as wide as an icon
+   so the panel keeps its 320px for content. */
+.props {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+}
+
+.props__rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 4px;
+  border-right: 1px solid var(--border);
+  flex: none;
+}
+
+.props__tab {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.props__tab:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.props__tab.is-active {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.props__panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+
+.props__header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+
+.props__header h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+.props__header span {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: 10.5px;
+}
+
+.props__note {
+  padding: 12px;
+}
+
+/* The workspace loses a column when the sidebar is hidden (N). */
+.workspace--no-props {
+  grid-template-columns: 272px minmax(0, 1fr);
+}
+
 /* ------------------------------------------------------------- inspector */
 
 .inspector-body {
@@ -713,6 +795,78 @@ kbd {
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
+}
+
+.inspector-section__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  cursor: pointer;
+}
+
+.inspector-section__toggle:hover h3 {
+  color: var(--text);
+}
+
+.inspector-section__toggle svg {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.inspector-section__body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inspector-section.is-collapsed {
+  gap: 0;
+}
+
+/* Segmented control: two-or-three mutually exclusive options. */
+.segmented {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: var(--bg);
+}
+
+.segmented__option {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 6px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.segmented__option:hover {
+  color: var(--text);
+}
+
+.segmented__option.is-active {
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+kbd {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--bg-elevated);
 }
 
 .field {

@@ -66,6 +66,8 @@ fn project_document_key_shape_is_stable() {
             "environmentBackgroundIntensity",
             "stillAov",
             "stillDenoise",
+            "shadowTechnique",
+            "shadowResolution",
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);

@@ -1,7 +1,7 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { EmptyState } from "./components/EmptyState";
-import { Inspector } from "./components/Inspector";
+import { SettingsSidebar } from "./components/Sidebar";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { RecoveryBanner } from "./components/RecoveryBanner";
 import { RenderQueue } from "./components/RenderQueue";
@@ -15,14 +15,20 @@ import { useSession } from "./state/session-context";
 
 export default function App() {
   const { state, error, notice, actions, timelineOpen } = useSession();
+  // Properties sidebar visibility (N). UI state, like the timeline.
+  const [sidebarOpen, setSidebarOpen] = useState(true);
 
-  useKeyboardShortcuts();
+  useKeyboardShortcuts({ sidebarOpen, setSidebarOpen });
 
   return (
     <div className="app">
       <TopBar />
 
-      <main className={`workspace ${state ? "" : "workspace--empty"}`}>
+      <main
+        className={`workspace${state ? "" : " workspace--empty"}${
+          state && !sidebarOpen ? " workspace--no-props" : ""
+        }`}
+      >
         {state ? (
           <>
             <aside className="workspace__panel workspace__panel--left">
@@ -33,9 +39,11 @@ export default function App() {
               <Viewport3D />
               <RenderQueue />
             </section>
-            <aside className="workspace__panel workspace__panel--right">
-              <Inspector />
-            </aside>
+            {sidebarOpen && (
+              <aside className="workspace__panel workspace__panel--right">
+                <SettingsSidebar />
+              </aside>
+            )}
             {timelineOpen && <Timeline />}
           </>
         ) : (
@@ -69,7 +77,13 @@ export default function App() {
   );
 }
 
-function useKeyboardShortcuts() {
+function useKeyboardShortcuts({
+  sidebarOpen,
+  setSidebarOpen,
+}: {
+  sidebarOpen: boolean;
+  setSidebarOpen: (open: boolean) => void;
+}) {
   const {
     actions,
     setTool,
@@ -111,6 +125,11 @@ function useKeyboardShortcuts() {
         }
         if (key === "t") {
           setTimelineOpen(!timelineOpen);
+          return;
+        }
+        if (key === "n") {
+          // Blender's properties sidebar toggle.
+          setSidebarOpen(!sidebarOpen);
           return;
         }
         // Blender-style manipulation tools and object actions.
@@ -170,5 +189,14 @@ function useKeyboardShortcuts() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [actions, cameraView, setCameraView, setTool, timelineOpen, setTimelineOpen]);
+  }, [
+    actions,
+    cameraView,
+    setCameraView,
+    setTool,
+    timelineOpen,
+    setTimelineOpen,
+    sidebarOpen,
+    setSidebarOpen,
+  ]);
 }
