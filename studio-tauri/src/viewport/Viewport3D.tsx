@@ -1180,8 +1180,8 @@ export function Viewport3D() {
             setProblem(null);
             applyTerrainShading(mesh, viewportModeRef.current === "solid");
             // The drape is the terrain's albedo: Material shows it, Solid
-            // stays clay. The shell decodes the raster; the browser preview has
-            // no file access and shows clay in both.
+            // stays clay. The shell decodes the raster; a scene without an
+            // overlay stays clay in both.
             if (overlay && overlayAsset?.path && bridge.kind === "tauri") {
               loadOverlayTexture(overlayAsset.path)
                 .then((texture) => {

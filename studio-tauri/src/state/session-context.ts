@@ -20,7 +20,7 @@ import type {
 } from "../bridge/types";
 
 export interface SessionApi {
-  bridgeKind: "tauri" | "mock";
+  bridgeKind: "tauri" | "browser";
   info: ShellInfo | null;
   state: SessionState | null;
   autosave: AutosaveStatus | null;

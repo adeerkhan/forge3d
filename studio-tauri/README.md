@@ -95,7 +95,7 @@ studio-tauri/
 │   ├── src/session.rs         Mutex around the core session
 │   └── src/lib.rs             App wiring + background autosave thread
 └── src/                       React + TypeScript UI
-    ├── bridge/                Tauri IPC, with a browser preview harness
+    ├── bridge/                Tauri IPC (+ a "start the shell" page outside it)
     ├── components/            Top bar, tree, inspector, toolbar, timeline
     ├── state/session.tsx      Session actions + active tool/space
     ├── state/playback.ts      Tested timeline playback clock (no React)
@@ -168,7 +168,7 @@ On Debian/Ubuntu the equivalents are `libwebkit2gtk-4.1-dev`,
 npm install          # once
 npm run tauri:dev    # the real desktop app (Rust + webview)
 npm run tauri:build  # desktop bundles (deb/rpm/appimage)
-npm run dev          # UI only, in a browser, with an in-memory preview harness
+npm run dev          # UI only; the browser shows a "start the shell" notice
 npm run build        # typecheck + production bundle of the UI
 ```
 
@@ -564,15 +564,19 @@ development, cartography, geo data, meshes, bundles and evidence — is in
 It lists the actual engine APIs behind each phase and the readiness of each
 (including the layers the engine itself still marks underdeveloped).
 
-## Browser preview harness
+## No browser fallback
 
-`src/bridge/` selects the Tauri bridge when `__TAURI_INTERNALS__` exists, and
-otherwise an in-memory mock with the same command semantics. That keeps `npm run
-dev` useful for UI work on machines without webkit. The mock implements no file
-I/O, no recovery, no glTF import, and no frame export — anything that matters is
-mirrored by a Rust test (`crates/studio-core/tests/phase6.rs` covers the timeline;
-the viewport clock and camera math have dependency-free `node` tests run by
-`npm test`).
+`src/bridge/` speaks Tauri IPC when `__TAURI_INTERNALS__` exists; anywhere else
+the app renders a "start the desktop shell" notice instead of mounting the
+editor. There used to be an in-memory mock of the whole command layer so
+`npm run dev` could be used for UI work, but it was a second, untested
+implementation of `studio-core` (54 command cases, its own undo/redo and
+timeline sampling) and it drifted silently. `npm run dev` now only serves the
+UI bundle; visual checks happen in the Tauri window.
+
+The logic that used to be mirrored there is covered where it lives: the timeline
+by `crates/studio-core/tests/phase6.rs`, and the viewport clock and camera math
+by the dependency-free `node` tests `npm test` runs.
 
 ## Not yet implemented (deliberately)
 

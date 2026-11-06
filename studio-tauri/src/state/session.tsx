@@ -321,7 +321,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const importMesh = useCallback(async () => {
     if (bridge.kind !== "tauri") {
-      fail(new Error("glTF import needs the desktop shell: the browser preview cannot read files"));
+      fail(new Error("glTF import needs the desktop shell, which owns file access"));
       return;
     }
     try {

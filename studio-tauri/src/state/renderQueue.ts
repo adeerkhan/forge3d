@@ -24,7 +24,7 @@ export interface RenderJob {
   /** Frames finished so far. */
   done: number;
   status: RenderJobStatus;
-  /** File for a still, directory for a sequence. Empty in the browser preview. */
+  /** File for a still, directory for a sequence. */
   output: string;
   error: string | null;
 }

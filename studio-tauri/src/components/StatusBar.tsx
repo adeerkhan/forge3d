@@ -10,44 +10,40 @@ function time(unixMs: number | null | undefined): string {
 }
 
 export function StatusBar() {
-  const { state, autosave, recovery, bridgeKind, busy, engine } = useSession();
+  const { state, autosave, recovery, busy, engine } = useSession();
 
   const objects = state?.project.scene.objects.length ?? 0;
   const selected = state?.project.selection.length ?? 0;
 
   return (
     <footer className="statusbar">
-      <span className={`status-chip status-chip--${bridgeKind}`}>
-        {bridgeKind === "tauri" ? "Tauri shell" : "Preview harness"}
+      <span className="status-chip status-chip--tauri">Tauri shell</span>
+      <span
+        className={`status-engine ${engine?.available ? "is-ready" : ""}`}
+        title={[
+          engine?.detail,
+          engine?.backend && engine.adapter
+            ? `${engine.backend} · ${engine.adapter}`
+            : null,
+          engine?.software
+            ? "software fallback: the engine did not get a GPU adapter"
+            : null,
+        ]
+          .filter(Boolean)
+          .join("\n") ?? "Probing for the Forge3D engine…"}
+      >
+        {engine
+          ? engine.available
+            ? `forge3d ${engine.packageVersion ?? "?"}${
+                engine.backend ? ` · ${engine.backend}` : ""
+              }${
+                engine.adapter
+                  ? ` · ${engine.adapter.replace(/^NVIDIA GeForce\s*/, "").slice(0, 44)}`
+                  : ""
+              }${engine.software ? " · software" : ""}`
+            : "engine unavailable"
+          : "probing engine…"}
       </span>
-      {bridgeKind === "tauri" && (
-        <span
-          className={`status-engine ${engine?.available ? "is-ready" : ""}`}
-          title={[
-            engine?.detail,
-            engine?.backend && engine.adapter
-              ? `${engine.backend} · ${engine.adapter}`
-              : null,
-            engine?.software
-              ? "software fallback: the engine did not get a GPU adapter"
-              : null,
-          ]
-            .filter(Boolean)
-            .join("\n") ?? "Probing for the Forge3D engine…"}
-        >
-          {engine
-            ? engine.available
-              ? `forge3d ${engine.packageVersion ?? "?"}${
-                  engine.backend ? ` · ${engine.backend}` : ""
-                }${
-                  engine.adapter
-                    ? ` · ${engine.adapter.replace(/^NVIDIA GeForce\s*/, "").slice(0, 44)}`
-                    : ""
-                }${engine.software ? " · software" : ""}`
-              : "engine unavailable"
-            : "probing engine…"}
-        </span>
-      )}
       {state ? (
         <>
           <span>{objects} objects</span>

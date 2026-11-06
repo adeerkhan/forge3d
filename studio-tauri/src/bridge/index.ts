@@ -1,11 +1,7 @@
 /**
- * The bridge between the React UI and the Rust shell.
- *
- * Inside Tauri this is `invoke`. In a browser (`npm run dev` without Tauri, or
- * the visual harness) it falls back to an in-memory mock so the UI can be
- * developed and reviewed without a webkit runtime. The mock is a preview
- * harness, never the source of truth: it is selected only when the Tauri
- * internals are absent.
+ * The bridge between the React UI and the Rust shell: `invoke`, one function
+ * per command. Outside the desktop shell there is no bridge to speak of — the
+ * app shows a "start the shell" notice instead of mounting the editor.
  */
 
 import type {
@@ -32,10 +28,9 @@ import type {
 } from "./types";
 
 export interface StudioBridge {
-  readonly kind: "tauri" | "mock";
+  readonly kind: "tauri" | "browser";
   info(): Promise<ShellInfo>;
-  /** Per-parameter capability table; `null` in the browser preview (the mock
-   *  has no shell — the Rust table is covered by studio-core tests). */
+  /** Per-parameter capability table, from studio-core. */
   capabilityTable(): Promise<CapabilityTable | null>;
   state(): Promise<SessionState | null>;
   newProject(name?: string | null, preset?: string | null): Promise<SessionState>;

@@ -1641,11 +1641,6 @@ kbd {
   border-color: rgba(94, 192, 138, 0.35);
 }
 
-.status-chip--mock {
-  color: var(--accent);
-  border-color: rgba(240, 169, 74, 0.35);
-}
-
 .status-dirty {
   color: var(--accent);
 }

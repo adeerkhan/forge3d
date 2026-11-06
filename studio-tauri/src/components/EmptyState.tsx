@@ -2,7 +2,7 @@ import { useSession } from "../state/session-context";
 import { FileIcon, FolderIcon } from "./icons";
 
 export function EmptyState() {
-  const { actions, info, bridgeKind } = useSession();
+  const { actions, info } = useSession();
 
   return (
     <div className="empty">
@@ -44,16 +44,9 @@ export function EmptyState() {
           </div>
           <div>
             <dt>Bridge</dt>
-            <dd>{bridgeKind === "tauri" ? "Tauri IPC" : "browser preview"}</dd>
+            <dd>Tauri IPC</dd>
           </div>
         </dl>
-
-        {bridgeKind === "mock" && (
-          <p className="hint hint--boxed">
-            Running in the browser preview: projects live in memory and no files
-            are written. Start the Tauri shell for real save, open, and recovery.
-          </p>
-        )}
       </div>
     </div>
   );

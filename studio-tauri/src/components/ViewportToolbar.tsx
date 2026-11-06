@@ -38,7 +38,6 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
     setSpace,
     cameraView,
     setCameraView,
-    bridgeKind,
     render,
   } = useSession();
   const [addOpen, setAddOpen] = useState(false);
@@ -64,7 +63,6 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
   const selection = state?.project.selection ?? [];
   const hasSelection = selection.length > 0;
   const canTransform = hasSelection;
-  const importing = bridgeKind === "mock";
 
   return (
     <div className="viewport-toolbar">
@@ -140,12 +138,7 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
               <button
                 type="button"
                 role="menuitem"
-                disabled={importing}
-                title={
-                  importing
-                    ? "DEM import needs the desktop shell"
-                    : "Add the scene terrain from a GeoTIFF DEM — or replace the DEM if one exists"
-                }
+                title="Add the scene terrain from a GeoTIFF DEM — or replace the DEM if one exists"
                 onClick={() => {
                   setAddOpen(false);
                   void actions.importTerrainDem();
@@ -156,12 +149,7 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
               <button
                 type="button"
                 role="menuitem"
-                disabled={importing}
-                title={
-                  importing
-                    ? "glTF import needs the desktop shell"
-                    : "Import a .gltf or .glb file"
-                }
+                title="Import a .gltf or .glb file"
                 onClick={() => {
                   setAddOpen(false);
                   void actions.importMesh();
