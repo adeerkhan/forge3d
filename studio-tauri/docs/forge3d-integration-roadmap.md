@@ -21,6 +21,7 @@ be a payload field: vector layers and meshes.
 | Terrain stills, Rendered frames, animation export | done |
 | Timeline drawer, render queue, asset integrity, samples | done |
 | Sun from date/time/location (increment 9.0) | done |
+| Engine backend/adapter in the probe (first half of 8.0) | done |
 | Everything below (§3–§6, except 9.0) | **not started** |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
@@ -235,8 +236,8 @@ items gated on real requests.
 
 1. ~~`feat(studio): sun from date/time/location`~~ — **done**: `solar_position`
    one-shot, `sun_rotation` + ephemeris/round-trip tests, light inspector group.
-2. `feat(studio): engine facts in the probe` — `PROBE_SCRIPT`, `EngineStatus`,
-   `types.ts`, `StatusBar.tsx`; fixture test.
+2. `feat(studio): engine facts in the probe` — backend/adapter shipped; the
+   granted-features snapshot and gating controls are still open.
 3. `feat(studio): sky model and atmosphere settings` — §2 recipe for the four
    sky fields; payload + Python validation tests.
 

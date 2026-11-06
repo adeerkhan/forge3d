@@ -318,7 +318,15 @@ horizon is applied and reported (`daytime: false`), never clamped.
 Studio probes a Python interpreter for `import forge3d` (repo `.venv` first, then
 `python3`, `FORGE3D_STUDIO_PYTHON` to override) and reports the result in the
 status bar — `forge3d 1.47.1` when the renderer can run, `engine unavailable` with
-the reason when it cannot. There is no separate viewer window any more: opening
+the reason when it cannot. The tooltip also names the wgpu backend and adapter
+(`Vulkan · Intel(R) Graphics …`), which is the GPU actually rendering.
+
+**The extension must be built from this checkout.** A stale
+`python/forge3d/_forge3d.abi3.so` is what produces errors like
+`sky.model must be preetham, hosek-wilkie, approximate, or aether; got "hdri"`:
+the Python source accepts a setting the native binary predates. Rebuild with
+`maturin develop --release` (or copy `target/release/libforge3d.so` over the
+`.so`) and restart the shell. There is no separate viewer window any more: opening
 one was a Phase 3 detour, and it has been removed along with its workspace tab.
 The capability report it produced still exists in `workspace.rs`, where it feeds
 the render handoff.
@@ -357,6 +365,11 @@ the render handoff.
   lighting share the convention, so the visible sky matches the light; fixing
   the orientation itself changes every IBL-lit frame and the pinned terrain
   shader hash.
+- **Some webviews cannot filter half-float textures** (WebKit/ANGLE), which
+  three rejects with `INVALID_OPERATION: … sampler type`. The Material preview
+  probes once per change and degrades visibly instead: hard shadows → no IBL →
+  no shadows, each with a note in the viewport. The HDRI backdrop survives as an
+  8-bit copy; only the image-based lighting is dropped.
 - **HDRI environments are Radiance `.hdr` only.** Both consumers read RGBE
   (three's `HDRLoader` and the engine's `IBL.from_hdr`); `.exr` is rejected with
   a specific message rather than silently mis-lighting. The viewport reads the

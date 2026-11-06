@@ -52,6 +52,13 @@ def main():
         print(json.dumps({"ok": False, "detail": "import forge3d failed: %s" % (exc,)}))
         return
     version = getattr(forge3d, "__version__", "unknown")
+    backend = adapter = None
+    try:
+        probe = forge3d.device_probe()
+        backend = probe.get("backend")
+        adapter = probe.get("adapter_name")
+    except Exception:
+        pass
     try:
         from forge3d._viewer_binary import find_viewer_binary
         import forge3d.viewer as viewer
@@ -60,7 +67,14 @@ def main():
     except Exception as exc:
         binary = None
         detail = "engine ready (viewer binary not found — optional: %s)" % (exc,)
-    print(json.dumps({"ok": True, "version": version, "viewer": binary, "detail": detail}))
+    print(json.dumps({
+        "ok": True,
+        "version": version,
+        "viewer": binary,
+        "detail": detail,
+        "backend": backend,
+        "adapter": adapter,
+    }))
 
 main()
 "#;
@@ -159,6 +173,10 @@ pub struct EngineStatus {
     pub python: String,
     pub package_version: Option<String>,
     pub viewer_binary: Option<String>,
+    /// wgpu backend the engine selected, when the probe could reach the GPU.
+    pub backend: Option<String>,
+    /// Adapter name — the GPU actually rendering.
+    pub adapter: Option<String>,
     /// Always present: what is missing, or what is ready.
     pub detail: String,
 }
@@ -221,6 +239,8 @@ impl Forge3dState {
                             python: python.clone(),
                             package_version: None,
                             viewer_binary: None,
+                            backend: None,
+                            adapter: None,
                             detail,
                         });
                     }
@@ -233,6 +253,8 @@ impl Forge3dState {
             python: "python3".to_owned(),
             package_version: None,
             viewer_binary: None,
+            backend: None,
+            adapter: None,
             detail: "no Python interpreter was found".to_owned(),
         });
         if let Ok(mut guard) = self.engine.lock() {
@@ -754,6 +776,14 @@ fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
         viewer_binary: value
             .get("viewer")
             .and_then(|viewer| viewer.as_str())
+            .map(str::to_owned),
+        backend: value
+            .get("backend")
+            .and_then(|backend| backend.as_str())
+            .map(str::to_owned),
+        adapter: value
+            .get("adapter")
+            .and_then(|adapter| adapter.as_str())
             .map(str::to_owned),
         detail: value
             .get("detail")

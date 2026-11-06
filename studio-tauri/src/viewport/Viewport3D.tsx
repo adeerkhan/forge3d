@@ -44,8 +44,11 @@ type Quaternion = [number, number, number, number];
 /** A project HDRI decoded into an equirect source plus its prefiltered PMREM. */
 interface LoadedEnvironment {
   path: string;
-  /** Equirectangular linear texture — doubles as the Material background. */
+  /** Equirectangular half-float texture — the PMREM input. */
   source: THREE.Texture;
+  /** Display-referred 8-bit copy used as the backdrop when the GPU cannot
+   *  filter half-float textures (some WebKit/ANGLE webviews). */
+  background: THREE.Texture;
   /** PMREM output: what `scene.environment` wants. */
   environment: THREE.Texture;
   target: THREE.WebGLRenderTarget;
@@ -73,6 +76,13 @@ interface Runtime {
   /** True when `environment` is a project HDRI rather than the studio sky. */
   customEnvironment: boolean;
   pmrem: THREE.PMREMGenerator | null;
+  /** GPU capability probe: 0 = full quality, 1 = hard shadows, 2 = no IBL,
+   *  3 = no shadows. Raised one step at a time when `gl.getError()` reports a
+   *  rejected draw (WebKit/ANGLE rejects three's shadow depth textures or
+   *  half-float filtering). */
+  glStep: number;
+  /** False until the probe has seen a clean frame after the last downgrade. */
+  glProbed: boolean;
   /** Latest selection, so the canvas click handler is not a stale closure. */
   selection: string[];
 }
@@ -84,6 +94,23 @@ interface ShadingRecord {
   /** Terrain only: decoded albedo drape and its opacity. */
   drape?: THREE.Texture | null;
   drapeOpacity?: number;
+}
+
+/** Clamp half-float RGBA data to 8-bit linear values for a safe backdrop. */
+function clampHalfFloatToByte(
+  data: Uint16Array,
+  width: number,
+  height: number,
+): Uint8Array {
+  const out = new Uint8Array(width * height * 4);
+  for (let index = 0; index < width * height; index += 1) {
+    for (let channel = 0; channel < 4; channel += 1) {
+      const value = THREE.DataUtils.fromHalfFloat(data[index * 4 + channel]);
+      const clamped = Math.min(1, Math.max(0, value));
+      out[index * 4 + channel] = Math.round(clamped * 255);
+    }
+  }
+  return out;
 }
 
 function clayMaterial(side: THREE.Side = THREE.FrontSide): THREE.MeshStandardMaterial {
@@ -209,14 +236,62 @@ function applyShading(
  * Material preview — or the built-in studio sky. The project's IBL intensity
  * scales the light; the fallback is additionally dimmed so it reads as fill.
  */
+function recompileMaterials(runtime: Runtime): void {
+  for (const group of runtime.objects.values()) {
+    group.traverse((node) => {
+      const mesh = node as THREE.Mesh;
+      const material = mesh.material as THREE.Material | THREE.Material[] | undefined;
+      if (Array.isArray(material)) material.forEach((entry) => (entry.needsUpdate = true));
+      else if (material) material.needsUpdate = true;
+    });
+  }
+}
+
+/**
+ * The GPU rejected a draw: three's shadow depth texture with a comparison
+ * sampler, or half-float filtering (WebKit/ANGLE). Degrade one step at a time
+ * and say so in the viewport instead of spamming INVALID_OPERATION forever.
+ * Returns the note to show.
+ */
+function applyGpuStep(runtime: Runtime): string {
+  runtime.glStep += 1;
+  const step = runtime.glStep;
+  if (step >= 1) {
+    runtime.renderer.shadowMap.type = THREE.BasicShadowMap;
+    recompileMaterials(runtime);
+  }
+  if (step >= 2) {
+    // Keep the 8-bit backdrop; drop only the IBL, which needs the half-float
+    // PMREM output the platform cannot sample.
+    runtime.environment = null;
+    runtime.customEnvironment = false;
+    runtime.scene.environment = null;
+  }
+  if (step >= 3) {
+    runtime.sun.castShadow = false;
+    for (const group of runtime.objects.values()) {
+      group.traverse((node) => {
+        const mesh = node as THREE.Mesh;
+        if (mesh.isMesh) mesh.castShadow = false;
+      });
+    }
+  }
+  return step === 1
+    ? "GPU limit: hard shadows"
+    : step === 2
+      ? "GPU limit: no image-based lighting"
+      : "GPU limit: shadows off";
+}
+
 function applyEnvironment(
   runtime: Runtime,
   solid: boolean,
   iblIntensity: number,
   backgroundIntensity: number,
 ): void {
-  runtime.scene.environment = solid ? null : runtime.environment;
-  runtime.scene.environmentIntensity = solid
+  const noIbl = solid || runtime.glStep >= 2;
+  runtime.scene.environment = noIbl ? null : runtime.environment;
+  runtime.scene.environmentIntensity = noIbl
     ? 0
     : iblIntensity * (runtime.customEnvironment ? 1 : STUDIO_ENVIRONMENT_INTENSITY);
   const backdrop = runtime.environmentBackground;
@@ -458,6 +533,8 @@ export function Viewport3D() {
   const [quaternion, setQuaternion] = useState<Quaternion>([0, 0, 0, 1]);
   const [size, setSize] = useState({ width: 960, height: 600 });
   const [problem, setProblem] = useState<string | null>(null);
+  /** Shown when the GPU probe had to downgrade a feature (see Runtime.glStep). */
+  const [gpuNote, setGpuNote] = useState<string | null>(null);
   const savedView = useRef<{
     position: THREE.Vector3;
     quaternion: THREE.Quaternion;
@@ -582,8 +659,26 @@ export function Viewport3D() {
       source.needsUpdate = true;
       // PMREM is what `scene.environment` expects; the source doubles as the
       // Material background (PMREM output cannot be drawn as a skybox).
+      // A display-referred copy for the backdrop: some webviews reject a
+      // half-float texture when it is filtered, and the background is a
+      // fallback path anyway (values above 1 clip to white).
+      const background = new THREE.DataTexture(
+        // HDRLoader defaults to HalfFloatType; that is what the clamp reads.
+        clampHalfFloatToByte(texData.data as Uint16Array, texData.width, texData.height),
+        texData.width,
+        texData.height,
+        THREE.RGBAFormat,
+        THREE.UnsignedByteType,
+      );
+      background.mapping = THREE.EquirectangularReflectionMapping;
+      background.colorSpace = THREE.LinearSRGBColorSpace;
+      background.minFilter = THREE.LinearFilter;
+      background.magFilter = THREE.LinearFilter;
+      background.generateMipmaps = false;
+      background.flipY = source.flipY;
+      background.needsUpdate = true;
       const target = runtime.pmrem.fromEquirectangular(source);
-      return { path, source, environment: target.texture, target };
+      return { path, source, background, environment: target.texture, target };
     },
     [],
   );
@@ -692,6 +787,8 @@ export function Viewport3D() {
       environmentBackground: null,
       customEnvironment: false,
       pmrem,
+      glStep: 0,
+      glProbed: false,
       selection: [],
     };
     runtimeRef.current = runtime;
@@ -854,6 +951,17 @@ export function Viewport3D() {
         setQuaternion(lastQuaternion);
       }
       renderer.render(scene, camera);
+      // Some webviews reject the first draw of a shadow/float-texture pass.
+      // Probe once per change; a rejected draw downgrades one step and the
+      // next frame re-probes, so the error cannot repeat forever.
+      if (!runtime.glProbed) {
+        runtime.glProbed = true;
+        const error = renderer.getContext().getError();
+        if (error !== renderer.getContext().NO_ERROR) {
+          setGpuNote(applyGpuStep(runtime));
+          runtime.glProbed = false;
+        }
+      }
     };
     tick();
 
@@ -1118,7 +1226,7 @@ export function Viewport3D() {
       project.render.iblIntensity,
       project.render.environmentBackgroundIntensity,
     );
-    runtime.sun.castShadow = !solidView;
+    runtime.sun.castShadow = !solidView && runtime.glStep < 3;
     runtime.hemi.intensity = solidView ? 0.28 : 0.12;
 
     runtime.grid.visible = project.viewport.gridVisible;
@@ -1195,6 +1303,7 @@ export function Viewport3D() {
       const previous = environmentRef.current;
       environmentRef.current = null;
       previous?.source.dispose();
+      previous?.background.dispose();
       previous?.target.dispose();
       runtime.environment = runtime.studioEnvironment;
       runtime.environmentBackground = null;
@@ -1213,11 +1322,14 @@ export function Viewport3D() {
         const previous = environmentRef.current;
         environmentRef.current = loaded;
         runtime.environment = loaded.environment;
-        runtime.environmentBackground = loaded.source;
+        runtime.environmentBackground = loaded.background;
         runtime.customEnvironment = true;
+        // The PMREM output is new; let the probe see this texture.
+        runtime.glProbed = false;
         apply();
         if (previous && previous.path !== loaded.path) {
           previous.source.dispose();
+          previous.background.dispose();
           previous.target.dispose();
         }
         setProblem((current) =>
@@ -1241,6 +1353,7 @@ export function Viewport3D() {
       const custom = environmentRef.current;
       environmentRef.current = null;
       custom?.source.dispose();
+      custom?.background.dispose();
       custom?.target.dispose();
     },
     [],
@@ -1551,8 +1664,9 @@ export function Viewport3D() {
         </span>
         <span className="viewport-camera">
           {camera ? `Active camera: ${camera.name}` : "No active camera"}
-          {mode === "material" ? " · Material preview" : ""}
+          {mode === "material" ? " · three.js preview" : mode === "rendered" ? " · Forge3D engine" : ""}
         </span>
+        {gpuNote && <span className="viewport-gpu-note">{gpuNote}</span>}
       </div>
       {problem && !renderedMode && <div className="viewport-problem">{problem}</div>}
       {renderedMode && render.error && (

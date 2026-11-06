@@ -1952,3 +1952,9 @@ kbd {
   font-size: 10.5px;
   color: var(--text-dim);
 }
+
+/* GPU probe downgrade note (see Runtime.glStep in Viewport3D). */
+.viewport-gpu-note {
+  color: var(--accent);
+  font-size: 10.5px;
+}

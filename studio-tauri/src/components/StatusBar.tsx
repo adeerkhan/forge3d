@@ -23,7 +23,14 @@ export function StatusBar() {
       {bridgeKind === "tauri" && (
         <span
           className={`status-engine ${engine?.available ? "is-ready" : ""}`}
-          title={engine?.detail ?? "Probing for the Forge3D engine…"}
+          title={[
+            engine?.detail,
+            engine?.backend && engine.adapter
+              ? `${engine.backend} · ${engine.adapter}`
+              : null,
+          ]
+            .filter(Boolean)
+            .join("\n") ?? "Probing for the Forge3D engine…"}
         >
           {engine
             ? engine.available

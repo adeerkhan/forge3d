@@ -408,6 +408,9 @@ export interface EngineStatus {
   python: string;
   packageVersion: string | null;
   viewerBinary: string | null;
+  /** wgpu backend and GPU adapter, when the probe reached the device. */
+  backend: string | null;
+  adapter: string | null;
   detail: string;
 }
 

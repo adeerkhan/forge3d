@@ -869,6 +869,8 @@ export function createMockBridge(): StudioBridge {
       python: "python3",
       packageVersion: null,
       viewerBinary: null,
+      backend: null,
+      adapter: null,
       detail:
         "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),
