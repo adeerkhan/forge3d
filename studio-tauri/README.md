@@ -259,12 +259,10 @@ When an HDRI is set and **Sky background** is on, Rendered draws it as the sky
 too: the terrain renderer samples the same environment map as its background
 (`SkySettings(model="hdri")`), with **Background intensity** as the sky
 exposure. Without an HDRI the engine's analytic Hosek-Wilkie sky is used. The
-environment axes follow the engine's existing IBL convention (Y-up environment,
-Z-up terrain), so a map with an obvious horizon can appear rotated relative to
-the viewport; the background and the terrain lighting use the same convention,
-so they stay consistent with each other. Reorienting both is an engine-wide
-change (it touches the pinned terrain shader hash and the golden frames), not a
-Studio setting.
+sky pass and the environment cubemaps share one frame (Y-up, +Z south), so the
+background, the IBL lighting and the Material preview's orientation all agree.
+Z-up terrain directions are permuted into that frame for the sky pass only; the
+terrain shading and its Z-up hash are untouched.
 
 ## The default scene is a DEM (Phase 4)
 
@@ -359,12 +357,16 @@ the render handoff.
   changes (throttled), not per playback frame. Use **Export frames…** for the
   sequence. Entering Rendered drops the previous frame, so a stale view never
   covers the scene while the new one renders.
-- **The HDRI sky uses the engine's environment orientation.** The renderer's
-  IBL axes are Y-up while terrain is Z-up, so a sharp horizon in an HDRI can
-  look rotated by 90° relative to the viewport. The background and the IBL
-  lighting share the convention, so the visible sky matches the light; fixing
-  the orientation itself changes every IBL-lit frame and the pinned terrain
-  shader hash.
+- **Rendered re-renders on orbit/zoom and edits.** The previous frame stays on
+  screen while the new one renders (with an "Updating…" chip); only Entering
+  Rendered drops the frame outright. The viewport Size control replaces the old
+  preview scale selector and caps at 4096 px on the longest side *without*
+  changing the aspect.
+- **The Material preview and Rendered share the HDRI frame** (Y-up, +Z south).
+  The terrain renderer forwards Z-up terrain directions in that frame for the
+  sky pass, and the sun swizzle maps east/north/up → east/up/south, so the sky
+  is upright for both `mesh:zup` and `mesh:zup:north` modes. The terrain
+  shading is unchanged (its Z-up hash stays).
 - **Some webviews cannot filter half-float textures** (WebKit/ANGLE), which
   three rejects with `INVALID_OPERATION: … sampler type`. The Material preview
   probes once per change and degrades visibly instead: hard shadows → no IBL →

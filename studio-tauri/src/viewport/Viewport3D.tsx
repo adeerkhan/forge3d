@@ -1416,8 +1416,45 @@ export function Viewport3D() {
   const terrainObject = state?.project.scene.objects.find((object) => object.kind.type === "terrain");
   const demDims = terrainObject?.kind.type === "terrain" ? terrainObject.kind.dimensions : null;
 
+  const renderScaleOptions: Array<{ value: RenderScale; label: string }> = [
+    { value: "1", label: "1× viewport" },
+    { value: "2", label: "2× viewport" },
+    { value: "4", label: "4× viewport" },
+    ...(demDims
+      ? [{ value: "dem" as RenderScale, label: `DEM (${demDims[0]} × ${demDims[1]})` }]
+      : []),
+    {
+      value: "project",
+      label: `Project (${state?.project.render.width ?? 1920} × ${state?.project.render.height ?? 1080})`,
+    },
+  ];
+  const activeScaleLabel =
+    renderScaleOptions.find((option) => option.value === renderScale)?.label ?? "1× viewport";
+
+  // An in-app menu — never the native `<select>` popup, which Gdk maps as a
+  // separate window (the "popup with a non-topmost parent" warning, and it
+  // lands behind the shell window on some WMs).
+  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
+  const sizeMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!sizeMenuOpen) return;
+    const close = (event: MouseEvent) => {
+      if (!sizeMenuRef.current?.contains(event.target as Node)) setSizeMenuOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSizeMenuOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", escape);
+    };
+  }, [sizeMenuOpen]);
+
   /** Frame size for a Rendered viewport frame. No hidden multipliers — what
-   *  the selector shows is the size the engine renders. */
+   *  the selector shows is the size the engine renders. The 4096 cap scales
+   *  the whole frame down uniformly so the aspect never changes. */
   const requestSize = useCallback(() => {
     const base =
       renderScale === "project"
@@ -1426,9 +1463,11 @@ export function Viewport3D() {
           ? { width: demDims[0], height: demDims[1] }
           : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
     const factor = renderScale === "project" || renderScale === "dem" ? 1 : Number(renderScale);
+    const cap = 4096;
+    const shrink = Math.min(1, cap / (base.width * factor), cap / (base.height * factor));
     return {
-      width: Math.min(4096, Math.max(320, Math.round(base.width * factor))),
-      height: Math.min(4096, Math.max(240, Math.round(base.height * factor))),
+      width: Math.max(64, Math.round(base.width * factor * shrink)),
+      height: Math.max(64, Math.round(base.height * factor * shrink)),
     };
   }, [demDims, renderScale, size.height, size.width, state?.project.render.height, state?.project.render.width]);
   // Only Rendered composes an engine frame. Solid and Material are the live
@@ -1592,12 +1631,16 @@ export function Viewport3D() {
     <div className="viewport" ref={containerRef}>
       <canvas ref={canvasRef} className="viewport-canvas" />
       {renderedMode && (
-        <div className={`viewport-rendered ${render.frame && !render.busy ? "has-frame" : ""}`}>
-          {render.frame && !render.busy && (
+        <div className={`viewport-rendered ${render.frame ? "has-frame" : ""}`}>
+          {render.frame && (
             <img
               src={`data:image/png;base64,${render.frame.png}`}
               alt="Forge3D render of the current scene"
+              className={render.busy ? "is-updating" : undefined}
             />
+          )}
+          {render.busy && render.frame && (
+            <div className="viewport-rendered__updating">Updating…</div>
           )}
           {unrendered.length > 0 && (
             <div className="viewport-rendered__notice">
@@ -1609,30 +1652,45 @@ export function Viewport3D() {
           <div className="viewport-rendered__bar">
             <span>
               {render.busy
-                ? "Rendering with the Forge3D terrain pipeline…"
+                ? render.frame
+                  ? `Updating… (showing ${render.frame.width} × ${render.frame.height})`
+                  : "Rendering with the Forge3D terrain pipeline…"
                 : render.frame
                   ? `${render.frame.width} × ${render.frame.height} · ${(render.frame.ms / 1000).toFixed(2)} s`
                   : "No frame rendered yet"}
             </span>
-            <label className="viewport-rendered__scale">
+            <div className="viewport-rendered__scale" ref={sizeMenuRef}>
               <span>Size</span>
-              <select
-                className="input input--select"
-                value={renderScale}
+              <button
+                type="button"
+                className="viewport-rendered__scale-button"
+                aria-haspopup="menu"
+                aria-expanded={sizeMenuOpen}
                 title="Viewport frames render at this size; DEM renders at the DEM's own pixels"
-                onChange={(event) => setRenderScale(event.target.value as RenderScale)}
+                onClick={() => setSizeMenuOpen((open) => !open)}
               >
-                <option value="1">1× viewport</option>
-                <option value="2">2× viewport</option>
-                <option value="4">4× viewport</option>
-                {demDims && (
-                  <option value="dem">DEM ({demDims[0]} × {demDims[1]})</option>
-                )}
-                <option value="project">
-                  Project ({state?.project.render.width ?? 1920} × {state?.project.render.height ?? 1080})
-                </option>
-              </select>
-            </label>
+                {activeScaleLabel}
+              </button>
+              {sizeMenuOpen && (
+                <div className="add-menu__dropdown viewport-rendered__menu" role="menu">
+                  {renderScaleOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={renderScale === option.value}
+                      onClick={() => {
+                        setSizeMenuOpen(false);
+                        setRenderScale(option.value);
+                      }}
+                    >
+                      {renderScale === option.value ? "✓ " : ""}
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
               type="button"
               className="button button--small"
