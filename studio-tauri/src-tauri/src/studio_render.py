@@ -57,28 +57,48 @@ def fail(message: str) -> None:
     emit({"event": "error", "message": message})
 
 
-def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
-    """A neutral studio sky.
+def srgb_to_linear(values: np.ndarray) -> np.ndarray:
+    """Decode sRGB-encoded floats in [0, 1] to linear radiance."""
+    v = np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4).astype(np.float32)
 
-    The repository ships no HDR environment and the renderer requires one, so the
-    service writes its own: predictable, licence-free, and identical every run.
+
+def linear_to_srgb(values: np.ndarray) -> np.ndarray:
+    """Encode linear radiance in [0, 1] to sRGB for an 8-bit frame."""
+    v = np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+    return np.where(v <= 0.0031308, v * 12.92, 1.055 * (v ** (1.0 / 2.4)) - 0.055).astype(np.float32)
+
+
+def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
+    """A neutral studio sky: the same gradient the viewport previews.
+
+    Equirectangular, `-Y` (row 0 = zenith). The repository ships no default HDR
+    environment and the renderer requires one, so the service writes its own:
+    predictable, licence-free, and identical every run. The viewport builds the
+    same gradient in JavaScript, so Solid, Material and Rendered share one sky.
     """
-    v = np.linspace(0.0, 1.0, height)[:, None]
+    v = np.linspace(0.0, 1.0, height)[:, None]  # 0 = zenith, 1 = nadir
     zenith = np.array([0.25, 0.40, 0.75])
     horizon = np.array([0.85, 0.72, 0.55])
     ground = np.array([0.10, 0.09, 0.08])
-    sky = horizon[None, None, :] * (1.0 - v[..., None]) + zenith[None, None, :] * v[..., None]
-    image = np.where(v[..., None] > 0.5, sky, np.broadcast_to(ground, sky.shape))
+    # Upper hemisphere: horizon at the equator, zenith at row 0.
+    t = np.clip((0.5 - v) / 0.5, 0.0, 1.0)[..., None]
+    sky = horizon[None, None, :] * (1.0 - t) + zenith[None, None, :] * t
+    image = np.where(v[..., None] < 0.5, sky, np.broadcast_to(ground, sky.shape))
     image = np.broadcast_to(image.astype(np.float32) * 1.6, (height, width, 3)).copy()
 
+    # RGBE: value = rgb / 256 * 2 ** (exponent - 128). The exponent field is
+    # biased by 128 — the earlier code stored the raw `frexp` exponent, so every
+    # pixel dimmer than 0.5 (i.e. most of the sky) wrapped to 253 and the engine
+    # decoded an invalid environment (a black IBL and a blown-out sky pass).
     peak = image.max(axis=2)
-    exponent = np.zeros_like(peak)
+    exponent = np.zeros(peak.shape, dtype=np.int32)
     nonzero = peak > 1e-32
     _, exp = np.frexp(peak)
-    exponent[nonzero] = exp[nonzero]
-    scale = np.where(nonzero, 256.0 / np.exp2(exponent), 0.0)
+    exponent[nonzero] = exp[nonzero].astype(np.int32) + 128
+    scale = np.where(nonzero, 256.0 / np.exp2(exponent - 128), 0.0)
     rgb = np.clip(image * scale[..., None], 0, 255).astype(np.uint8)
-    rgbe = np.concatenate([rgb, exponent.astype(np.uint8)[..., None]], axis=2)
+    rgbe = np.concatenate([rgb, np.clip(exponent, 0, 255).astype(np.uint8)[..., None]], axis=2)
 
     header = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {height} +X {width}\n".encode()
     path.write_bytes(header + rgbe.tobytes())
@@ -325,6 +345,16 @@ class StudioRenderer:
             domain=self.range,
             overlays=overlays,
             albedo_mode="material",
+            # One lighting model across the app. The viewport's Solid/Material
+            # preview is three.js `MeshStandardMaterial` — radiance =
+            # albedo/pi * sun_color*intensity * n.l plus one IBL irradiance
+            # term. The engine's "stylized" terrain model answers the same sun
+            # with a hardcoded, style-matched response (sun_peak 0.36, ambient
+            # floors), so identical sun/exposure lit the still ~4x darker than
+            # the preview. `lambert_physical` evaluates the same physical
+            # equation the preview does, so a frame matches what the user saw
+            # while authoring it.
+            terrain_shading_model="lambert_physical",
             hue_variation_strength=0.0,
             colormap_strength=1.0,
             light_azimuth_deg=float(sun.get("azimuthDeg", 135.0)),
@@ -352,17 +382,20 @@ class StudioRenderer:
                 depth=aov_flags["depth"],
                 format="png",
             ),
-            # With a project HDRI the visible sky is that environment map (the same
-        # one lighting the terrain); without one the analytic model stands.
-        # Background intensity is independent of the IBL lighting intensity.
-        sky=SkySettings(
-            enabled=bool(quality.get("sky", True)),
-            model="hdri" if environment else "hosek-wilkie",
-            aerial_perspective=False,
-            sky_exposure=float(request.get("environmentBackgroundIntensity", 1.0))
-            if environment
-            else 1.0,
-        ),
+            # With a project HDRI the visible sky is that environment map (the
+            # same one lighting the terrain). Without one the engine's
+            # procedural sky does not correspond to anything the preview shows
+            # — it renders a flat, blown-out background — so Rendered keeps the
+            # neutral studio surround the Solid/Material views use instead.
+            # Background intensity is independent of the IBL lighting intensity.
+            sky=SkySettings(
+                enabled=bool(quality.get("sky", True)) and environment is not None,
+                model="hdri" if environment else "hosek-wilkie",
+                aerial_perspective=False,
+                sky_exposure=float(request.get("environmentBackgroundIntensity", 1.0))
+                if environment
+                else 1.0,
+            ),
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))
         # The camera orbits far outside the 4000 m default max_distance
@@ -398,9 +431,15 @@ class StudioRenderer:
             try:
                 from forge3d.denoise_oidn import oidn_denoise
 
-                beauty = rgb.astype(np.float32) / 255.0
+                # OIDN operates on linear radiance and its albedo/normal
+                # guidance is linear too, but the engine's frame is
+                # display-referred sRGB (ACES + exposure already applied).
+                # Denoising the sRGB-encoded 8-bit values in place fed the
+                # filter the wrong space against linear guidance; decode to
+                # linear first and re-encode the result.
+                beauty = srgb_to_linear(rgb.astype(np.float32) / 255.0)
                 denoised = oidn_denoise(beauty, albedo, normal, hdr=False, quality="high")
-                rgb = np.clip(np.rint(denoised * 255.0), 0, 255).astype(np.uint8)
+                rgb = np.clip(np.rint(linear_to_srgb(denoised) * 255.0), 0, 255).astype(np.uint8)
             except Exception as exc:
                 # The frame must not come back silently un-denoised; fail it.
                 raise RuntimeError(

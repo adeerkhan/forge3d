@@ -469,7 +469,7 @@ function AssetsPanel() {
 }
 
 function RenderSettingsEditor() {
-  const { state, actions, bridgeKind } = useSession();
+  const { state, actions, bridgeKind, engine } = useSession();
   const caps = useCapabilities();
   const render = state?.project.render;
   if (!render) return null;
@@ -504,6 +504,14 @@ function RenderSettingsEditor() {
         checked={render.stillDenoise}
         onChange={(stillDenoise) => commit({ stillDenoise })}
       />
+      {render.stillDenoise && engine?.available && engine.denoise === false && (
+        <p className="hint hint--boxed">
+          The engine's interpreter has no OIDN runtime, so a denoised still
+          fails instead of rendering. Install it with{" "}
+          <code>pip install -e .[denoise]</code> for{" "}
+          <code>{engine.python}</code>.
+        </p>
+      )}
       <Toggle
         label="Sky background"
         checked={render.sky}

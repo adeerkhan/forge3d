@@ -873,6 +873,8 @@ export function createMockBridge(): StudioBridge {
       viewerBinary: null,
       backend: null,
       adapter: null,
+      denoise: false,
+      software: null,
       detail:
         "The browser preview has no Forge3D engine. Run the desktop shell (npm run tauri:dev) to render.",
     }),

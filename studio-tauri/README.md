@@ -277,12 +277,14 @@ animation sequence):
   texture-synthesis tools pick them up without configuration. The beauty PNG
   is written exactly as before.
 - **Denoise the still with OIDN** runs Open Image Denoise on the beauty
-  (guided by the albedo/normal AOVs from the same frame). This needs an
-  OIDN runtime next to the engine (`pip install oidn` and `pip install tbb`
-  — the checkout's `.venv` ships both since the Phase 10 fix); when it is
-  missing the frame **fails loudly** instead of silently coming back
-  un-denoised. OIDN 1.4 requires the device to be committed before filters
-  are created — handled in `denoise_oidn.py`.
+  (guided by the albedo/normal AOVs from the same frame). The engine's frame is
+  display-referred sRGB while OIDN and its guidance images are linear, so the
+  service decodes to linear, denoises, and re-encodes — denoising the sRGB
+  values in place fed the filter the wrong space. This needs an OIDN runtime
+  next to the engine (`pip install -e .[denoise]`, which installs `oidn` and
+  `tbb`); when it is missing the frame **fails loudly** instead of silently
+  coming back un-denoised. OIDN 1.4 requires the device to be committed before
+  filters are created — handled in `denoise_oidn.py`.
 
 The sidecar `<name>.json` records which path was used
 (`forge3d.render_with_aov` vs `render_terrain_pbr_pom`), the AOV flags and
@@ -347,10 +349,29 @@ renderer can run (the GPU is named in the bar), `engine unavailable` with the
 reason when it cannot. The tooltip carries the full backend and adapter, which
 is the GPU actually rendering. The engine selects its adapter by ranking
 discrete > integrated (hybrid laptops never silently bind the iGPU for a
-renderer), and the viewport's three.js canvas is WebGL — both stay on the GPU.
-Solid, Material and Rendered share one exposure (the project's), one sun
-(the scene's directional light), one hemisphere fill and one environment, so
-the three modes light the scene identically.
+renderer), the viewport asks WebGL for the high-performance adapter, and the
+Tauri web process is the same GPU — `nvidia-smi` shows both the shell and
+`WebKitWebProcess` resident on the discrete adapter.
+
+## One light rig for Solid, Material and Rendered
+
+The three modes differ in the *surface* they show, never in how the scene is
+lit. That is enforced on both sides of the renderer:
+
+- The preview (three.js) uses exactly the scene's sun — direction, colour in
+  linear radiance, and intensity, no fudge factor — plus one environment
+  image and the project's exposure. There is no fill light and no hemisphere
+  fill while an environment is bound: the engine's terrain shader has neither,
+  so adding them was what made the previews brighter than the still.
+- The environment is the same image in both places. Without a project HDRI the
+  viewport prefilters the *same* gradient the render service writes into its
+  studio HDR (`write_sky_hdr`), so Material's orbit and the Rendered frame are
+  lit by one sky instead of a three.js studio room vs. an engine sky.
+- The still uses the engine's `lambert_physical` terrain model, which evaluates
+  `albedo/pi * sun*intensity * n.l + albedo * irradiance` — the same equation
+  three.js applies to `MeshStandardMaterial`. The alternative ("stylized")
+  model answers the same sun with a hardcoded, style-matched response and lit
+  the still roughly four times darker at the same exposure.
 
 **The extension must be built from this checkout.** A stale
 `python/forge3d/_forge3d.abi3.so` is what produces errors like

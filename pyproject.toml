@@ -47,6 +47,14 @@ Documentation = "https://milos-agathon.github.io/forge3d/"
 interactive_viewer = "forge3d._viewer_entry:main"
 
 [project.optional-dependencies]
+# Open Image Denoise runtime for the Studio's final-still denoise (and
+# `forge3d.denoise_oidn`). `oidn` ships its own TBB next to libOpenImageDenoise;
+# the `tbb` wheel covers packages that expect it on the library search path.
+denoise = [
+    "oidn>=0.2.1",
+    "tbb>=2023.2.0",
+]
+
 # Raster I/O and streaming dependencies for Workstream S
 raster = [
     "rasterio>=1.3.0",

@@ -53,12 +53,27 @@ def main():
         return
     version = getattr(forge3d, "__version__", "unknown")
     backend = adapter = None
+    software = False
     try:
+        # `device_probe()` reports the adapter as "name"; accepting the other
+        # spellings keeps an older engine usable, and the explicit software
+        # flag means a CPU fallback can never be mistaken for a GPU render.
         probe = forge3d.device_probe()
         backend = probe.get("backend")
-        adapter = probe.get("adapter_name")
+        adapter = (
+            probe.get("name")
+            or probe.get("adapter_name")
+            or probe.get("adapter")
+            or probe.get("device_type")
+        )
+        software = bool(probe.get("software_fallback"))
     except Exception:
         pass
+    try:
+        from forge3d.denoise_oidn import oidn_available
+        denoise = bool(oidn_available())
+    except Exception:
+        denoise = False
     try:
         from forge3d._viewer_binary import find_viewer_binary
         import forge3d.viewer as viewer
@@ -74,6 +89,8 @@ def main():
         "detail": detail,
         "backend": backend,
         "adapter": adapter,
+        "software": software,
+        "denoise": denoise,
     }))
 
 main()
@@ -177,6 +194,11 @@ pub struct EngineStatus {
     pub backend: Option<String>,
     /// Adapter name — the GPU actually rendering.
     pub adapter: Option<String>,
+    /// True when the interpreter can denoise with OIDN (the `denoise` extra).
+    pub denoise: Option<bool>,
+    /// True when the engine is running on a software (CPU) adapter — the
+    /// status bar must not present that as GPU rendering.
+    pub software: Option<bool>,
     /// Always present: what is missing, or what is ready.
     pub detail: String,
 }
@@ -241,6 +263,8 @@ impl Forge3dState {
                             viewer_binary: None,
                             backend: None,
                             adapter: None,
+                            denoise: None,
+                            software: None,
                             detail,
                         });
                     }
@@ -255,6 +279,8 @@ impl Forge3dState {
             viewer_binary: None,
             backend: None,
             adapter: None,
+            denoise: None,
+            software: None,
             detail: "no Python interpreter was found".to_owned(),
         });
         if let Ok(mut guard) = self.engine.lock() {
@@ -785,6 +811,10 @@ fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
             .get("adapter")
             .and_then(|adapter| adapter.as_str())
             .map(str::to_owned),
+        denoise: value.get("denoise").and_then(|denoise| denoise.as_bool()),
+        software: value
+            .get("software")
+            .and_then(|software| software.as_bool()),
         detail: value
             .get("detail")
             .and_then(|detail| detail.as_str())

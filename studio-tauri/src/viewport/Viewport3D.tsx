@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 
 import { bridge } from "../bridge/env";
@@ -36,8 +35,12 @@ const SOLID_BACKGROUND = 0x101318;
 const MATERIAL_BACKGROUND = 0x1c2129;
 const SOLID_BG = new THREE.Color(SOLID_BACKGROUND);
 const MATERIAL_BG = new THREE.Color(MATERIAL_BACKGROUND);
-/** Built-in studio environment is a fill; a project HDRI is used as authored. */
-const STUDIO_ENVIRONMENT_INTENSITY = 0.45;
+/** Built-in studio sky — the same gradient the render service writes as its
+ *  studio HDR, so the preview and Rendered frames share one environment. */
+const SKY_ZENITH = [0.25, 0.40, 0.75] as const;
+const SKY_HORIZON = [0.85, 0.72, 0.55] as const;
+const SKY_GROUND = [0.10, 0.09, 0.08] as const;
+const SKY_GAIN = 1.6;
 
 type Quaternion = [number, number, number, number];
 
@@ -67,14 +70,12 @@ interface Runtime {
   helpers: THREE.BoxHelper[];
   /** Selection + camera-view identity the current helpers were built for. */
   helperKey: string;
-  /** Built-in RoomEnvironment, used until a project HDRI replaces it. */
+  /** Built-in sky gradient, used until a project HDRI replaces it. */
   studioEnvironment: THREE.Texture | null;
   /** Environment lighting the scene right now (PMREM output). */
   environment: THREE.Texture | null;
   /** HDRI source texture for the Material background, when one is loaded. */
   environmentBackground: THREE.Texture | null;
-  /** True when `environment` is a project HDRI rather than the studio sky. */
-  customEnvironment: boolean;
   pmrem: THREE.PMREMGenerator | null;
   /** GPU capability probe: 0 = full quality, 1 = hard shadows, 2 = no IBL,
    *  3 = no shadows. Raised one step at a time when `gl.getError()` reports a
@@ -91,9 +92,8 @@ interface Runtime {
 interface ShadingRecord {
   studioMaterial?: THREE.Material | THREE.Material[];
   clayMaterial?: THREE.Material | THREE.Material[];
-  /** Terrain only: decoded albedo drape and its opacity. */
+  /** Terrain only: decoded albedo drape. */
   drape?: THREE.Texture | null;
-  drapeOpacity?: number;
 }
 
 /** Clamp half-float RGBA data to 8-bit linear values for a safe backdrop. */
@@ -111,6 +111,38 @@ function clampHalfFloatToByte(
     }
   }
   return out;
+}
+
+/**
+ * The engine's built-in sky as a linear equirect texture.
+ *
+ * `write_sky_hdr` (studio_render.py) bakes the same gradient into the studio
+ * HDR the renderer uses when no project environment is set. Keeping one source
+ * of truth in both places is what makes Material's orbit and the Rendered frame
+ * share a light environment instead of a studio room vs. a sky.
+ */
+function studioSkyTexture(width = 128, height = 64): THREE.DataTexture {
+  const data = new Float32Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    const v = y / (height - 1);
+    // 0 = zenith, 0.5 = horizon, 1 = nadir.
+    const t = Math.min(1, Math.max(0, (0.5 - v) / 0.5));
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const sky = SKY_HORIZON[channel] * (1 - t) + SKY_ZENITH[channel] * t;
+        const value = v < 0.5 ? sky : SKY_GROUND[channel];
+        data[offset + channel] = value * SKY_GAIN;
+      }
+      data[offset + 3] = 1;
+    }
+  }
+  const texture = new THREE.DataTexture(data, width, height, THREE.RGBAFormat, THREE.FloatType);
+  // Radiance, not an sRGB image: keep the values the engine would decode.
+  texture.colorSpace = THREE.LinearSRGBColorSpace;
+  texture.mapping = THREE.EquirectangularReflectionMapping;
+  texture.needsUpdate = true;
+  return texture;
 }
 
 function clayMaterial(side: THREE.Side = THREE.FrontSide): THREE.MeshStandardMaterial {
@@ -178,15 +210,21 @@ function setSolidShading(root: THREE.Object3D, solid: boolean): void {
   });
 }
 
-/** Solid is clay; Material shows the albedo drape (or clay without one). */
+/** Solid is clay; Material shows the albedo drape (or clay without one).
+ *
+ * The drape is drawn opaque. It used to inherit the overlay's strength as
+ * material opacity, which made the terrain 82% opaque and blended it with the
+ * dark backdrop — the preview then read darker than the same frame from the
+ * engine, which composites the overlay onto a lit material instead. Neither the
+ * sun nor the exposure may change with a slider, so the preview keeps the
+ * surface opaque; the still honours the opacity in its overlay pass.
+ */
 function applyTerrainShading(mesh: THREE.Mesh, solid: boolean): void {
   const material = mesh.material as THREE.MeshStandardMaterial;
-  const { drape = null, drapeOpacity = 1 } = mesh.userData as ShadingRecord;
+  const { drape = null } = mesh.userData as ShadingRecord;
   const draped = !solid && drape !== null;
   const map = draped ? drape : null;
   const colour = draped ? 0xffffff : CLAY_COLOUR;
-  const transparent = draped && drapeOpacity < 1;
-  const opacity = draped ? drapeOpacity : 1;
   // Playback re-applies shading on every snapshot; only touch the material
   // when the mode (or the drape) actually changed, so `needsUpdate` does not
   // rebuild the program every frame.
@@ -199,12 +237,12 @@ function applyTerrainShading(mesh: THREE.Mesh, solid: boolean): void {
     material.color.setHex(colour);
     changed = true;
   }
-  if (material.transparent !== transparent) {
-    material.transparent = transparent;
+  if (material.transparent) {
+    material.transparent = false;
     changed = true;
   }
-  if (Math.abs(material.opacity - opacity) > 1e-6) {
-    material.opacity = opacity;
+  if (material.opacity !== 1) {
+    material.opacity = 1;
     changed = true;
   }
   if (changed) material.needsUpdate = true;
@@ -262,10 +300,11 @@ function applyGpuStep(runtime: Runtime): string {
   }
   if (step >= 2) {
     // Keep the 8-bit backdrop; drop only the IBL, which needs the half-float
-    // PMREM output the platform cannot sample.
+    // PMREM output the platform cannot sample. Every mode now needs the same
+    // fallback fill the engine's environment would have provided.
     runtime.environment = null;
-    runtime.customEnvironment = false;
     runtime.scene.environment = null;
+    runtime.hemi.intensity = 0.25;
   }
   if (step >= 3) {
     runtime.sun.castShadow = false;
@@ -283,17 +322,28 @@ function applyGpuStep(runtime: Runtime): string {
       : "GPU limit: shadows off";
 }
 
+/**
+ * Environment lighting and backdrop for the current mode.
+ *
+ * Lighting is identical in every mode: one sun, one environment. Solid and
+ * Material differ only in the surface they show (clay vs. albedo) and in the
+ * backdrop (neutral vs. the project HDRI). The project's IBL intensity scales
+ * the environment exactly as it scales the engine's.
+ */
 function applyEnvironment(
   runtime: Runtime,
-  solid: boolean,
+  mode: "solid" | "material",
   iblIntensity: number,
   backgroundIntensity: number,
 ): void {
-  const noIbl = solid || runtime.glStep >= 2;
+  const solid = mode === "solid";
+  const noIbl = runtime.glStep >= 2;
   runtime.scene.environment = noIbl ? null : runtime.environment;
-  runtime.scene.environmentIntensity = noIbl
-    ? 0
-    : iblIntensity * (runtime.customEnvironment ? 1 : STUDIO_ENVIRONMENT_INTENSITY);
+  runtime.scene.environmentIntensity = noIbl ? 0 : iblIntensity;
+  // The engine applies no ambient beyond the environment image, so neither does
+  // the preview. Only a device that cannot sample the environment (glStep 2)
+  // gets the fallback fill, and then every mode gets it.
+  runtime.hemi.intensity = noIbl ? 0.25 : 0;
   const backdrop = runtime.environmentBackground;
   if (solid || !backdrop || backgroundIntensity <= 0.001) {
     // Solid stays neutral; 0 on the slider hides the HDRI and leaves the
@@ -421,7 +471,6 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
   mesh.userData.owned = true;
   mesh.userData.studioMaterial = mesh.material;
   mesh.userData.drape = null;
-  mesh.userData.drapeOpacity = 1;
   return mesh;
 }
 
@@ -690,7 +739,14 @@ export function Viewport3D() {
 
     let renderer: THREE.WebGLRenderer;
     try {
-      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        antialias: true,
+        alpha: false,
+        // Ask for the discrete adapter on hybrid hosts instead of letting the
+        // browser pick the power-saving one.
+        powerPreference: "high-performance",
+      });
     } catch (cause) {
       setProblem(
         `WebGL is unavailable in this webview: ${cause instanceof Error ? cause.message : cause}`,
@@ -729,11 +785,11 @@ export function Viewport3D() {
     gizmo.setSize(0.85);
     scene.add(gizmo.getHelper());
 
-    const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1b1f26, 0.32);
+    const hemi = new THREE.HemisphereLight(0xc8d4e8, 0x1b1f26, 0);
     const sun = new THREE.DirectionalLight(0xffffff, 3);
     sun.position.set(6, 9, 4);
-    // Soft sun shadows are the Material preview's "light and shadow"; Solid
-    // leaves `castShadow` off, so it costs nothing there.
+    // One shadow rig for every mode: Solid and Material differ by the surface
+    // they show, not by how they are lit.
     sun.castShadow = false;
     sun.shadow.mapSize.set(1024, 1024);
     sun.shadow.bias = -0.0008;
@@ -745,18 +801,21 @@ export function Viewport3D() {
     sun.shadow.camera.top = shadowExtent;
     sun.shadow.camera.bottom = -shadowExtent;
     sun.shadow.camera.updateProjectionMatrix();
-    const fill = new THREE.DirectionalLight(0x93a8c8, 0.16);
-    fill.position.set(-7, 4, -6);
-    scene.add(hemi, sun, fill);
+    // Sun + environment only — the engine's terrain shader has no fill light,
+    // so neither does the preview. `hemi` is the fallback for a device that
+    // cannot sample the environment (see `applyGpuStep`).
+    scene.add(hemi, sun);
 
-    // The studio HDRI is the fallback: prefiltered once at mount, then swapped
-    // for the project's HDRI when one is set. A device without the required
-    // float target simply keeps the directional lights (the environment is
-    // optional).
+    // The built-in sky is the *same* gradient the render service writes into its
+    // studio HDR (`write_sky_hdr` in studio_render.py), prefiltered once at
+    // mount and swapped for the project's HDRI when one is set. A device that
+    // cannot filter the float target keeps the fallback hemisphere light.
     const pmrem = new THREE.PMREMGenerator(renderer);
     let studioEnvironment: THREE.Texture | null = null;
     try {
-      studioEnvironment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      const sky = studioSkyTexture();
+      studioEnvironment = pmrem.fromEquirectangular(sky).texture;
+      sky.dispose();
     } catch {
       studioEnvironment = null;
     }
@@ -785,7 +844,6 @@ export function Viewport3D() {
       studioEnvironment,
       environment: studioEnvironment,
       environmentBackground: null,
-      customEnvironment: false,
       pmrem,
       glStep: 0,
       glProbed: false,
@@ -1129,7 +1187,6 @@ export function Viewport3D() {
                 .then((texture) => {
                   if (group.userData.signature !== expected) return;
                   mesh.userData.drape = texture;
-                  mesh.userData.drapeOpacity = overlay.opacity;
                   applyTerrainShading(mesh, viewportModeRef.current === "solid");
                 })
                 .catch((cause) => {
@@ -1210,19 +1267,21 @@ export function Viewport3D() {
       // Far enough out that the shadow camera encloses the terrain.
       runtime.sun.position.copy(direction.multiplyScalar(-20));
       const [r, g, b] = sunObject.kind.color;
-      runtime.sun.color.setRGB(r, g, b, THREE.SRGBColorSpace);
-      // The engine's lit-sun intensity and three's directional intensity do not
-      // share a scale; ~0.9 keeps the viewport close to the Rendered frame.
-      runtime.sun.intensity = Math.max(0.1, sunObject.kind.intensity * 0.9);
+      // The engine multiplies `sun_color * intensity` in linear radiance
+      // (`u_shading.light_params`). Matching that means no sRGB conversion
+      // here and no intensity fudge: the preview and the still then evaluate
+      // the same `albedo/pi * sun * n.l` term.
+      runtime.sun.color.setRGB(r, g, b, THREE.LinearSRGBColorSpace);
+      runtime.sun.intensity = Math.max(0, sunObject.kind.intensity);
     }
 
-    // Viewport mode owns the light rig: Solid is flat clay under the scene sun;
-    // Material adds the environment (project HDRI or studio sky) and soft
-    // shadows. Rendered shows the engine frame instead, but keeping the rig
-    // consistent avoids a bright flash when switching back.
+    // One rig for every mode: the scene sun plus the project environment (or
+    // the built-in sky). Solid renders the same light on clay; Material on the
+    // albedo drape; Rendered is the engine frame, which uses this same sun,
+    // environment and exposure.
     applyEnvironment(
       runtime,
-      solidView,
+      solidView ? "solid" : "material",
       project.render.iblIntensity,
       project.render.environmentBackgroundIntensity,
     );
@@ -1230,10 +1289,7 @@ export function Viewport3D() {
     // Rendered; the preview now agrees instead of running 0.95 against the
     // engine's 1.35.
     runtime.renderer.toneMappingExposure = project.render.exposure;
-    runtime.sun.castShadow = !solidView && runtime.glStep < 3;
-    // One ambient fill for every mode (Solid and Material differ only by
-    // environment, which is the mode's purpose, not a lighting difference).
-    runtime.hemi.intensity = 0.28;
+    runtime.sun.castShadow = runtime.glStep < 3;
 
     runtime.grid.visible = project.viewport.gridVisible;
 
@@ -1300,7 +1356,7 @@ export function Viewport3D() {
     const apply = () =>
       applyEnvironment(
         runtime,
-        viewportModeRef.current === "solid",
+        viewportModeRef.current === "solid" ? "solid" : "material",
         settings?.iblIntensity ?? 1,
         settings?.environmentBackgroundIntensity ?? 1,
       );
@@ -1313,7 +1369,6 @@ export function Viewport3D() {
       previous?.target.dispose();
       runtime.environment = runtime.studioEnvironment;
       runtime.environmentBackground = null;
-      runtime.customEnvironment = false;
       apply();
       return;
     }
@@ -1329,8 +1384,7 @@ export function Viewport3D() {
         environmentRef.current = loaded;
         runtime.environment = loaded.environment;
         runtime.environmentBackground = loaded.background;
-        runtime.customEnvironment = true;
-        // The PMREM output is new; let the probe see this texture.
+          // The PMREM output is new; let the probe see this texture.
         runtime.glProbed = false;
         apply();
         if (previous && previous.path !== loaded.path) {

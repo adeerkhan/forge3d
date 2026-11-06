@@ -417,6 +417,10 @@ export interface EngineStatus {
   /** wgpu backend and GPU adapter, when the probe reached the device. */
   backend: string | null;
   adapter: string | null;
+  /** True when the probed interpreter can denoise with OIDN. */
+  denoise?: boolean | null;
+  /** True when the engine fell back to a software (CPU) adapter. */
+  software?: boolean | null;
   detail: string;
 }
 
