@@ -51,7 +51,6 @@ built** until a trigger fires.
 | Shell | `src-tauri/src/studio_render.py` | one engine session, `TerrainRenderer`, IBL, sky |
 | Shell | `src-tauri/src/commands.rs` | IPC, `render_frame`/`render_still`/`render_animation_frame` |
 | Bridge | `src/bridge/types.ts` | `RenderSettings`, `EngineStatus`, command union |
-| Bridge | `src/bridge/mock.ts` | preview semantics (mirrors core) |
 | UI | `src/components/Inspector.tsx` | render settings + capability badges |
 | UI | `src/components/StatusBar.tsx` | engine probe status |
 | UI | `src/state/session.tsx` | render queue, playhead, actions |
@@ -65,13 +64,13 @@ as `environment` proved).
 
 1. `project.rs`: add the field to `RenderSettings` with `#[serde(default…)]`;
    add its range check to `Project::validate`.
-2. `types.ts` + `mock.ts`: add the field to `RenderSettings` and the default.
+2. `types.ts`: add the field to `RenderSettings` and the default.
 3. `render.rs`: copy it in `with_settings`, emit it in `to_payload`.
 4. `studio_render.py`: map it to the engine dataclass in `render()`.
 5. `Inspector.tsx`: one control (`NumberField`/`Toggle`/`RangeField`).
 6. Tests: one schema-contract line, one payload assertion, one round-trip test.
 
-Five places (six files counting the mock), one test each, no architecture. The
+Five places, one test each, no architecture. The
 sections below list only what differs from this recipe.
 
 ---
