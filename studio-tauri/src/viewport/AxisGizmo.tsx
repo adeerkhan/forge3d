@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import * as THREE from "three";
 
 /**
  * Viewport orientation gizmo (the "3D gizmo"), like Blender's navigation widget.
@@ -26,19 +27,13 @@ const AXES: AxisSpec[] = [
 type Quaternion = [number, number, number, number];
 
 /** Rotate `v` by the inverse of `q`: world direction → view space. */
+const VIEW_DIRECTION = new THREE.Vector3();
+// Object3D.quaternion is (x, y, z, w); three's Vector3 carries the axis math.
 function toViewSpace(v: [number, number, number], q: Quaternion): [number, number, number] {
-  const [qx, qy, qz, qw] = [-q[0], -q[1], -q[2], q[3]];
-  const [x, y, z] = v;
-  // t = 2 * (q.xyz × v)
-  const tx = 2 * (qy * z - qz * y);
-  const ty = 2 * (qz * x - qx * z);
-  const tz = 2 * (qx * y - qy * x);
-  // v' = v + qw * t + q.xyz × t
-  return [
-    x + qw * tx + (qy * tz - qz * ty),
-    y + qw * ty + (qz * tx - qx * tz),
-    z + qw * tz + (qx * ty - qy * tx),
-  ];
+  VIEW_DIRECTION.set(v[0], v[1], v[2]).applyQuaternion(
+    new THREE.Quaternion(-q[0], -q[1], -q[2], q[3]),
+  );
+  return [VIEW_DIRECTION.x, VIEW_DIRECTION.y, VIEW_DIRECTION.z];
 }
 
 export function AxisGizmo({

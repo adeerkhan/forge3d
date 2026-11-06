@@ -105,8 +105,4 @@ export interface StudioBridge {
   renderStop(): Promise<RenderStatus>;
 }
 
-export interface OpenResult {
-  path: string | null;
-}
-
 export type { Project };

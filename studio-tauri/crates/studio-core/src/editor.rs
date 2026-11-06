@@ -238,15 +238,6 @@ impl Editor {
         frame
     }
 
-    /// Swap in different project state (recovery) without touching the path.
-    pub fn replace_project(&mut self, project: Project, dirty: bool) {
-        self.project = project;
-        self.revision += 1;
-        self.dirty = dirty;
-        self.undo.clear();
-        self.redo.clear();
-    }
-
     fn push_undo(&mut self, entry: HistoryEntry) {
         self.undo.push(entry);
         let overflow = self.undo.len().saturating_sub(self.limit);

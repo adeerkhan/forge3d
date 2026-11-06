@@ -76,7 +76,10 @@ def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
     environment and the renderer requires one, so the service writes its own:
     predictable, licence-free, and identical every run. The viewport builds the
     same gradient in JavaScript, so Solid, Material and Rendered share one sky.
+    The RGBE encoding itself lives in the engine (`forge3d.io.write_hdr`).
     """
+    from forge3d import io as fio
+
     v = np.linspace(0.0, 1.0, height)[:, None]  # 0 = zenith, 1 = nadir
     zenith = np.array([0.25, 0.40, 0.75])
     horizon = np.array([0.85, 0.72, 0.55])
@@ -86,54 +89,50 @@ def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
     sky = horizon[None, None, :] * (1.0 - t) + zenith[None, None, :] * t
     image = np.where(v[..., None] < 0.5, sky, np.broadcast_to(ground, sky.shape))
     image = np.broadcast_to(image.astype(np.float32) * 1.6, (height, width, 3)).copy()
+    fio.write_hdr(path, image)
 
-    # RGBE: value = rgb / 256 * 2 ** (exponent - 128). The exponent field is
-    # biased by 128 — the earlier code stored the raw `frexp` exponent, so every
-    # pixel dimmer than 0.5 (i.e. most of the sky) wrapped to 253 and the engine
-    # decoded an invalid environment (a black IBL and a blown-out sky pass).
-    peak = image.max(axis=2)
-    exponent = np.zeros(peak.shape, dtype=np.int32)
-    nonzero = peak > 1e-32
-    _, exp = np.frexp(peak)
-    exponent[nonzero] = exp[nonzero].astype(np.int32) + 128
-    scale = np.where(nonzero, 256.0 / np.exp2(exponent - 128), 0.0)
-    rgb = np.clip(image * scale[..., None], 0, 255).astype(np.uint8)
-    rgbe = np.concatenate([rgb, np.clip(exponent, 0, 255).astype(np.uint8)[..., None]], axis=2)
 
-    header = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {height} +X {width}\n".encode()
-    path.write_bytes(header + rgbe.tobytes())
+def dem_span(dem) -> tuple[float, float]:
+    """Metric footprint of a DEM: pixel size when projected, local UTM when not.
+
+    A geographic raster's degrees are not metres — treating them as metres is
+    what made a 353 km DEM report 0.00 km. The zone comes from the engine's own
+    estimator, so the studio and the viewer cannot disagree about it.
+    """
+    from forge3d import gis
+
+    height, width = np.asarray(dem.data).shape[:2]
+    crs = str(dem.crs or "")
+    if ("4326" in crs or "wgs84" in crs.lower()) and dem.bounds is not None:
+        local = gis.estimate_local_utm(dem.bounds)["crs"]
+        left, bottom, right, top = gis.transform_bounds(dem.crs, local, dem.bounds, densify=21)
+        return abs(right - left), abs(top - bottom)
+    resolution = dem.resolution or (1.0, 1.0)
+    return abs(float(resolution[0])) * width, abs(float(resolution[1])) * height
 
 
 def load_dem(path: str) -> tuple[np.ndarray, float, float, tuple[float, float]]:
-    """Read a DEM, honour nodata, and compute a metric footprint.
+    """Read a DEM through the engine's loader and compute the render frame.
 
-    Returns heights (nodata filled), span in metres, and a robust elevation range.
+    Returns heights (nodata filled, outliers clamped), the metric span, and the
+    robust elevation range. Reading, nodata masking and CRS handling are the
+    engine's (`forge3d.io`, `forge3d.gis`); only the presentation choices —
+    clamp to [0.01, 99.99] percentiles, fill holes with the floor — are the
+    studio's.
     """
-    import rasterio
-    from rasterio.warp import transform_bounds
+    from forge3d import io as fio
 
-    with rasterio.open(path) as source:
-        raw = np.asarray(source.read(1, masked=True).filled(np.nan), dtype="float64")
-        valid = np.isfinite(raw)
-        if not valid.any():
-            raise RuntimeError("the DEM contains no valid elevation samples")
-        values = raw[valid]
-        low, high = np.percentile(values, [0.01, 99.99])
-        heights = np.where(valid, np.clip(np.nan_to_num(raw, nan=low), low, high), low)
-
-        crs = source.crs
-        bounds = source.bounds
-        if crs is not None and crs.is_geographic:
-            lon = (bounds.left + bounds.right) * 0.5
-            lat = (bounds.top + bounds.bottom) * 0.5
-            zone = int((lon + 180.0) // 6.0) + 1
-            epsg = (32600 if lat >= 0 else 32700) + zone
-            left, bottom, right, top = transform_bounds(crs, "EPSG:%d" % epsg, *bounds)
-            span_x, span_y = abs(right - left), abs(top - bottom)
-        else:
-            span_x = abs(float(source.transform.a)) * raw.shape[1]
-            span_y = abs(float(source.transform.e)) * raw.shape[0]
-
+    dem = fio.load_dem(path, fill_nodata_values=False)
+    raw = np.asarray(dem.data, dtype="float64")
+    nodata = dem.nodata_value
+    if nodata is not None:
+        raw = np.where(np.isclose(raw, float(nodata)), np.nan, raw)
+    valid = np.isfinite(raw)
+    if not valid.any():
+        raise RuntimeError("the DEM contains no valid elevation samples")
+    low, high = np.percentile(raw[valid], [0.01, 99.99])
+    heights = np.where(valid, np.clip(np.nan_to_num(raw, nan=low), low, high), low)
+    span_x, span_y = dem_span(dem)
     if span_x <= 0.0 or span_y <= 0.0:
         span_x, span_y = float(raw.shape[1]), float(raw.shape[0])
     return heights.astype(np.float32), span_x, span_y, (float(low), float(high))

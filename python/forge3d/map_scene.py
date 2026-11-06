@@ -738,12 +738,16 @@ def _mapscene_nodata_heightmap(heightmap: Any) -> tuple[Any, float | None]:
 
 
 def _write_minimal_hdr(path: Path) -> None:
-    with path.open("wb") as handle:
-        handle.write(b"#?RADIANCE\n")
-        handle.write(b"FORMAT=32-bit_rle_rgbe\n\n")
-        handle.write(b"-Y 2 +X 2\n")
-        for _ in range(4):
-            handle.write(bytes([180, 190, 205, 128]))
+    """A flat 2x2 environment for recipes that name no IBL.
+
+    Byte-identical to the hand-written `[180, 190, 205, 128]` RGBE quad it
+    replaces (those are exact 1/256 steps), now through the shared encoder.
+    """
+    import numpy as np
+
+    from .io import write_hdr
+
+    write_hdr(path, np.full((2, 2, 3), [180 / 256, 190 / 256, 205 / 256], dtype=np.float32))
 
 
 def _native_ibl_path(recipe: "SceneRecipe") -> tuple[str, bool]:

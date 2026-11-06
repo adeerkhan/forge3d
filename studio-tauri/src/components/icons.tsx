@@ -114,25 +114,6 @@ export const PlusIcon = (props: IconProps) => (
   </Icon>
 );
 
-export const FrameIcon = (props: IconProps) => (
-  <Icon {...props}>
-    <path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" />
-  </Icon>
-);
-
-export const GridIcon = (props: IconProps) => (
-  <Icon {...props}>
-    <path d="M3 9h18M3 15h18M9 3v18M15 3v18" />
-  </Icon>
-);
-
-export const AlertIcon = (props: IconProps) => (
-  <Icon {...props}>
-    <path d="M12 4l9 16H3z" />
-    <path d="M12 10v4M12 17.2v.1" />
-  </Icon>
-);
-
 export const CloseIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M6 6l12 12M18 6L6 18" />

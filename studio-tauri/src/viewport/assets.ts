@@ -28,10 +28,6 @@ export function putAssetBytes(path: string, buffer: ArrayBuffer): void {
   nodesByPath.delete(path);
 }
 
-export function cachedAssetBytes(path: string): ArrayBuffer | undefined {
-  return bytesByPath.get(path);
-}
-
 export function parseGltf(buffer: ArrayBuffer, path: string): Promise<Group> {
   return new Promise((resolve, reject) => {
     const loader = new GLTFLoader();

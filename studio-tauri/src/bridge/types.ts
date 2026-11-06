@@ -294,7 +294,6 @@ export interface AutosaveStatus {
 export interface ShellInfo {
   name: string;
   version: string;
-  phase: string;
 }
 
 /** A `.gltf`/`.glb` file read by the shell, base64 for the webview. */
@@ -309,22 +308,6 @@ export interface MeshFilePayload {
 // ---------------------------------------------------------------- workspaces
 
 export type CapabilityLevel = "full" | "partial" | "unsupported";
-
-export interface ObjectCapability {
-  id: string;
-  name: string;
-  kind: string;
-  level: CapabilityLevel;
-  detail: string;
-}
-
-export interface CapabilityReport {
-  target: Workspace;
-  objects: ObjectCapability[];
-  degradations: string[];
-  supportsCameraSync: boolean;
-  hasRenderableContent: boolean;
-}
 
 /** One material/light/camera parameter and what currently drives it. */
 export interface ParameterCapability {
@@ -342,29 +325,6 @@ export interface CapabilityTable {
   camera: ParameterCapability[];
 }
 
-export interface CameraSync {
-  eye: Vec3;
-  target: Vec3;
-  up: Vec3;
-  fovDeg: number;
-}
-
-export interface SunAngles {
-  azimuthDeg: number;
-  elevationDeg: number;
-  intensity: number;
-  /** Linear RGB colour of the directional light. */
-  color: [number, number, number];
-}
-
-export interface ForgeAsset {
-  id: string;
-  name: string;
-  path: string;
-  kind: AssetKind;
-}
-
-/** What the Forge3D workspace receives for one project revision. */
 /** A DEM sampled for the Studio viewport (heights are row-major, bottom-up). */
 export interface TerrainPreview {
   ok: boolean;
@@ -377,36 +337,6 @@ export interface TerrainPreview {
   spanXz: [number, number];
   resolution: number;
   heights: number[];
-}
-
-export interface TerrainHandoff {
-  assetId: string;
-  name: string;
-  path: string;
-  zScale: number;
-  dimensions: [number, number] | null;
-}
-
-export interface TerrainCamera {
-  phiDeg: number;
-  thetaDeg: number;
-  fovDeg: number;
-  radius: number | null;
-  target: [number, number, number] | null;
-}
-
-export interface Handoff {
-  projectId: string;
-  sceneId: string;
-  revision: number;
-  target: Workspace;
-  idempotencyKey: string;
-  report: CapabilityReport;
-  camera: CameraSync | null;
-  terrainCamera: TerrainCamera | null;
-  terrain: TerrainHandoff | null;
-  assets: ForgeAsset[];
-  sun: SunAngles | null;
 }
 
 export interface EngineStatus {
@@ -469,16 +399,6 @@ export interface RenderStatus {
   diagnostics: string[];
 }
 
-export interface Forge3dStatus {
-  running: boolean;
-  ready: boolean;
-  pid: number | null;
-  error: string | null;
-  lastHandoffKey: string | null;
-  payloadPath: string | null;
-  diagnostics: string[];
-}
-
 export type Command =
   | { type: "createObject"; object: SceneObject; index?: number | null }
   | { type: "createPrimitive"; primitive: Primitive; name?: string | null }
@@ -529,12 +449,6 @@ export type Tool = "select" | "move" | "rotate" | "scale";
 /** Gizmo orientation: world axes or the object's own axes. */
 export type ToolSpace = "world" | "local";
 
-export const IDENTITY_TRANSFORM: Transform = {
-  translation: { x: 0, y: 0, z: 0 },
-  rotationDeg: { x: 0, y: 0, z: 0 },
-  scale: { x: 1, y: 1, z: 1 },
-};
-
 export const DEFAULT_PRIMITIVES: Record<PrimitiveShape, Primitive> = {
   cube: { type: "cube", size: 2 },
   sphere: { type: "sphere", radius: 1 },
@@ -556,10 +470,3 @@ export function objectKindLabel(kind: ObjectKind): string {
   }
 }
 
-export function isCamera(object: SceneObject): boolean {
-  return object.kind.type === "camera";
-}
-
-export function primitiveExtent(primitive: Primitive): number {
-  return primitive.type === "sphere" ? primitive.radius * 2 : primitive.size;
-}

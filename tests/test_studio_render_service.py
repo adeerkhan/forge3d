@@ -100,3 +100,53 @@ def test_still_uses_the_physical_shading_model():
     service = load_service()
     source = SERVICE.read_text()
     assert 'terrain_shading_model="lambert_physical"' in source
+
+
+def test_shared_hdr_writer_reproduces_the_canonical_environment_bytes(tmp_path):
+    """`map_scene`'s recipe fallback must stay byte-identical through the shared
+    writer — its pixels are exact 1/256 steps, so the bytes are the contract."""
+    import numpy as np
+
+    from forge3d.io import write_hdr
+
+    path = tmp_path / "canonical.hdr"
+    write_hdr(path, np.full((2, 2, 3), [180 / 256, 190 / 256, 205 / 256], np.float32))
+    assert path.read_bytes() == (
+        b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 2\n"
+        + bytes([180, 190, 205, 128]) * 4
+    )
+
+
+def test_dem_span_reprojects_geographic_bounds_to_metres():
+    """A degree-grid DEM must report a metric footprint, not degrees."""
+    import numpy as np
+
+    service = load_service()
+
+    class FakeDem:
+        data = np.zeros((32, 64), np.float32)
+        crs = "EPSG:4326"
+        bounds = (5.955885327836842, 45.81802022980842, 10.4924973226525, 47.80830791604507)
+        resolution = (0.0006, 0.0008)
+        transform = None
+
+    span_x, span_y = service.dem_span(FakeDem())
+    # The Swiss national DEM's footprint, from the same UTM zone the viewer uses.
+    assert span_x == pytest.approx(352_426.79, abs=1.0)
+    assert span_y == pytest.approx(225_653.68, abs=1.0)
+
+
+def test_dem_span_uses_pixel_size_for_a_projected_raster():
+    """Bryce's UTM raster needs no reprojection: resolution x shape is metres."""
+    import numpy as np
+
+    service = load_service()
+
+    class FakeDem:
+        data = np.zeros((1024, 1024), np.float32)
+        crs = "EPSG:26912"
+        bounds = (395998.5, 4161774.5, 399998.5, 4165574.5)
+        resolution = (3.90625, 3.7109375)
+        transform = None
+
+    assert service.dem_span(FakeDem()) == (4000.0, 3800.0)

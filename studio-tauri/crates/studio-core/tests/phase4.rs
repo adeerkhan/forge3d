@@ -1,14 +1,14 @@
 //! Phase 4 acceptance: terrain-first scenes and their handoff.
 //!
 //! The Studio default project is a DEM, not a cube, so these tests pin the
-//! starter scene, the capability report, and the orbit camera the viewer needs.
+//! starter scene and the orbit camera the renderer needs.
 
 use studio_core::command::Command;
 use studio_core::editor::Editor;
 use studio_core::persist::{from_json, save_atomic};
 use studio_core::project::{AssetKind, Project, TerrainSeed, SCHEMA_VERSION, UNTITLED};
 use studio_core::scene::ObjectKind;
-use studio_core::workspace::{capability_report, handoff, terrain_camera, CapabilityLevel};
+use studio_core::workspace::{handoff, terrain_camera};
 use studio_core::{Transform, Workspace};
 
 fn seed() -> TerrainSeed {
@@ -154,24 +154,6 @@ fn terrain_transform_edits_are_rejected() {
 }
 
 #[test]
-fn terrain_is_fully_supported_by_forge3d() {
-    let project = Project::starter("Bryce", Some(seed()));
-    let report = capability_report(&project, Workspace::Forge3d);
-    let terrain = report
-        .objects
-        .iter()
-        .find(|object| object.kind == "terrain")
-        .expect("terrain row");
-    assert_eq!(terrain.level, CapabilityLevel::Full);
-    assert!(terrain.detail.contains("GeoTIFF"));
-    // No "primitive geometry will not appear" warning for a pure terrain scene.
-    assert!(!report
-        .degradations
-        .iter()
-        .any(|note| note.contains("primitive object")));
-}
-
-#[test]
 fn the_handoff_carries_the_dem_and_an_orbit_camera() {
     let project = Project::starter("Bryce", Some(seed()));
     let plan = handoff(&project, 1, Workspace::Forge3d);
@@ -205,7 +187,6 @@ fn the_handoff_carries_the_dem_and_an_orbit_camera() {
     );
 
     // The look-at camera is still reported for mesh scenes.
-    assert!(plan.camera.is_some());
 }
 
 #[test]

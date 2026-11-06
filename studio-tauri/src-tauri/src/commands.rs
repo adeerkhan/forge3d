@@ -71,7 +71,7 @@ pub struct ScenePreset {
 #[tauri::command]
 pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
     let mut presets = Vec::new();
-    for (id, name, dem_file, description) in crate::forge3d::SCENE_PRESETS {
+    for (id, name, _dem_file, description) in crate::forge3d::SCENE_PRESETS {
         let seed = forge.terrain_seed(Some(id));
         presets.push(ScenePreset {
             id: id.to_owned(),
@@ -83,7 +83,6 @@ pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
             world_span: seed.as_ref().and_then(|seed| seed.world_span_xz),
             available: seed.is_some(),
         });
-        let _ = dem_file;
     }
     presets
 }
@@ -363,6 +362,94 @@ pub struct MeshFilePayload {
     pub base64: String,
 }
 
+/// What produced a still: the renderer payload (the single source of truth for
+/// the framing, sun and settings) plus the provenance only the shell knows.
+///
+/// Extracted from the command so the recorded shape is testable without a Tauri
+/// app or a GPU.
+fn still_sidecar(
+    request: &RenderRequest,
+    handoff: &studio_core::Handoff,
+    frame_ms: f64,
+) -> serde_json::Value {
+    let uses_aov_path =
+        request.aov_albedo || request.aov_normal || request.aov_depth || request.still_denoise;
+    let mut description = request.to_payload("final", None);
+    if let Some(map) = description.as_object_mut() {
+        map.remove("output");
+        map.insert(
+            "renderer".into(),
+            serde_json::json!(if uses_aov_path {
+                "forge3d.render_with_aov"
+            } else {
+                "forge3d.render_terrain_pbr_pom"
+            }),
+        );
+        map.insert(
+            "stillAov".into(),
+            serde_json::json!({
+                "albedo": request.aov_albedo,
+                "normal": request.aov_normal,
+                "depth": request.aov_depth,
+            }),
+        );
+        map.insert(
+            "stillDenoise".into(),
+            serde_json::json!(request.still_denoise),
+        );
+        map.insert("frameMs".into(), serde_json::json!(frame_ms));
+        map.insert("revision".into(), serde_json::json!(handoff.revision));
+        map.insert(
+            "handoffKey".into(),
+            serde_json::json!(handoff.idempotency_key),
+        );
+    }
+    description
+}
+
+/// Read a file for the webview, with the one size ceiling every asset shares.
+///
+/// Kind validation stays in the command — "this is not a glTF" and "this is not
+/// a Radiance .hdr" are different sentences — but the metadata checks, the cap
+/// and the base64 encode are identical for all of them.
+fn read_file_capped(path: &str, limit: Option<(u64, &str)>) -> Result<(PathBuf, Vec<u8>), String> {
+    let file = PathBuf::from(path);
+    let metadata =
+        std::fs::metadata(&file).map_err(|error| format!("could not read {path}: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("{path} is not a file"));
+    }
+    if metadata.len() == 0 {
+        return Err(format!("{path} is empty"));
+    }
+    if let Some((limit, note)) = limit {
+        if metadata.len() > limit {
+            return Err(format!(
+                "{path} is {:.1} MB; {note} {} MB",
+                metadata.len() as f64 / (1024.0 * 1024.0),
+                limit / (1024 * 1024)
+            ));
+        }
+    }
+    let bytes = std::fs::read(&file).map_err(|error| format!("could not read {path}: {error}"))?;
+    Ok((file, bytes))
+}
+
+/// The IPC shape for "here are the bytes and their identity".
+fn payload(path: String, kind: AssetKind, fallback_name: &str, bytes: Vec<u8>) -> MeshFilePayload {
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| fallback_name.to_owned());
+    MeshFilePayload {
+        path,
+        name,
+        kind,
+        byte_size: bytes.len() as u64,
+        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }
+}
+
 /// Read a `.gltf`/`.glb` file for import.
 ///
 /// The UI parses the bytes before registering anything, so a corrupt file
@@ -384,37 +471,16 @@ pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
         ));
     }
 
-    let metadata = std::fs::metadata(&path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    if !metadata.is_file() {
-        return Err(format!("{} is not a file", path.display()));
-    }
-    if metadata.len() == 0 {
-        return Err(format!("{} is empty", path.display()));
-    }
-    if metadata.len() > MAX_MESH_BYTES {
-        return Err(format!(
-            "{} is {:.1} MB; imports are limited to {} MB for now",
-            path.display(),
-            metadata.len() as f64 / (1024.0 * 1024.0),
-            MAX_MESH_BYTES / (1024 * 1024)
-        ));
-    }
-
-    let bytes = std::fs::read(&path)
-        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "imported".to_owned());
-
-    Ok(MeshFilePayload {
-        path: path.to_string_lossy().into_owned(),
-        name,
+    let (_file, bytes) = read_file_capped(
+        &path.to_string_lossy(),
+        Some((MAX_MESH_BYTES, "imports are limited to")),
+    )?;
+    Ok(payload(
+        path.to_string_lossy().into_owned(),
         kind,
-        byte_size: bytes.len() as u64,
-        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+        "imported",
+        bytes,
+    ))
 }
 
 /// Sample a DEM into a heightfield for the Studio viewport.
@@ -445,7 +511,6 @@ pub fn shell_info() -> ShellInfo {
     ShellInfo {
         name: "Forge3D Studio".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
-        phase: "Phase 1 — desktop shell and project model".to_owned(),
     }
 }
 
@@ -454,7 +519,6 @@ pub fn shell_info() -> ShellInfo {
 pub struct ShellInfo {
     pub name: String,
     pub version: String,
-    pub phase: String,
 }
 
 // ---------------------------------------------------------------------- Forge3D
@@ -649,19 +713,13 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
             "{path} is not a PNG/JPEG image; GeoTIFF textures are not yet decoded in the viewport"
         ));
     }
-    let kind = studio_core::AssetKind::Orthophoto;
-    let bytes = std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))?;
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "texture".to_owned());
-    Ok(MeshFilePayload {
+    let (_file, bytes) = read_file_capped(&path, None)?;
+    Ok(payload(
         path,
-        name,
-        kind,
-        byte_size: bytes.len() as u64,
-        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+        studio_core::AssetKind::Orthophoto,
+        "texture",
+        bytes,
+    ))
 }
 
 /// Raw bytes of a Radiance `.hdr` environment for the Material preview.
@@ -677,28 +735,9 @@ pub fn read_hdr(path: String) -> Result<MeshFilePayload, String> {
             "{path} is not a Radiance .hdr environment — export the HDRI as .hdr"
         ));
     }
-    let bytes = std::fs::read(&path).map_err(|error| format!("could not read {path}: {error}"))?;
-    if bytes.is_empty() {
-        return Err(format!("{path} is empty"));
-    }
-    if bytes.len() as u64 > MAX_HDR_BYTES {
-        return Err(format!(
-            "{path} is {:.1} MB; the environment map limit is {} MB",
-            bytes.len() as f64 / (1024.0 * 1024.0),
-            MAX_HDR_BYTES / (1024 * 1024)
-        ));
-    }
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "environment.hdr".to_owned());
-    Ok(MeshFilePayload {
-        path,
-        name,
-        kind: AssetKind::Hdr,
-        byte_size: bytes.len() as u64,
-        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+    let (_file, bytes) =
+        read_file_capped(&path, Some((MAX_HDR_BYTES, "the environment map limit is")))?;
+    Ok(payload(path, AssetKind::Hdr, "environment.hdr", bytes))
 }
 
 /// Decoded, downsampled PNG of a raster overlay for the Material preview's
@@ -713,17 +752,27 @@ pub fn raster_preview(
     let python = forge.probe(false).python;
     let width = width.unwrap_or(2048).clamp(64, 4096);
     let bytes = crate::forge3d::raster_preview_png(&python, &path, width)?;
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "overlay".to_owned());
-    Ok(MeshFilePayload {
+    Ok(payload(
         path,
-        name,
-        kind: studio_core::AssetKind::Orthophoto,
-        byte_size: bytes.len() as u64,
-        base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
-    })
+        studio_core::AssetKind::Orthophoto,
+        "overlay",
+        bytes,
+    ))
+}
+
+/// One render request from a handoff — the single place the payload's camera,
+/// sun and settings are assembled, so a still, a viewport frame and an exported
+/// sequence frame cannot drift apart.
+fn build_request(
+    handoff: &studio_core::Handoff,
+    settings: &studio_core::RenderSettings,
+    width: u32,
+    height: u32,
+    view: Option<&RenderView>,
+) -> Result<RenderRequest, String> {
+    Ok(RenderRequest::from_handoff(handoff, width, height)?
+        .with_view(view)
+        .with_settings(settings))
 }
 
 #[tauri::command]
@@ -750,13 +799,13 @@ pub fn render_frame(
             snapshot.project.render,
         )
     };
-    let request = RenderRequest::from_handoff(
+    let request = build_request(
         &handoff,
+        &settings,
         width.unwrap_or(960).clamp(64, 4096),
         height.unwrap_or(600).clamp(64, 4096),
-    )?
-    .with_view(view.as_ref())
-    .with_settings(&settings);
+        view.as_ref(),
+    )?;
     let python = forge.probe(false).python;
     let quality = quality.unwrap_or_else(|| "final".to_owned());
     render.render(&python, &request.dem, request.to_payload(&quality, None))
@@ -819,9 +868,13 @@ pub fn render_still(
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
     }
 
-    let request = RenderRequest::from_handoff(&handoff, settings.width, settings.height)?
-        .with_settings(&settings)
-        .with_view(view.as_ref());
+    let request = build_request(
+        &handoff,
+        &settings,
+        settings.width,
+        settings.height,
+        view.as_ref(),
+    )?;
     let python = forge.probe(false).python;
     let mut frame = render.render(
         &python,
@@ -831,47 +884,7 @@ pub fn render_still(
     frame.path = Some(target.display().to_string());
 
     let sidecar = target.with_extension("json");
-    let uses_aov_path =
-        request.aov_albedo || request.aov_normal || request.aov_depth || request.still_denoise;
-    let description = serde_json::json!({
-        "renderer": if uses_aov_path { "forge3d.render_with_aov" } else { "forge3d.render_terrain_pbr_pom" },
-        "width": request.width,
-        "height": request.height,
-        "exposure": request.exposure,
-        "shadows": request.shadows,
-        "ambientOcclusion": request.ambient_occlusion,
-        "sky": request.sky,
-        "iblIntensity": request.ibl_intensity,
-        "environment": request.environment,
-        "environmentBackgroundIntensity": request.environment_background_intensity,
-        "stillAov": {
-            "albedo": request.aov_albedo,
-            "normal": request.aov_normal,
-            "depth": request.aov_depth,
-        },
-        "stillDenoise": request.still_denoise,
-        "camera": {
-            "phiDeg": request.phi_deg,
-            "thetaDeg": request.theta_deg,
-            "radius": request.radius,
-            "target": request.target,
-            "fovDeg": request.fov_deg,
-        },
-        "sun": {
-            "azimuthDeg": request.sun_azimuth_deg,
-            "elevationDeg": request.sun_elevation_deg,
-            "intensity": request.sun_intensity,
-            "color": request.sun_color,
-        },
-        "terrain": {
-            "dem": request.dem,
-            "zScale": request.z_scale,
-            "overlay": request.overlay.as_ref().map(|overlay| overlay.path.clone()),
-        },
-        "frameMs": frame.ms,
-        "revision": handoff.revision,
-        "handoffKey": handoff.idempotency_key,
-    });
+    let description = still_sidecar(&request, &handoff, frame.ms);
     if let Err(error) = std::fs::write(
         &sidecar,
         serde_json::to_vec_pretty(&description).unwrap_or_default(),
@@ -928,10 +941,13 @@ pub fn render_animation_frame(
     // fall back to `terrain_camera`, which ignores the camera's rotation and
     // distance). `with_view` also carries the FOV and the terrain-centred aim.
     let view = studio_core::workspace::camera_render_view(&project);
-    let request =
-        RenderRequest::from_handoff(&handoff, width.clamp(64, 4096), height.clamp(64, 4096))?
-            .with_view(view.as_ref())
-            .with_settings(&project.render);
+    let request = build_request(
+        &handoff,
+        &project.render,
+        width.clamp(64, 4096),
+        height.clamp(64, 4096),
+        view.as_ref(),
+    )?;
 
     let target = std::path::PathBuf::from(&output);
     if let Some(parent) = target.parent() {
@@ -970,4 +986,50 @@ pub struct WrittenFrame {
 pub fn render_stop(render: State<'_, RenderState>) -> RenderStatus {
     render.stop();
     render.status()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use studio_core::project::{Project, Workspace};
+
+    #[test]
+    fn still_sidecar_carries_the_payload_and_the_provenance() {
+        let project = Project::starter(
+            "Sidecar",
+            Some(studio_core::project::TerrainSeed {
+                title: None,
+                name: "dem.tif".to_owned(),
+                path: "/data/dem.tif".to_owned(),
+                byte_size: 1,
+                dimensions: Some([64, 64]),
+                elevation_range: Some([0.0, 100.0]),
+                world_origin_xz: Some([0.0, 0.0]),
+                world_span_xz: Some([640.0, 640.0]),
+                overlay: None,
+            }),
+        );
+        let handoff = studio_core::workspace::handoff(&project, 4, Workspace::Forge3d);
+        let request = RenderRequest::from_handoff(&handoff, 640, 400)
+            .expect("the starter scene has terrain")
+            .with_settings(&project.render);
+        let sidecar = still_sidecar(&request, &handoff, 12.5);
+
+        // One payload producer: these must be the renderer's own keys.
+        assert_eq!(sidecar["width"], 640);
+        assert_eq!(sidecar["quality"]["aov"]["albedo"], false);
+        assert_eq!(sidecar["camera"]["phiDeg"], request.phi_deg);
+        assert_eq!(sidecar["sun"]["intensity"], request.sun_intensity);
+        assert!(
+            sidecar.get("output").is_none(),
+            "output is not a render setting"
+        );
+
+        // Provenance only the shell knows.
+        assert_eq!(sidecar["renderer"], "forge3d.render_terrain_pbr_pom");
+        assert_eq!(sidecar["stillDenoise"], false);
+        assert_eq!(sidecar["frameMs"], 12.5);
+        assert_eq!(sidecar["revision"], 4);
+        assert_eq!(sidecar["handoffKey"], handoff.idempotency_key);
+    }
 }

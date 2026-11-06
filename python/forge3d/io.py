@@ -15,6 +15,51 @@ from ._native import require_native_module as _ensure_native
 
 
 
+# ========== Radiance HDR (RGBE) writing ==========
+
+
+def write_hdr(path: "str | Path", rgb: np.ndarray) -> None:
+    """Write a linear RGB image as an uncompressed Radiance ``.hdr``.
+
+    The scene's environment maps go through here so the RGBE encoder exists
+    once — the exponent field is biased by 128 (``value = rgb / 256 *
+    2 ** (exponent - 128)``), which is the part a hand-rolled writer gets
+    wrong: storing a raw ``frexp`` exponent wraps every value under 0.5 to 253
+    and the engine decodes a black environment.
+
+    Parameters
+    ----------
+    path : str | Path
+        Destination file.
+    rgb : np.ndarray
+        ``(height, width, 3)`` non-negative linear radiance, row 0 = top.
+    """
+    from pathlib import Path as _Path
+
+    image = np.asarray(rgb, dtype=np.float32)
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("rgb must be a (height, width, 3) array")
+    if not np.isfinite(image).all():
+        raise ValueError("rgb must be finite")
+    if (image < 0.0).any():
+        raise ValueError("rgb must be non-negative radiance")
+    height, width = image.shape[:2]
+
+    peak = image.max(axis=2)
+    exponent = np.zeros(peak.shape, dtype=np.int32)
+    nonzero = peak > 1e-32
+    _, exp = np.frexp(peak)
+    exponent[nonzero] = exp[nonzero].astype(np.int32) + 128
+    scale = np.where(nonzero, 256.0 / np.exp2(exponent - 128), 0.0)
+    rgb8 = np.clip(image * scale[..., None], 0, 255).astype(np.uint8)
+    rgbe = np.concatenate(
+        [rgb8, np.clip(exponent, 0, 255).astype(np.uint8)[..., None]], axis=2
+    )
+
+    header = b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n" + f"-Y {height} +X {width}\n".encode()
+    _Path(path).write_bytes(header + rgbe.tobytes())
+
+
 # ========== DEM (Digital Elevation Model) Loading ==========
 
 @dataclass

@@ -643,7 +643,6 @@ export function createMockBridge(): StudioBridge {
     info: async () => ({
       name: "Forge3D Studio",
       version: "0.1.0",
-      phase: "Phase 2 — preview harness (no Rust shell)",
     }),
 
     // Static table lives in studio-core (Rust-tested); the preview shows no

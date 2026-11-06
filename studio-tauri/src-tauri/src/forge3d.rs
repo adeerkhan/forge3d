@@ -96,89 +96,98 @@ def main():
 main()
 "#;
 
-/// Sampling script for the Studio heightfield preview (rasterio is already a
-/// dependency of the engine's terrain workflow).
+/// Sampling script for the Studio heightfield preview.
+///
+/// Reading, nodata masking and the metric footprint are the engine's
+/// (`forge3d.io.load_dem`, `forge3d.gis`), so a preview and a render can never
+/// disagree about a DEM. Only the down-sample and the JSON shape are the
+/// shell's.
 const PREVIEW_SCRIPT: &str = r#"
 import json, sys
-import numpy as np
+
+try:
+    import numpy as np
+    import forge3d.io as fio
+    from forge3d import gis
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": "the engine is unavailable: %s" % (exc,)}))
+    raise SystemExit(0)
 
 path = sys.argv[1]
 resolution = max(8, min(256, int(sys.argv[2])))
 try:
-    import rasterio
-    from rasterio.warp import transform_bounds
+    dem = fio.load_dem(path, fill_nodata_values=False)
 except Exception as exc:
-    print(json.dumps({"ok": False, "detail": "rasterio is unavailable: %s" % (exc,)}))
+    print(json.dumps({"ok": False, "detail": "the DEM could not be read: %s" % (exc,)}))
     raise SystemExit(0)
 
-try:
-    with rasterio.open(path) as src:
-        # Masked read honours the file's nodata value. A sentinel such as
-        # -3.4e38 would otherwise become the elevation range and turn the mesh
-        # into spikes.
-        masked = src.read(1, masked=True)
-        raw = np.asarray(masked.filled(np.nan), dtype="float64")
-        valid = np.isfinite(raw)
-        if not valid.any():
-            print(json.dumps({"ok": False, "detail": "the DEM contains no valid elevation samples"}))
-            raise SystemExit(0)
-        # A robust range: single corrupted samples (one 11 km pixel in the Swiss
-        # DEM) would otherwise define the display range and flatten everything.
-        valid_values = raw[valid]
-        low, high = np.percentile(valid_values, [0.01, 99.99])
-        min_elevation = float(low)
-        max_elevation = float(high)
-        outliers = int(np.count_nonzero((valid_values < low) | (valid_values > high)))
+raw = np.asarray(dem.data, dtype="float64")
+if dem.nodata_value is not None:
+    # A sentinel such as -3.4e38 would otherwise define the range and turn the
+    # mesh into spikes.
+    raw = np.where(np.isclose(raw, float(dem.nodata_value)), np.nan, raw)
+valid = np.isfinite(raw)
+if not valid.any():
+    print(json.dumps({"ok": False, "detail": "the DEM contains no valid elevation samples"}))
+    raise SystemExit(0)
 
-        height, width = raw.shape
-        ys = np.linspace(0, height, resolution + 1).astype(int)
-        xs = np.linspace(0, width, resolution + 1).astype(int)
-        out = np.empty((resolution, resolution), dtype="float64")
-        for j in range(resolution):
-            for i in range(resolution):
-                block = raw[ys[j]:max(ys[j] + 1, ys[j + 1]), xs[i]:max(xs[i] + 1, xs[i + 1])]
-                good = block[np.isfinite(block)]
-                if good.size:
-                    out[j, i] = float(np.clip(good.mean(), min_elevation, max_elevation))
-                else:
-                    out[j, i] = min_elevation
+# A robust range: single corrupted samples (one 11 km pixel in the Swiss DEM)
+# would otherwise define the display range and flatten everything.
+values = raw[valid]
+low, high = np.percentile(values, [0.01, 99.99])
+min_elevation = float(low)
+max_elevation = float(high)
+outliers = int(np.count_nonzero((values < low) | (values > high)))
 
-        # World footprint. Geographic rasters (degrees) are converted to metres;
-        # treating degrees as metres is what made a 353 km DEM report 0.00 km.
-        crs = src.crs
-        bounds = src.bounds
-        origin_xz = [0.0, 0.0]
-        if crs is None:
-            span_xz = [float(width), float(height)]
-        elif crs.is_geographic:
-            lon = (bounds.left + bounds.right) * 0.5
-            lat = (bounds.top + bounds.bottom) * 0.5
-            zone = int((lon + 180.0) // 6.0) + 1
-            epsg = (32600 if lat >= 0 else 32700) + zone
-            left, bottom, right, top = transform_bounds(crs, "EPSG:%d" % epsg, *bounds)
-            span_xz = [abs(right - left), abs(top - bottom)]
+height, width = raw.shape
+ys = np.linspace(0, height, resolution + 1).astype(int)
+xs = np.linspace(0, width, resolution + 1).astype(int)
+out = np.empty((resolution, resolution), dtype="float64")
+for j in range(resolution):
+    for i in range(resolution):
+        block = raw[ys[j]:max(ys[j] + 1, ys[j + 1]), xs[i]:max(xs[i] + 1, xs[i + 1])]
+        good = block[np.isfinite(block)]
+        if good.size:
+            out[j, i] = float(np.clip(good.mean(), min_elevation, max_elevation))
         else:
-            span_xz = [abs(float(src.transform.a)) * width, abs(float(src.transform.e)) * height]
-            origin_xz = [float(src.transform.c), float(-src.transform.f)]
+            out[j, i] = min_elevation
 
-        payload = {
-            "ok": True,
-            "width": int(width),
-            "height": int(height),
-            "minElevation": min_elevation,
-            "maxElevation": max_elevation,
-            "extentMeters": span_xz,
-            "originXz": origin_xz,
-            "spanXz": span_xz,
-            "geographic": bool(crs is not None and crs.is_geographic),
-            "outliers": outliers,
-            "resolution": resolution,
-            "heights": [round(float(value), 2) for value in out.ravel()],
-        }
-except Exception as exc:
-    print(json.dumps({"ok": False, "detail": str(exc)}))
-    raise SystemExit(0)
+# World footprint in metres. Geographic rasters (degrees) are reprojected to
+# their local UTM zone; treating degrees as metres reported a 353 km DEM as
+# 0.00 km.
+crs = str(dem.crs or "")
+geographic = "4326" in crs or "wgs84" in crs.lower()
+origin_xz = [0.0, 0.0]
+if not crs:
+    span_xz = [float(width), float(height)]
+elif geographic and dem.bounds is not None:
+    local = gis.estimate_local_utm(dem.bounds)["crs"]
+    left, bottom, right, top = gis.transform_bounds(dem.crs, local, dem.bounds, densify=21)
+    span_xz = [abs(right - left), abs(top - bottom)]
+else:
+    res = dem.resolution or (1.0, 1.0)
+    span_xz = [abs(float(res[0])) * width, abs(float(res[1])) * height]
+    transform = dem.transform
+    if transform is not None:
+        origin_xz = [
+            float(getattr(transform, "c", 0.0)),
+            float(-getattr(transform, "f", 0.0)),
+        ]
 
+payload = {
+    "ok": True,
+    "width": int(width),
+    "height": int(height),
+    "minElevation": min_elevation,
+    "maxElevation": max_elevation,
+    "extentMeters": span_xz,
+    "originXz": origin_xz,
+    "spanXz": span_xz,
+    "geographic": bool(geographic),
+    "outliers": outliers,
+    "resolution": resolution,
+    "heights": [round(float(value), 2) for value in out.ravel()],
+}
 print(json.dumps(payload))
 "#;
 

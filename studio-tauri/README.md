@@ -9,9 +9,9 @@ Studio workspace and (from Phase 3) the Forge3D workspace.
 open/save/autosave/recovery, command-based undo/redo, a Three.js viewport with
 Solid / Material / Rendered modes, orbit/pan/zoom and a camera view,
 Blender-style move/rotate/scale tools, an orientation gizmo, add/duplicate/delete,
-glTF/GLB import, the Forge3D workspace adapter (capability report, engine probe,
-camera/sun sync), and the animation timeline with keyframes and PNG sequence
-export.
+glTF/GLB import, the Forge3D workspace adapter (per-parameter capability table,
+engine probe, camera/sun sync), and the animation timeline with keyframes and
+PNG sequence export.
 
 > The pre-existing `../studio/` tree is the earlier terrain-focused eframe/egui
 > Studio. It is a separate application and a separate Cargo workspace. This
@@ -286,9 +286,11 @@ animation sequence):
   coming back un-denoised. OIDN 1.4 requires the device to be committed before
   filters are created — handled in `denoise_oidn.py`.
 
-The sidecar `<name>.json` records which path was used
-(`forge3d.render_with_aov` vs `render_terrain_pbr_pom`), the AOV flags and
-the denoise flag. Depth is the engine's linear AOV normalised to
+The sidecar `<name>.json` is the payload the renderer received — width,
+height, camera, sun, exposure, IBL and terrain settings, all from one
+producer — plus the provenance only the shell knows: which path was used
+(`forge3d.render_with_aov` vs `render_terrain_pbr_pom`), the AOV flags, the
+denoise flag, the frame time, the project revision and the handoff key. Depth is the engine's linear AOV normalised to
 [near, far]; normals are signed world-space normals in the engine's
 published environment frame — both are meant as inputs to other tools, not
 as images to look at.
@@ -380,8 +382,10 @@ the Python source accepts a setting the native binary predates. Rebuild with
 `maturin develop --release` (or copy `target/release/libforge3d.so` over the
 `.so`) and restart the shell. There is no separate viewer window any more: opening
 one was a Phase 3 detour, and it has been removed along with its workspace tab.
-The capability report it produced still exists in `workspace.rs`, where it feeds
-the render handoff.
+What survives from it in `workspace.rs` is the handoff itself (terrain, orbit
+camera, sun angles, environment) and the per-parameter capability table the
+Inspector reads; the object-by-object report that only the removed viewer
+consumed is gone.
 
 ## Known limitations
 
