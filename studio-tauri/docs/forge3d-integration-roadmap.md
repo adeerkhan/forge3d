@@ -22,6 +22,9 @@ be a payload field: vector layers and meshes.
 | Timeline drawer, render queue, asset integrity, samples | done |
 | Sun from date/time/location (increment 9.0) | done |
 | AOV + OIDN denoise final stills (increment 10.0) | done |
+| Denoise runtime actually works (oidn+tbb in `.venv`, 1.4 commit order, TBB preload) | done |
+| GPU selection prefers discrete adapters + adapter name in the status bar | done |
+| Solid/Material/Rendered lighting unified (exposure, ambient fill, shared rig) | done |
 | Engine backend/adapter in the probe (first half of 8.0) | done |
 | HDRI/sky axis fix (Z-up terrain → Y-up environment frame for the sky pass) | done |
 | Everything below (§3–§6, except 9.0) | **not started** |

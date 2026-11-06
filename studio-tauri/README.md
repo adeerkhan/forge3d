@@ -278,9 +278,11 @@ animation sequence):
   is written exactly as before.
 - **Denoise the still with OIDN** runs Open Image Denoise on the beauty
   (guided by the albedo/normal AOVs from the same frame). This needs an
-  OIDN runtime next to the engine (`pip install oidn` or
-  `pip install pyoidn`); when it is missing the frame **fails loudly**
-  instead of silently coming back un-denoised.
+  OIDN runtime next to the engine (`pip install oidn` and `pip install tbb`
+  — the checkout's `.venv` ships both since the Phase 10 fix); when it is
+  missing the frame **fails loudly** instead of silently coming back
+  un-denoised. OIDN 1.4 requires the device to be committed before filters
+  are created — handled in `denoise_oidn.py`.
 
 The sidecar `<name>.json` records which path was used
 (`forge3d.render_with_aov` vs `render_terrain_pbr_pom`), the AOV flags and
@@ -340,9 +342,15 @@ horizon is applied and reported (`daytime: false`), never clamped.
 
 Studio probes a Python interpreter for `import forge3d` (repo `.venv` first, then
 `python3`, `FORGE3D_STUDIO_PYTHON` to override) and reports the result in the
-status bar — `forge3d 1.47.1` when the renderer can run, `engine unavailable` with
-the reason when it cannot. The tooltip also names the wgpu backend and adapter
-(`Vulkan · Intel(R) Graphics …`), which is the GPU actually rendering.
+status bar — `forge3d 1.47.1 · Vulkan · RTX 5060 Laptop GPU …` when the
+renderer can run (the GPU is named in the bar), `engine unavailable` with the
+reason when it cannot. The tooltip carries the full backend and adapter, which
+is the GPU actually rendering. The engine selects its adapter by ranking
+discrete > integrated (hybrid laptops never silently bind the iGPU for a
+renderer), and the viewport's three.js canvas is WebGL — both stay on the GPU.
+Solid, Material and Rendered share one exposure (the project's), one sun
+(the scene's directional light), one hemisphere fill and one environment, so
+the three modes light the scene identically.
 
 **The extension must be built from this checkout.** A stale
 `python/forge3d/_forge3d.abi3.so` is what produces errors like

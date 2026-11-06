@@ -322,23 +322,23 @@ pub fn try_ctx() -> RenderResult<&'static GpuContext> {
             instance_desc.dx12_shader_compiler = wgpu::Dx12Compiler::Fxc;
         }
         let instance = Arc::new(wgpu::Instance::new(instance_desc));
-        let hardware = if deterministic_mode() {
-            // Deterministic selection: enumerate every adapter the pinned
-            // backend exposes and pick by a fixed order rather than the
-            // driver's power-preference heuristic, which can silently resolve
-            // to an integrated GPU on dual-adapter hosts. Rank: discrete >
-            // integrated > other > virtual > cpu; ties broken by
-            // (vendor, device, name) so the choice is reproducible on this
-            // machine and attributable in the evidence record.
-            fn device_type_rank(t: wgpu::DeviceType) -> u8 {
-                match t {
-                    wgpu::DeviceType::DiscreteGpu => 0,
-                    wgpu::DeviceType::IntegratedGpu => 1,
-                    wgpu::DeviceType::Other => 2,
-                    wgpu::DeviceType::VirtualGpu => 3,
-                    wgpu::DeviceType::Cpu => 4,
-                }
+        // Enumerate every adapter and rank discrete > integrated > other >
+        // virtual > cpu so hybrid hosts never silently bind the iGPU for a
+        // renderer. Deterministic mode uses the same ordering — hoisted so
+        // both paths share it exactly.
+        fn adapter_rank(t: wgpu::DeviceType) -> u8 {
+            match t {
+                wgpu::DeviceType::DiscreteGpu => 0,
+                wgpu::DeviceType::IntegratedGpu => 1,
+                wgpu::DeviceType::Other => 2,
+                wgpu::DeviceType::VirtualGpu => 3,
+                wgpu::DeviceType::Cpu => 4,
             }
+        }
+        fn rank_adapters(
+            instance: &wgpu::Instance,
+            backends: wgpu::Backends,
+        ) -> Option<wgpu::Adapter> {
             let mut candidates: Vec<(wgpu::AdapterInfo, wgpu::Adapter)> = instance
                 .enumerate_adapters(backends)
                 .into_iter()
@@ -346,27 +346,21 @@ pub fn try_ctx() -> RenderResult<&'static GpuContext> {
                 .collect();
             candidates.sort_by(|(a, _), (b, _)| {
                 (
-                    device_type_rank(a.device_type),
+                    adapter_rank(a.device_type),
                     a.vendor,
                     a.device,
                     a.name.as_str(),
                 )
                     .cmp(&(
-                        device_type_rank(b.device_type),
+                        adapter_rank(b.device_type),
                         b.vendor,
                         b.device,
                         b.name.as_str(),
                     ))
             });
             candidates.into_iter().next().map(|(_, adapter)| adapter)
-        } else {
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                // LowPower tends to resolve faster and avoids eGPU/discrete probing on macOS
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            }))
-        };
+        }
+        let hardware = rank_adapters(&instance, backends);
         let (adapter, mut software_fallback) = match hardware {
             Some(adapter) => (adapter, false),
             None => {

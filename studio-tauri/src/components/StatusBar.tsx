@@ -34,7 +34,11 @@ export function StatusBar() {
         >
           {engine
             ? engine.available
-              ? `forge3d ${engine.packageVersion ?? "?"}`
+              ? `forge3d ${engine.packageVersion ?? "?"}${
+                  engine.adapter
+                    ? ` · ${engine.adapter.replace(/^NVIDIA GeForce\s*/, "").slice(0, 44)}`
+                    : ""
+                }`
               : "engine unavailable"
             : "probing engine…"}
         </span>

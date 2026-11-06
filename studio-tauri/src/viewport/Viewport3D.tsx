@@ -702,7 +702,7 @@ export function Viewport3D() {
     // The renderer tone-maps (ACES, exposure 1.35); without this the viewport
     // reads much brighter than the Rendered frame.
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 0.95;
+    renderer.toneMappingExposure = 1.35;
     // Material preview only, but the map must exist before any light casts.
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFShadowMap;
@@ -1226,8 +1226,14 @@ export function Viewport3D() {
       project.render.iblIntensity,
       project.render.environmentBackgroundIntensity,
     );
+    // One exposure for every mode — the project's, applied by the engine in
+    // Rendered; the preview now agrees instead of running 0.95 against the
+    // engine's 1.35.
+    runtime.renderer.toneMappingExposure = project.render.exposure;
     runtime.sun.castShadow = !solidView && runtime.glStep < 3;
-    runtime.hemi.intensity = solidView ? 0.28 : 0.12;
+    // One ambient fill for every mode (Solid and Material differ only by
+    // environment, which is the mode's purpose, not a lighting difference).
+    runtime.hemi.intensity = 0.28;
 
     runtime.grid.visible = project.viewport.gridVisible;
 

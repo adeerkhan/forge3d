@@ -1,16 +1,48 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import ctypes
+import os
 from typing import Any
 
 import numpy as np
 
 
+def _preload_tbb() -> None:
+    """Register libtbb with the global symbol table before OIDN loads.
+
+    The `oidn` wheel ships `libtbb.so.12.5` (SONAME ``libtbb.so.12``) next to
+    `libOpenImageDenoise.so`, but nothing puts that directory on the search
+    path, so a bare ``import oidn`` dies with
+    ``OSError: libtbb.so.12: cannot open shared object file``. Loading the
+    library by full path first registers its SONAME globally and the later
+    load resolves. The `tbb` wheel puts `libtbb.so.12` at the
+    site-packages root; both locations are honoured.
+    """
+    candidates: list[str] = []
+    import sysconfig
+
+    site_packages = sysconfig.get_paths().get("purelib")
+    if site_packages and os.path.isdir(site_packages):
+        for root, _dirs, files in os.walk(site_packages):
+            for name in files:
+                if name.startswith("libtbb.so.12") or name.startswith("libtbbmalloc.so.2"):
+                    candidates.append(os.path.join(root, name))
+    # The oidn package's own copies win (newest match first is fine either way).
+    for path in sorted(candidates, key=lambda p: ("oidn" not in p, p)):
+        try:
+            ctypes.CDLL(path, mode=os.RTLD_GLOBAL)
+        except OSError:
+            continue
+
+
 def _load_backend() -> Any | None:
+    _preload_tbb()
     for module_name in ("oidn", "pyoidn"):
         try:
             return importlib.import_module(module_name)
-        except ImportError:
+        except (ImportError, OSError):
             continue
     return None
 
@@ -111,6 +143,58 @@ def _run_device_filter(
     hdr: bool,
     quality: str,
 ) -> np.ndarray:
+    """Filter through an OIDN C-API-style binding (the `oidn` 0.2.x package).
+
+    The package exposes flat functions — `NewDevice(type) -> handle`,
+    `NewFilter(handle, "RT") -> handle`, `SetSharedFilterImage(...)`,
+    `CommitDevice/CommitFilter/ExecuteFilter/ReleaseDevice/ReleaseFilter` —
+    with no scalar setters, so device-defaults apply (RT filter, LDR input).
+    Higher-level bindings (`pyoidn`) are handled by the existing
+    `_maybe_set_*` path below.
+    """
+    new_device = _first_attr(backend, "NewDevice", "new_device")
+    new_filter = _first_attr(backend, "NewFilter", "new_filter")
+    set_image = _first_attr(backend, "SetSharedFilterImage", "set_shared_filter_image")
+    commit_device = _first_attr(backend, "CommitDevice", "commit_device")
+    commit_filter = _first_attr(backend, "CommitFilter", "commit_filter")
+    execute = _first_attr(backend, "ExecuteFilter", "Execute", "execute")
+    release_filter = _first_attr(backend, "ReleaseFilter", "release_filter")
+    release_device = _first_attr(backend, "ReleaseDevice", "release_device")
+    format_float3 = getattr(backend, "FORMAT_FLOAT3", None)
+
+    if all(
+        callable(fn)
+        for fn in (new_device, new_filter, set_image, commit_device, commit_filter, execute)
+    ) and format_float3 is not None:
+        device_type = int(
+            getattr(backend, "DEVICE_TYPE_DEFAULT", getattr(backend, "DEVICE_TYPE_CPU", 0))
+        )
+        device = new_device(device_type)
+        try:
+            # OIDN 1.4 requires the device to be committed before filters are
+            # created; NewFilter before CommitDevice returns
+            # ERROR_INVALID_OPERATION (3).
+            commit_device(device)
+            filter_handle = new_filter(device, "RT")
+            try:
+                height, width = beauty.shape[:2]
+                set_image(filter_handle, "color", beauty, format_float3, width, height)
+                if albedo is not None:
+                    set_image(filter_handle, "albedo", albedo, format_float3, width, height)
+                if normal is not None:
+                    set_image(filter_handle, "normal", normal, format_float3, width, height)
+                output = np.empty_like(beauty)
+                set_image(filter_handle, "output", output, format_float3, width, height)
+                commit_filter(filter_handle)
+                execute(filter_handle)
+                return output
+            finally:
+                if callable(release_filter):
+                    release_filter(filter_handle)
+        finally:
+            if callable(release_device):
+                release_device(device)
+
     device_ctor = _first_attr(backend, "NewDevice", "Device")
     if device_ctor is None:
         raise RuntimeError("OIDN backend does not expose a device constructor")
