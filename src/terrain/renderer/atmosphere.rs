@@ -48,6 +48,20 @@ pub(crate) struct RenderedSky {
     pub(crate) linear_hdr: bool,
 }
 
+/// mesh:zup worlds keep terrain directions in the Z-up frame
+/// (+X east, +Y south, +Z up), but the sky shaders and the environment
+/// cubemaps are authored in a Y-up frame (+X east, +Y up, +Z south).
+/// Permuting (y, z) into the Y-up frame for the sky pass makes the sun
+/// disk, the analytic sky and the HDRI background agree with the IBL.
+fn mesh_world_to_sky_frame() -> glam::Mat4 {
+    glam::Mat4::from_cols(
+        glam::Vec4::new(1.0, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(0.0, 1.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 1.0),
+    )
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TerrainSkyUniforms {
@@ -475,6 +489,7 @@ impl TerrainScene {
         eye: glam::Vec3,
         width: u32,
         height: u32,
+        camera_mode: &str,
     ) -> Result<Option<RenderedSky>> {
         if !decoded.sky.enabled || width == 0 || height == 0 {
             return Ok(None);
@@ -495,13 +510,15 @@ impl TerrainScene {
             solar_elevation,
         );
         let sky_uniforms = TerrainSkyUniforms {
-            // sky.wgsl is authored in a Y-up frame while terrain lighting is Z-up.
-            // Swizzle the decoded terrain light so the sky disk still tracks the
+            // The sky shaders are authored in a Y-up frame with +Z toward the
+            // south (the environment cubemap frame), while the decoded terrain
+            // light lives in the Z-up geographic frame (+X east, +Y north,
+            // +Z up). Swizzle to (east, up, south) so the sky disk tracks the
             // terrain sun direction on screen.
             sun_direction_turbidity: [
                 decoded.light.direction[0],
                 decoded.light.direction[2],
-                decoded.light.direction[1],
+                -decoded.light.direction[1],
                 decoded.sky.turbidity.clamp(1.0, 10.0),
             ],
             ground_albedo_sun_size_sun_intensity_exposure: [
@@ -535,10 +552,19 @@ impl TerrainScene {
             },
         )?;
 
+        // The sky pass reconstructs world-space rays with `inv_view`. zup
+        // worlds carry directions in the mesh frame; forward them in the
+        // environment (Y-up) frame the sky shaders and IBL are authored in.
+        let inv_view = view_matrix.inverse();
+        let inv_view_sky = if crate::terrain::camera_mode::is_zup_camera_mode(camera_mode) {
+            mesh_world_to_sky_frame() * inv_view
+        } else {
+            inv_view
+        };
         let sky_camera_uniforms = TerrainSkyCameraUniforms {
             view: view_matrix.to_cols_array_2d(),
             proj: proj_matrix.to_cols_array_2d(),
-            inv_view: view_matrix.inverse().to_cols_array_2d(),
+            inv_view: inv_view_sky.to_cols_array_2d(),
             inv_proj: proj_matrix.inverse().to_cols_array_2d(),
             eye_position: eye.to_array(),
             _pad0: 0.0,

@@ -145,8 +145,9 @@ fn cs_render_aether_sky(@builtin(global_invocation_id) gid: vec3<u32>) {
     let view_pos=det_mat4_mul_vec4(camera.inv_proj, clip);
     let view_vs=det_normalize3(det_div3(view_pos.xyz, vec3<f32>(view_pos.w)));
     let view_ws=det_normalize3((det_mat4_mul_vec4(camera.inv_view, vec4<f32>(view_vs,0.0))).xyz);
-    // Terrain/world cameras are Z-up; the atmosphere LUT is parameterized in
-    // Y-up coordinates, matching the already-swizzled sun uniform.
-    let view_y_up = view_ws.xzy;
+    // `camera.inv_view` now delivers world directions in the Y-up environment
+    // frame (+X east, +Y up, +Z south) for every camera mode, matching the
+    // sun uniform swizzle in `render_sky_texture`.
+    let view_y_up = view_ws;
     textureStore(output_texture,pixel,vec4<f32>(aether_sky_radiance(view_y_up),1.0));
 }

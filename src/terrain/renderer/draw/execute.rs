@@ -320,6 +320,7 @@ impl TerrainScene {
             camera_eye,
             render_targets.internal_width,
             render_targets.internal_height,
+            &params.camera_mode,
         )?;
         ts_end(timing, encoder, sky_scope, 0);
         let sky_view = sky_texture
