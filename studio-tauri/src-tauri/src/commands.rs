@@ -831,8 +831,10 @@ pub fn render_still(
     frame.path = Some(target.display().to_string());
 
     let sidecar = target.with_extension("json");
+    let uses_aov_path =
+        request.aov_albedo || request.aov_normal || request.aov_depth || request.still_denoise;
     let description = serde_json::json!({
-        "renderer": "forge3d.render_terrain_pbr_pom",
+        "renderer": if uses_aov_path { "forge3d.render_with_aov" } else { "forge3d.render_terrain_pbr_pom" },
         "width": request.width,
         "height": request.height,
         "exposure": request.exposure,
@@ -842,6 +844,12 @@ pub fn render_still(
         "iblIntensity": request.ibl_intensity,
         "environment": request.environment,
         "environmentBackgroundIntensity": request.environment_background_intensity,
+        "stillAov": {
+            "albedo": request.aov_albedo,
+            "normal": request.aov_normal,
+            "depth": request.aov_depth,
+        },
+        "stillDenoise": request.still_denoise,
         "camera": {
             "phiDeg": request.phi_deg,
             "thetaDeg": request.theta_deg,

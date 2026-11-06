@@ -140,6 +140,12 @@ export interface RenderSettings {
   /** HDRI backdrop brightness (0..1): the Material preview's backdrop and the
    *  Rendered sky exposure. 0 hides it. */
   environmentBackgroundIntensity: number;
+  /** Final-quality AOV export for the still: `<name>_albedo.png`,
+   *  `<name>_normal.png`, `<name>_depth.png` next to it. */
+  stillAov: { albedo: boolean; normal: boolean; depth: boolean };
+  /** Final-quality OIDN denoise of the beauty pass. Needs an OIDN runtime
+   *  beside the engine; the render fails loudly without one. */
+  stillDenoise: boolean;
 }
 
 /** Studio-side material. The terrain renderer does not consume it. */

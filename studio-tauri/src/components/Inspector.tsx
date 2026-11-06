@@ -493,6 +493,18 @@ function RenderSettingsEditor() {
         onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
       />
       <Toggle
+        label="AOVs next to the still (albedo · normal · depth)"
+        checked={render.stillAov.albedo || render.stillAov.normal || render.stillAov.depth}
+        onChange={(value) =>
+          commit({ stillAov: { albedo: value, normal: value, depth: value } })
+        }
+      />
+      <Toggle
+        label="Denoise the still with OIDN"
+        checked={render.stillDenoise}
+        onChange={(stillDenoise) => commit({ stillDenoise })}
+      />
+      <Toggle
         label="Sky background"
         checked={render.sky}
         onChange={(sky) => commit({ sky })}

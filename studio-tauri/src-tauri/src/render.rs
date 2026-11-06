@@ -355,6 +355,12 @@ pub struct RenderRequest {
     /// Backdrop brightness of the environment map in Rendered frames, 0..=1.
     /// Independent of `ibl_intensity`, which scales the lighting.
     pub environment_background_intensity: f64,
+    /// Final-quality AOV export (see `studio_core::RenderSettings::still_aov`).
+    pub aov_albedo: bool,
+    pub aov_normal: bool,
+    pub aov_depth: bool,
+    /// Final-quality OIDN denoise of the beauty pass.
+    pub still_denoise: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -374,6 +380,10 @@ impl RenderRequest {
         self.ibl_intensity = f64::from(settings.ibl_intensity);
         self.environment_background_intensity =
             f64::from(settings.environment_background_intensity);
+        self.aov_albedo = settings.still_aov.albedo;
+        self.aov_normal = settings.still_aov.normal;
+        self.aov_depth = settings.still_aov.depth;
+        self.still_denoise = settings.still_denoise;
         self
     }
 
@@ -427,6 +437,14 @@ impl RenderRequest {
                 "sky": self.sky,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
                 "heightAo": final_quality && self.ambient_occlusion,
+                // Final stills (and the frames of a sequence) may ask for AOVs
+                // and an OIDN pass; previews never pay for either.
+                "aov": {
+                    "albedo": final_quality && self.aov_albedo,
+                    "normal": final_quality && self.aov_normal,
+                    "depth": final_quality && self.aov_depth,
+                },
+                "denoise": final_quality && self.still_denoise,
             },
             "overlay": self.overlay,
             "exposure": self.exposure,
@@ -512,6 +530,11 @@ impl RenderRequest {
                 .as_ref()
                 .map(|environment| environment.path.clone()),
             environment_background_intensity: 1.0,
+            // Off until `with_settings` copies the project's choice in.
+            aov_albedo: false,
+            aov_normal: false,
+            aov_depth: false,
+            still_denoise: false,
         })
     }
 }
@@ -543,6 +566,10 @@ mod tests {
             ibl_intensity: 1.0,
             environment: None,
             environment_background_intensity: 1.0,
+            aov_albedo: false,
+            aov_normal: false,
+            aov_depth: false,
+            still_denoise: false,
         }
     }
 
@@ -562,6 +589,33 @@ mod tests {
         assert!(preview["environment"].is_null());
         assert_eq!(preview["quality"]["pom"], false);
         assert_eq!(preview["quality"]["ambientOcclusion"], false);
+        assert_eq!(preview["quality"]["aov"]["albedo"], false);
+        assert_eq!(preview["quality"]["denoise"], false);
+    }
+
+    #[test]
+    fn payload_emits_aov_and_denoise_only_for_finals() {
+        let settings = studio_core::RenderSettings {
+            still_aov: studio_core::StillAov {
+                albedo: true,
+                normal: false,
+                depth: true,
+            },
+            still_denoise: true,
+            ..studio_core::RenderSettings::default()
+        };
+        let enabled = request().with_settings(&settings);
+        let final_payload = enabled.to_payload("final", Some("/out/still.png"));
+        assert_eq!(final_payload["quality"]["aov"]["albedo"], true);
+        assert_eq!(final_payload["quality"]["aov"]["normal"], false);
+        assert_eq!(final_payload["quality"]["aov"]["depth"], true);
+        assert_eq!(final_payload["quality"]["denoise"], true);
+
+        // A preview drops both — the interactive frame pays neither.
+        let preview = enabled.to_payload("preview", None);
+        assert_eq!(preview["quality"]["aov"]["albedo"], false);
+        assert_eq!(preview["quality"]["aov"]["depth"], false);
+        assert_eq!(preview["quality"]["denoise"], false);
     }
 
     #[test]

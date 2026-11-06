@@ -201,6 +201,34 @@ fn the_environment_is_a_fully_supported_parameter() {
 }
 
 #[test]
+fn final_still_extras_default_off_and_round_trip() {
+    let render = RenderSettings::default();
+    assert!(!render.still_denoise);
+    assert!(!render.still_aov.any_enabled());
+
+    // A project saved before these keys existed loads with them off, and the
+    // serialized project carries the new keys.
+    let mut editor = Editor::new(Project::new(UNTITLED));
+    let render = RenderSettings {
+        still_aov: studio_core::StillAov {
+            albedo: true,
+            normal: true,
+            depth: false,
+        },
+        still_denoise: true,
+        ..RenderSettings::default()
+    };
+    editor.apply(Command::SetRenderSettings { render }).unwrap();
+
+    let json = serde_json::to_string(editor.project()).unwrap();
+    let parsed: Project = serde_json::from_str(&json).unwrap();
+    assert!(parsed.render.still_aov.albedo);
+    assert!(parsed.render.still_aov.normal);
+    assert!(!parsed.render.still_aov.depth);
+    assert!(parsed.render.still_denoise);
+}
+
+#[test]
 fn the_hdri_background_intensity_is_validated() {
     let mut editor = Editor::new(Project::new(UNTITLED));
     for value in [-0.1f32, 1.5, f32::NAN] {

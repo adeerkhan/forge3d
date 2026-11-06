@@ -21,6 +21,7 @@ be a payload field: vector layers and meshes.
 | Terrain stills, Rendered frames, animation export | done |
 | Timeline drawer, render queue, asset integrity, samples | done |
 | Sun from date/time/location (increment 9.0) | done |
+| AOV + OIDN denoise final stills (increment 10.0) | done |
 | Engine backend/adapter in the probe (first half of 8.0) | done |
 | HDRI/sky axis fix (Z-up terrain → Y-up environment frame for the sky pass) | done |
 | Everything below (§3–§6, except 9.0) | **not started** |
@@ -134,17 +135,21 @@ All use §2. Nothing new is introduced beyond the settings below.
 - Service: `ShadowSettings` fields; keep the existing tuned biases.
 - Check: round-trip; one GPU smoke only if the pixel is the deliverable.
 
-## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day)
+## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.
-**Reuse:** the existing still path (`render_still`), `OfflineQualitySettings`,
-`oidn_denoise`.
-
-- Settings: `stillAov: { albedo, normal, depth }` booleans, `stillDenoise` bool.
-- Service: pass `AovSettings` to `render_with_aov` when any AOV is on; write
-  the AOV PNGs next to the still; run OIDN on the beauty when requested.
-- UI: two checkboxes in the render section; no new panel.
-- Check: files exist + naming; shell test for the payload.
+**Shipped:** `stillAov { albedo, normal, depth }` and `stillDenoise` on
+`RenderSettings` (serde-default, v4-safe); final-gated in `to_payload`
+(`preview` pays neither); `render_with_aov` writes `<name>_*_albedo/normal/
+depth.png` next to the still; OIDN runs on the beauty with the AOV guidance
+from the same frame and **fails loudly** when the runtime is missing
+(`pip install oidn` / `pip install pyoidn`); two checkboxes in the render
+section (no panel); sidecar names the actual renderer and flags. Previews
+and viewport frames skip both entirely. AOV files are written for sequence
+frames too (they are final renders), like `ambientOcclusion` today.
+**Check (done):** schema contract + wire shape + round-trip tests, payload
+assertions (final vs preview), `npm test` all green; GPU-verified albedo/
+normal/depth AOVs written correctly and the denoise-missing failure path.
 
 ## 7. The two real design increments
 
@@ -226,7 +231,7 @@ BVH product path, no hybrid preview.
 | 5 | 5.3 clouds | 0.5 | — |
 | 6 | 5.4 post (bloom/vignette) | 0.5 | — |
 | 7 | 5.5 shadows | 0.5 | — |
-| 8 | 10.0 AOV/denoise stills | 1 | — |
+| 8 | 10.0 AOV/denoise stills | 1 | — | done |
 | 9 | 7.1 vector layers | 3–5 | user request |
 | 10 | 7.2 meshes | 5–10 | user request |
 
@@ -253,7 +258,7 @@ surface; `out` = deliberately outside Studio.
 | Module | Purpose | Decision |
 |---|---|---|
 | `terrain_params` | renderer settings catalog | build (5.x) |
-| `offline`, `denoise`, `denoise_oidn` | offline quality/denoise | build (10.0) |
+| `offline`, `denoise`, `denoise_oidn` | offline quality/denoise | done (10.0) |
 | `sky`, `atmosphere`, `geo`, `astro` | sky/sun/moon | build (5.1, 9.0) |
 | `map_scene`, `vector`, `vector_line` | vectors/layers | trigger (7.1) |
 | `style`, `style_expressions`, `raster_style`, `thematic`, `colors`, `materials`, `textures`, `presets` | styling/material library | trigger |

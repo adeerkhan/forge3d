@@ -45,6 +45,7 @@ export.
 | **Rendered viewport mode (embedded)** | `studio_render.py`, `render.rs` | done |
 | Render size control (viewport / DEM native / project) | `Viewport3D.tsx` render bar | done |
 | Render still to disk (+ JSON sidecar), render settings UI | `render_still`, `RenderSettingsEditor` | done |
+| **Phase 10** — AOV export + OIDN denoise for final stills | `render_still`, `RenderRequest`, `studio_render.py` | done |
 | **Phase 5** — capability-tagged material/light/camera parameters | `workspace.rs` table → `capability_table` → Inspector badges | done |
 | Material inspector (terrain albedo + engine summary, mesh base colour/texture) | `Inspector.tsx` | done |
 | Texture asset management (attach, replace, remove; non-empty invariant) | `session.tsx`, `commands.rs` | done |
@@ -263,6 +264,30 @@ sky pass and the environment cubemaps share one frame (Y-up, +Z south), so the
 background, the IBL lighting and the Material preview's orientation all agree.
 Z-up terrain directions are permuted into that frame for the sky pass only; the
 terrain shading and its Z-up hash are untouched.
+
+## Final stills and sequence frames (Phase 10)
+
+`Inspector → Render output` has two final-quality toggles that viewport
+previews never pay for (they apply to Still and to the frames of an
+animation sequence):
+
+- **AOVs next to the still (albedo · normal · depth)** renders with the
+  engine's AOV path and writes `<name>_albedo.png`, `<name>_normal.png`,
+  `<name>_depth.png` next to the still — the engine's own naming, so
+  texture-synthesis tools pick them up without configuration. The beauty PNG
+  is written exactly as before.
+- **Denoise the still with OIDN** runs Open Image Denoise on the beauty
+  (guided by the albedo/normal AOVs from the same frame). This needs an
+  OIDN runtime next to the engine (`pip install oidn` or
+  `pip install pyoidn`); when it is missing the frame **fails loudly**
+  instead of silently coming back un-denoised.
+
+The sidecar `<name>.json` records which path was used
+(`forge3d.render_with_aov` vs `render_terrain_pbr_pom`), the AOV flags and
+the denoise flag. Depth is the engine's linear AOV normalised to
+[near, far]; normals are signed world-space normals in the engine's
+published environment frame — both are meant as inputs to other tools, not
+as images to look at.
 
 ## The default scene is a DEM (Phase 4)
 

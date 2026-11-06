@@ -533,6 +533,31 @@ impl Default for ViewportState {
     }
 }
 
+/// Auxiliary render outputs for the final still ("Arbitrary Output
+/// Variables"). Written next to the still as `<name>_albedo.png`,
+/// `<name>_normal.png`, `<name>_depth.png` — the engine's own naming, so
+/// texture-synthesis tools pick them up without configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StillAov {
+    /// Unlit base color before lighting.
+    #[serde(default)]
+    pub albedo: bool,
+    /// World-space normals remapped to [0, 1].
+    #[serde(default)]
+    pub normal: bool,
+    /// Linear depth normalized to [near, far].
+    #[serde(default)]
+    pub depth: bool,
+}
+
+impl StillAov {
+    /// True when at least one channel was requested.
+    pub fn any_enabled(&self) -> bool {
+        self.albedo || self.normal || self.depth
+    }
+}
+
 /// Render output configuration — the Forge3D controls the pipeline exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -568,6 +593,16 @@ pub struct RenderSettings {
     /// a black Rendered sky; turn the project sky off for no sky at all.
     #[serde(default = "default_one")]
     pub environment_background_intensity: f32,
+    /// AOV export for the final still. Final stills and sequence frames only;
+    /// viewport preview frames skip it entirely (they are 3 × the work of one
+    /// frame and nobody watches a preview's albedo pass).
+    #[serde(default)]
+    pub still_aov: StillAov,
+    /// Denoise the final beauty pass with Open Image Denoise (OIDN). Needs an
+    /// OIDN runtime installed beside the engine; the render fails loudly with
+    /// an explicit message when it is missing. Same scope as `still_aov`.
+    #[serde(default)]
+    pub still_denoise: bool,
 }
 
 fn default_exposure() -> f32 {
@@ -598,6 +633,8 @@ impl Default for RenderSettings {
             ibl_intensity: default_ibl_intensity(),
             environment: None,
             environment_background_intensity: default_one(),
+            still_aov: StillAov::default(),
+            still_denoise: false,
         }
     }
 }

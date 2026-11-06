@@ -269,6 +269,12 @@ class StudioRenderer:
         camera = request.get("camera") or {}
         sun = request.get("sun") or {}
         quality = request.get("quality") or {}
+        # Final-quality extras: AOV export and OIDN denoise of the beauty.
+        # Viewport previews send neither, so the interactive path is unchanged.
+        aov = quality.get("aov") or {}
+        aov_flags = {channel: bool(aov.get(channel)) for channel in ("albedo", "normal", "depth")}
+        want_aov = any(aov_flags.values())
+        want_denoise = bool(quality.get("denoise"))
         overlay = request.get("overlay") or None
         environment = request.get("environment") or None
         overlays = []
@@ -337,7 +343,15 @@ class StudioRenderer:
             pom=PomSettings(bool(quality.get("pom", True)), "Occlusion", 0.3, 8, 32, 4, False, False),
             detail=DetailSettings(enabled=False),
             height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
-            aov=AovSettings(enabled=False),
+            aov=AovSettings(
+                enabled=want_aov or want_denoise,
+                # Denoise gets albedo/normal guidance from the same frame —
+                # capturing them costs the AOV pass we are already in.
+                albedo=aov_flags["albedo"] or want_denoise,
+                normal=aov_flags["normal"] or want_denoise,
+                depth=aov_flags["depth"],
+                format="png",
+            ),
             # With a project HDRI the visible sky is that environment map (the same
         # one lighting the terrain); without one the analytic model stands.
         # Background intensity is independent of the IBL lighting intensity.
@@ -366,17 +380,49 @@ class StudioRenderer:
         settings.shadows.normal_bias = 0.00001
 
         params = f3d.TerrainRenderParams(settings)
-        frame = self.renderer.render_terrain_pbr_pom(
-            self.materials, ibl, params, self.heights
-        )
+        if want_aov or want_denoise:
+            frame, aov_frame = self.renderer.render_with_aov(
+                self.materials, ibl, params, self.heights
+            )
+        else:
+            frame = self.renderer.render_terrain_pbr_pom(
+                self.materials, ibl, params, self.heights
+            )
+            aov_frame = None
         image = np.asarray(frame.to_numpy())
         rgb = image[:, :, :3].astype(np.uint8)
+
+        if want_denoise:
+            albedo = aov_frame.albedo() if aov_frame is not None and aov_frame.has_albedo else None
+            normal = aov_frame.normal() if aov_frame is not None and aov_frame.has_normal else None
+            try:
+                from forge3d.denoise_oidn import oidn_denoise
+
+                beauty = rgb.astype(np.float32) / 255.0
+                denoised = oidn_denoise(beauty, albedo, normal, hdr=False, quality="high")
+                rgb = np.clip(np.rint(denoised * 255.0), 0, 255).astype(np.uint8)
+            except Exception as exc:
+                # The frame must not come back silently un-denoised; fail it.
+                raise RuntimeError(
+                    "denoise requested but the OIDN runtime is not available or failed: %s "
+                    "(install it with `pip install oidn` / `pip install pyoidn` next to the engine)" % (exc,)
+                ) from exc
+
         png = encode_png(rgb)
 
         output = request.get("output")
         if output:
             Path(output).parent.mkdir(parents=True, exist_ok=True)
             Path(output).write_bytes(png)
+            if want_aov and aov_frame is not None:
+                # Engine naming, next to the still / the frame.
+                stem = Path(output).with_suffix("")
+                if aov_flags["albedo"]:
+                    aov_frame.save_albedo(str(stem) + "_albedo.png")
+                if aov_flags["normal"]:
+                    aov_frame.save_normal(str(stem) + "_normal.png")
+                if aov_flags["depth"]:
+                    aov_frame.save_depth(str(stem) + "_depth.png")
 
         return {
             "width": width,

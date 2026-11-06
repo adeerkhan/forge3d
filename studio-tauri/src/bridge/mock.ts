@@ -175,6 +175,8 @@ function starterProject(name: string, preset: string = "bryce"): Project {
       iblIntensity: 1,
       environment: null,
       environmentBackgroundIntensity: 1,
+      stillAov: { albedo: false, normal: false, depth: false },
+      stillDenoise: false,
     },
     timeline: {
       frameRate: 24,

@@ -32,7 +32,7 @@ fn ts_camel_case_shapes_deserialize() {
         ),
         (
             "setRenderSettings",
-            r#"{"type":"setRenderSettings","render":{"width":1920,"height":1080,"exposure":1.35,"shadows":true,"ambientOcclusion":false,"sky":true,"iblIntensity":1.0}}"#
+            r#"{"type":"setRenderSettings","render":{"width":1920,"height":1080,"exposure":1.35,"shadows":true,"ambientOcclusion":false,"sky":true,"iblIntensity":1.0,"stillAov":{"albedo":true,"normal":false,"depth":true},"stillDenoise":true}}"#
                 .to_string(),
         ),
         (
