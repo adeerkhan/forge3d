@@ -19,6 +19,7 @@ import { AxisGizmo, type Axis } from "./AxisGizmo";
 import type { Material, TerrainPreview } from "../bridge/types";
 import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
 import { viewStore } from "./viewStore";
+import { lightingRig } from "./lighting";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
@@ -1252,27 +1253,21 @@ export function Viewport3D() {
 
     // The scene's directional light drives the actual lighting.
     const solidView = viewportModeRef.current === "solid";
-    const sunObject = project.scene.objects.find(
-      (object) => object.kind.type === "light" && object.kind.kind === "directional" && object.visible,
-    );
-    if (sunObject && sunObject.kind.type === "light") {
-      const direction = new THREE.Vector3(0, 0, -1).applyEuler(
-        new THREE.Euler(
-          sunObject.transform.rotationDeg.x * DEG,
-          sunObject.transform.rotationDeg.y * DEG,
-          sunObject.transform.rotationDeg.z * DEG,
-          "ZYX",
-        ),
-      );
+    // One derived rig for the preview and (via the same project) the engine.
+    // `lighting.ts` is the single place these numbers come from; the shared
+    // fixture test keeps it honest against the renderer payload.
+    const rig = lightingRig(project);
+    if (rig.sun) {
+      const [dx, dy, dz] = rig.sun.direction;
       // Far enough out that the shadow camera encloses the terrain.
-      runtime.sun.position.copy(direction.multiplyScalar(-20));
-      const [r, g, b] = sunObject.kind.color;
+      runtime.sun.position.set(-dx * 20, -dy * 20, -dz * 20);
       // The engine multiplies `sun_color * intensity` in linear radiance
       // (`u_shading.light_params`). Matching that means no sRGB conversion
       // here and no intensity fudge: the preview and the still then evaluate
       // the same `albedo/pi * sun * n.l` term.
+      const [r, g, b] = rig.sun.color;
       runtime.sun.color.setRGB(r, g, b, THREE.LinearSRGBColorSpace);
-      runtime.sun.intensity = Math.max(0, sunObject.kind.intensity);
+      runtime.sun.intensity = rig.sun.intensity;
     }
 
     // One rig for every mode: the scene sun plus the project environment (or
@@ -1288,8 +1283,8 @@ export function Viewport3D() {
     // One exposure for every mode — the project's, applied by the engine in
     // Rendered; the preview now agrees instead of running 0.95 against the
     // engine's 1.35.
-    runtime.renderer.toneMappingExposure = project.render.exposure;
-    runtime.sun.castShadow = runtime.glStep < 3;
+    runtime.renderer.toneMappingExposure = rig.exposure;
+    runtime.sun.castShadow = rig.shadows.enabled && runtime.glStep < 3;
 
     runtime.grid.visible = project.viewport.gridVisible;
 
@@ -1343,11 +1338,9 @@ export function Viewport3D() {
   // viewport decodes and pre-filters it here (Rendered receives the path and
   // lets the engine upload it); a replaced map is freed after the new one is
   // bound, and a failed load keeps whatever was lighting the scene before.
-  const environmentAssetId = state?.project.render.environment ?? null;
-  const environmentPath =
-    environmentAssetId && state
-      ? state.project.assets.find((asset) => asset.id === environmentAssetId)?.path ?? null
-      : null;
+  // The rig owns the project→renderer mapping, including which HDRI file the
+  // project points at; keep one lookup.
+  const environmentPath = state ? lightingRig(state.project).environment : null;
   useEffect(() => {
     const runtime = runtimeRef.current;
     if (!runtime) return;

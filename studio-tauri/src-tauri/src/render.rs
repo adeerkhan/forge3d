@@ -643,6 +643,141 @@ mod tests {
         assert_eq!(payload["quality"]["shadowResolution"], 2048);
     }
 
+    /// The fixture `studio-tauri/tests/fixtures/lighting-rig.json` is read by
+    /// this test and by `src/viewport/lighting.test.ts`. This half asserts the
+    /// payload the renderer receives; the node half asserts the numbers the
+    /// preview hands to three.js. A drift in either fails, instead of showing
+    /// up as "the render looks different from the preview".
+    #[test]
+    fn payload_matches_the_shared_lighting_rig_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/lighting-rig.json"))
+                .expect("the lighting-rig fixture parses");
+        let project = rig_project(&fixture);
+        let handoff = studio_core::workspace::handoff(&project, 1, studio_core::Workspace::Forge3d);
+        let payload = RenderRequest::from_handoff(&handoff, 640, 400)
+            .expect("the fixture scene has terrain")
+            .with_settings(&project.render)
+            .to_payload("final", None);
+
+        let expected = &fixture["expected"];
+        near_json(
+            "sun.azimuthDeg",
+            &payload["sun"]["azimuthDeg"],
+            &expected["sun"]["azimuthDeg"],
+        );
+        near_json(
+            "sun.elevationDeg",
+            &payload["sun"]["elevationDeg"],
+            &expected["sun"]["elevationDeg"],
+        );
+        near_json(
+            "sun.intensity",
+            &payload["sun"]["intensity"],
+            &expected["sun"]["intensity"],
+        );
+        for (index, channel) in ["r", "g", "b"].iter().enumerate() {
+            near_json(
+                &format!("sun.color.{channel}"),
+                &payload["sun"]["color"][index],
+                &expected["sun"]["color"][index],
+            );
+        }
+        near_json("exposure", &payload["exposure"], &expected["exposure"]);
+        assert_eq!(
+            payload["environment"], expected["environment"],
+            "environment must be the project's HDRI path or null"
+        );
+        assert_eq!(
+            payload["quality"]["shadows"],
+            expected["shadows"]["enabled"]
+        );
+        assert_eq!(
+            payload["quality"]["shadowTechnique"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase(),
+            expected["shadows"]["technique"]
+                .as_str()
+                .unwrap_or_default(),
+            "payload carries the engine name; the fixture stores the model token"
+        );
+        assert_eq!(
+            payload["quality"]["shadowResolution"],
+            expected["shadows"]["resolution"]
+        );
+    }
+
+    fn near_json(label: &str, actual: &serde_json::Value, expected: &serde_json::Value) {
+        let actual = actual
+            .as_f64()
+            .unwrap_or_else(|| panic!("{label} is not a number"));
+        let expected = expected
+            .as_f64()
+            .unwrap_or_else(|| panic!("{label} fixture is not a number"));
+        assert!(
+            (actual - expected).abs() <= 1e-4,
+            "{label}: payload {actual} != fixture {expected}"
+        );
+    }
+
+    /// A starter scene with the fixture's sun and render settings.
+    fn rig_project(fixture: &serde_json::Value) -> studio_core::Project {
+        let seed = studio_core::TerrainSeed {
+            title: None,
+            name: "dem.tif".to_owned(),
+            path: "/data/dem.tif".to_owned(),
+            byte_size: 1,
+            dimensions: Some([64, 64]),
+            elevation_range: Some([0.0, 100.0]),
+            world_origin_xz: Some([0.0, 0.0]),
+            world_span_xz: Some([640.0, 640.0]),
+            overlay: None,
+        };
+        let mut project = studio_core::Project::starter("Rig", Some(seed));
+
+        let rotation = &fixture["project"]["sunRotationDeg"];
+        let color = &fixture["project"]["sunColor"];
+        let sun = project
+            .scene
+            .objects
+            .iter_mut()
+            .find(|object| {
+                matches!(
+                    &object.kind,
+                    studio_core::ObjectKind::Light(light)
+                        if light.kind == studio_core::LightKind::Directional
+                )
+            })
+            .expect("the starter scene has a sun");
+        sun.transform.rotation_deg = studio_core::Vec3::new(
+            rotation["x"].as_f64().unwrap_or(0.0) as f32,
+            rotation["y"].as_f64().unwrap_or(0.0) as f32,
+            rotation["z"].as_f64().unwrap_or(0.0) as f32,
+        );
+        if let studio_core::ObjectKind::Light(light) = &mut sun.kind {
+            light.color = [
+                color[0].as_f64().unwrap_or(0.0) as f32,
+                color[1].as_f64().unwrap_or(0.0) as f32,
+                color[2].as_f64().unwrap_or(0.0) as f32,
+            ];
+            light.intensity = fixture["project"]["sunIntensity"].as_f64().unwrap_or(0.0) as f32;
+        }
+
+        let render = &fixture["project"]["render"];
+        project.render.exposure = render["exposure"].as_f64().unwrap_or(1.35) as f32;
+        project.render.shadows = render["shadows"].as_bool().unwrap_or(true);
+        project.render.shadow_technique = match render["shadowTechnique"].as_str().unwrap_or("pcf")
+        {
+            "pcss" => studio_core::ShadowTechnique::Pcss,
+            _ => studio_core::ShadowTechnique::Pcf,
+        };
+        project.render.shadow_resolution =
+            render["shadowResolution"].as_u64().unwrap_or(4096) as u32;
+        project.render.environment = None;
+        project
+    }
+
     #[test]
     fn view_override_still_wins_over_the_handoff_camera() {
         let mut frame = request();
