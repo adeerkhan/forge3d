@@ -13,7 +13,7 @@
  */
 import { lightingRig } from "./lighting.ts";
 import fixtureJson from "../../tests/fixtures/lighting-rig.json" with { type: "json" };
-import type { Project, RenderSettings, SceneObject } from "../bridge/types";
+import type { Project, RenderSettings } from "../bridge/types";
 
 interface Fixture {
   project: {
@@ -49,73 +49,40 @@ function near(name: string, actual: number, expected: number, tolerance = 1e-4):
   }
 }
 
-/** The fixture scene: a starter project with the fixture's sun and render settings. */
+/** The fixture scene: only the fields the rig reads, cast to the model. */
 function projectFromFixture(): Project {
-  const sun: SceneObject = {
-    id: "sun",
-    name: "Sun",
-    parent: null,
-    visible: true,
-    locked: false,
-    transform: {
-      translation: { x: 4, y: 6, z: 3 },
-      rotationDeg: { ...fixture.project.sunRotationDeg },
-      scale: { x: 1, y: 1, z: 1 },
-    },
-    kind: {
-      type: "light",
-      kind: "directional",
-      color: [...fixture.project.sunColor],
-      intensity: fixture.project.sunIntensity,
-    },
-  };
-
   return {
-    format: "studio3d",
-    schemaVersion: 4,
-    id: "fixture",
-    name: "lighting rig fixture",
-    createdUnixMs: 0,
-    updatedUnixMs: 0,
     assets: [],
-    selection: [],
-    workspace: "studio",
-    scene: { id: "scene", name: "Scene", objects: [sun], activeCamera: null },
-    viewport: { mode: "solid", gridVisible: true },
-    render: {
-      width: 640,
-      height: 400,
-      exposure: fixture.project.render.exposure,
-      shadows: fixture.project.render.shadows,
-      ambientOcclusion: false,
-      sky: true,
-      iblIntensity: 1,
-      environment: fixture.project.render.environment,
-      environmentBackgroundIntensity: 1,
-      stillAov: { albedo: false, normal: false, depth: false },
-      stillDenoise: false,
-      shadowTechnique: fixture.project.render.shadowTechnique,
-      shadowResolution: fixture.project.render.shadowResolution,
-      // The analytic sky is render-only; the preview rig must not read these.
-      skyModel: "hosek",
-      skyTurbidity: 2,
-      skyGroundAlbedo: 0.3,
-      skyExposure: 0.08,
+    scene: {
+      objects: [
+        {
+          visible: true,
+          transform: { rotationDeg: { ...fixture.project.sunRotationDeg } },
+          kind: {
+            type: "light",
+            kind: "directional",
+            color: [...fixture.project.sunColor],
+            intensity: fixture.project.sunIntensity,
+          },
+        },
+      ],
     },
-    timeline: {
-      length: 1,
-      frameRate: 24,
-      currentFrame: 0,
-      tracks: [],
-    },
+    render: fixture.project.render,
   } as unknown as Project;
 }
 
 const rig = lightingRig(projectFromFixture());
 
 if (!rig.sun) throw new Error("FAIL sun: the fixture scene has a directional light");
-near("sun.azimuthDeg", rig.sun.azimuthDeg, fixture.expected.sun.azimuthDeg);
-near("sun.elevationDeg", rig.sun.elevationDeg, fixture.expected.sun.elevationDeg);
+const [dirX, dirY, dirZ] = rig.sun.direction;
+// The same projection `studio_core::workspace::sun_angles` applies: the engine
+// receives east->south azimuth and elevation from the toward-sun vector.
+const toward = [-dirX, -dirY, -dirZ];
+const elevation = (Math.asin(Math.max(-1, Math.min(1, toward[1]))) * 180) / Math.PI;
+let azimuth = (Math.atan2(toward[2], toward[0]) * 180) / Math.PI;
+if (azimuth < 0) azimuth += 360;
+near("sun.azimuthDeg", azimuth, fixture.expected.sun.azimuthDeg);
+near("sun.elevationDeg", elevation, fixture.expected.sun.elevationDeg);
 near("sun.intensity", rig.sun.intensity, fixture.expected.sun.intensity);
 near("sun.color.r", rig.sun.color[0], fixture.expected.sun.color[0]);
 near("sun.color.g", rig.sun.color[1], fixture.expected.sun.color[1]);

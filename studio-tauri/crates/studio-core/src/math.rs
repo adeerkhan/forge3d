@@ -87,11 +87,6 @@ impl Transform {
         )
     }
 
-    /// Rotate a local vector by this transform's Euler angles.
-    pub fn rotate_vector(&self, vector: Vec3) -> Vec3 {
-        Vec3::from_geometry(self.rotation().mul_vec3(vector.geometry()))
-    }
-
     /// Local forward axis (`-Z`) in parent space.
     pub fn forward(&self) -> Vec3 {
         Vec3::from_geometry(self.rotation() * glam::Vec3::NEG_Z)

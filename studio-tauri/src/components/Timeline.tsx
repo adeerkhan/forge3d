@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import { bridge } from "../bridge/env";
 import type { Channel, ChannelKeys, Interpolation, SceneObject } from "../bridge/types";
 import { useSession } from "../state/session-context";
 import { NumberField } from "./fields";
@@ -295,12 +294,8 @@ export function Timeline() {
         <button
           type="button"
           className="button button--primary"
-          disabled={bridge.kind !== "tauri" || busy}
-          title={
-            bridge.kind === "tauri"
-              ? `Render frames 0..${length} at ${project.render.width}×${project.render.height} into a chosen folder`
-              : "Frame export needs the desktop shell"
-          }
+          disabled={busy}
+          title={`Render frames 0..${length} at ${project.render.width}×${project.render.height} into a chosen folder`}
           onClick={() => void pickAndExport()}
         >
           {exporting ? `Exporting ${exporting.done}/${exporting.total}…` : "Export frames…"}

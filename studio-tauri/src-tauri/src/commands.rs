@@ -413,7 +413,7 @@ fn still_sidecar(
 /// Kind validation stays in the command — "this is not a glTF" and "this is not
 /// a Radiance .hdr" are different sentences — but the metadata checks, the cap
 /// and the base64 encode are identical for all of them.
-fn read_file_capped(path: &str, limit: Option<(u64, &str)>) -> Result<(PathBuf, Vec<u8>), String> {
+fn read_file_capped(path: &str, limit: u64, note: &str) -> Result<Vec<u8>, String> {
     let file = PathBuf::from(path);
     let metadata =
         std::fs::metadata(&file).map_err(|error| format!("could not read {path}: {error}"))?;
@@ -423,17 +423,14 @@ fn read_file_capped(path: &str, limit: Option<(u64, &str)>) -> Result<(PathBuf, 
     if metadata.len() == 0 {
         return Err(format!("{path} is empty"));
     }
-    if let Some((limit, note)) = limit {
-        if metadata.len() > limit {
-            return Err(format!(
-                "{path} is {:.1} MB; {note} {} MB",
-                metadata.len() as f64 / (1024.0 * 1024.0),
-                limit / (1024 * 1024)
-            ));
-        }
+    if metadata.len() > limit {
+        return Err(format!(
+            "{path} is {:.1} MB; {note} {} MB",
+            metadata.len() as f64 / (1024.0 * 1024.0),
+            limit / (1024 * 1024)
+        ));
     }
-    let bytes = std::fs::read(&file).map_err(|error| format!("could not read {path}: {error}"))?;
-    Ok((file, bytes))
+    std::fs::read(&file).map_err(|error| format!("could not read {path}: {error}"))
 }
 
 /// The IPC shape for "here are the bytes and their identity".
@@ -472,9 +469,10 @@ pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
         ));
     }
 
-    let (_file, bytes) = read_file_capped(
+    let bytes = read_file_capped(
         &path.to_string_lossy(),
-        Some((MAX_MESH_BYTES, "imports are limited to")),
+        MAX_MESH_BYTES,
+        "imports are limited to",
     )?;
     Ok(payload(
         path.to_string_lossy().into_owned(),
@@ -727,7 +725,7 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
             "{path} is not a PNG/JPEG image; GeoTIFF textures are not yet decoded in the viewport"
         ));
     }
-    let (_file, bytes) = read_file_capped(&path, Some((MAX_HDR_BYTES, "images are limited to")))?;
+    let bytes = read_file_capped(&path, MAX_HDR_BYTES, "images are limited to")?;
     Ok(payload(
         path,
         studio_core::AssetKind::Orthophoto,
@@ -749,8 +747,7 @@ pub fn read_hdr(path: String) -> Result<MeshFilePayload, String> {
             "{path} is not a Radiance .hdr environment — export the HDRI as .hdr"
         ));
     }
-    let (_file, bytes) =
-        read_file_capped(&path, Some((MAX_HDR_BYTES, "the environment map limit is")))?;
+    let bytes = read_file_capped(&path, MAX_HDR_BYTES, "the environment map limit is")?;
     Ok(payload(path, AssetKind::Hdr, "environment.hdr", bytes))
 }
 

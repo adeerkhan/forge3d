@@ -260,7 +260,7 @@ function localDateTimeInput(): string {
  * Nothing is stored: re-applying a different time is the way to change it.
  */
 function SolarPositionEditor({ object }: { object: SceneObject }) {
-  const { actions, bridgeKind } = useSession();
+  const { actions } = useSession();
   const [latitude, setLatitude] = useState(0);
   const [longitude, setLongitude] = useState(0);
   const [when, setWhen] = useState(localDateTimeInput);
@@ -315,19 +315,14 @@ function SolarPositionEditor({ object }: { object: SceneObject }) {
           className="input"
           type="datetime-local"
           value={when}
-          disabled={bridgeKind !== "tauri"}
           onChange={(event) => setWhen(event.target.value)}
         />
       </label>
       <button
         type="button"
         className="button button--small"
-        disabled={bridgeKind !== "tauri" || pending || !when}
-        title={
-          bridgeKind === "tauri"
-            ? "Rotate the sun to this place and time — one undo step"
-            : "Solar placement needs the desktop shell"
-        }
+        disabled={pending || !when}
+        title="Rotate the sun to this place and time — one undo step"
         onClick={() => void apply()}
       >
         {pending ? "Locating…" : "Set sun"}
@@ -338,9 +333,6 @@ function SolarPositionEditor({ object }: { object: SceneObject }) {
           {result.elevationDeg.toFixed(1)}°
           {!result.daytime && " · below the horizon"}
         </p>
-      )}
-      {bridgeKind !== "tauri" && (
-        <p className="hint">Solar placement needs the desktop shell.</p>
       )}
     </div>
   );
@@ -697,7 +689,7 @@ export function SkySection() {
 
 /** Light tab: the scene's environment — the map that lights everything. */
 export function EnvironmentSettings() {
-  const { actions, bridgeKind } = useSession();
+  const { actions } = useSession();
   const caps = useCapabilities();
   const settings = useRenderSettings();
   if (!settings) return null;
@@ -728,7 +720,6 @@ export function EnvironmentSettings() {
         <button
           type="button"
           className="button button--small"
-          disabled={bridgeKind !== "tauri"}
           title="Pick a Radiance .hdr for image-based lighting; both Material and Rendered use it"
           onClick={() => void actions.importEnvironment()}
         >
@@ -991,7 +982,7 @@ function ImportedMesh({ object, asset }: { object: SceneObject; asset: Asset | u
   // Node names come from the file itself (parse through the shell, cached by
   // path in assets.ts) — they are derived data, never stored in the project.
   useEffect(() => {
-    if (bridge.kind !== "tauri" || !asset?.path) {
+    if (!asset?.path) {
       setNodes(null);
       return;
     }

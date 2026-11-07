@@ -171,7 +171,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   // Keep "autosaved 14:03" honest without a websocket: one cheap poll.
   useEffect(() => {
-    if (bridge.kind !== "tauri") return;
     const timer = window.setInterval(() => {
       bridge
         .autosaveStatus()
@@ -313,10 +312,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [applyCommand, flash, select, state]);
 
   const importMesh = useCallback(async () => {
-    if (bridge.kind !== "tauri") {
-      fail(new Error("glTF import needs the desktop shell, which owns file access"));
-      return;
-    }
     try {
       const picked = await openDialog({ multiple: false, filters: [MESH_FILTER] });
       const path = typeof picked === "string" ? picked : null;
@@ -349,7 +344,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const refreshEngine = useCallback(
     async (force = false) => {
-      if (bridge.kind !== "tauri") return;
       try {
         setEngine(await bridge.forge3dProbe(force));
       } catch {
@@ -479,10 +473,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
    * id the project does not carry.
    */
   const importEnvironment = useCallback(async () => {
-    if (bridge.kind !== "tauri") {
-      fail(new Error("HDRI environments need the desktop shell"));
-      return;
-    }
     const project = state?.project;
     if (!project) return;
     try {
@@ -744,7 +734,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const exportFrames = useCallback(
     async (directory: string) => {
       const snapshot = state;
-      if (!snapshot || bridge.kind !== "tauri") return;
+      if (!snapshot) return;
       const { timeline, render: renderSettings } = snapshot.project;
       const total = timeline.length + 1;
       const name = directory.split(/[\\/]/).filter(Boolean).pop() ?? "sequence";
@@ -868,16 +858,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       async openProject() {
         if (!guardUnsaved("open another project")) return;
         try {
-          let path: string | null = null;
-          if (bridge.kind === "tauri") {
-            const picked = await openDialog({
-              multiple: false,
-              filters: [PROJECT_FILTER],
-            });
-            path = typeof picked === "string" ? picked : null;
-          } else {
-            path = "/preview/example.studio3d";
-          }
+          const picked = await openDialog({
+            multiple: false,
+            filters: [PROJECT_FILTER],
+          });
+          const path = typeof picked === "string" ? picked : null;
           if (!path) return;
           setBusy(true);
           setState(await bridge.openProject(path));
@@ -897,25 +882,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         // It is queued like every offline render, so one worker owns the
         // engine and progress/cancel are uniform.
         if (!state) return;
-        let path: string | null = null;
-        if (bridge.kind === "tauri") {
-          const name = (state.project.name || "untitled").replace(/[^A-Za-z0-9-_]+/g, "-");
-          const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-          const slash = Math.max(
-            state.path?.lastIndexOf("/") ?? -1,
-            state.path?.lastIndexOf("\\") ?? -1,
-          );
-          const dir = state.path && slash > 0 ? state.path.slice(0, slash) : null;
-          const picked = await saveDialog({
-            defaultPath: dir
-              ? `${dir}/renders/${name}-${stamp}.png`
-              : `${name}-${stamp}.png`,
-            filters: [{ name: "PNG image", extensions: ["png"] }],
-          });
-          if (!picked) return;
-          path = picked;
-        }
-        enqueueStill(path);
+        const name = (state.project.name || "untitled").replace(/[^A-Za-z0-9-_]+/g, "-");
+        const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+        const slash = Math.max(
+          state.path?.lastIndexOf("/") ?? -1,
+          state.path?.lastIndexOf("\\") ?? -1,
+        );
+        const dir = state.path && slash > 0 ? state.path.slice(0, slash) : null;
+        const picked = await saveDialog({
+          defaultPath: dir
+            ? `${dir}/renders/${name}-${stamp}.png`
+            : `${name}-${stamp}.png`,
+          filters: [{ name: "PNG image", extensions: ["png"] }],
+        });
+        if (!picked) return;
+        enqueueStill(picked);
       },
 
       exportFrames,
@@ -928,16 +909,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         try {
           let path: string | null = null;
           if (saveAs || !state.path) {
-            if (bridge.kind === "tauri") {
-              const picked = await saveDialog({
-                defaultPath: `${state.project.name || "untitled"}.studio3d`,
-                filters: [PROJECT_FILTER],
-              });
-              path = picked ?? null;
-            } else {
-              path = "/preview/untitled.studio3d";
-            }
-            if (!path) return;
+            const picked = await saveDialog({
+              defaultPath: `${state.project.name || "untitled"}.studio3d`,
+              filters: [PROJECT_FILTER],
+            });
+            if (!picked) return;
+            path = picked;
           }
           setBusy(true);
           const saved = await bridge.saveProject(path);
@@ -1073,7 +1050,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const value: SessionApi = {
-    bridgeKind: bridge.kind,
     presets,
     newProjectOpen,
     info,

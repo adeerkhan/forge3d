@@ -680,9 +680,6 @@ export function Viewport3D() {
 
   const readMesh = useCallback(
     async (path: string): Promise<ArrayBuffer> => {
-      if (bridge.kind !== "tauri") {
-        throw new Error("glTF assets need the desktop shell");
-      }
       const payload = await bridge.readMeshFile(path);
       return base64ToArrayBuffer(payload.base64);
     },
@@ -1212,7 +1209,7 @@ export function Viewport3D() {
             // The drape is the terrain's albedo: Material shows it, Solid
             // stays clay. The shell decodes the raster; a scene without an
             // overlay stays clay in both.
-            if (overlay && overlayAsset?.path && bridge.kind === "tauri") {
+            if (overlay && overlayAsset?.path) {
               loadOverlayTexture(overlayAsset.path)
                 .then((texture) => {
                   if (group.userData.signature !== expected) return;
