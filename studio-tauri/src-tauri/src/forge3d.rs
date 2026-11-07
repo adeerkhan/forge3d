@@ -74,6 +74,15 @@ def main():
         denoise = bool(oidn_available())
     except Exception:
         denoise = False
+    features = None
+    try:
+        # What the device actually granted — the fact every later "needs X"
+        # decision reads, instead of guessing from the adapter name.
+        granted = forge3d.capabilities().get("granted")
+        if isinstance(granted, list):
+            features = sorted(str(name) for name in granted)
+    except Exception:
+        pass
     try:
         from forge3d._viewer_binary import find_viewer_binary
         import forge3d.viewer as viewer
@@ -91,6 +100,7 @@ def main():
         "adapter": adapter,
         "software": software,
         "denoise": denoise,
+        "features": features,
     }))
 
 main()
@@ -208,6 +218,9 @@ pub struct EngineStatus {
     /// True when the engine is running on a software (CPU) adapter — the
     /// status bar must not present that as GPU rendering.
     pub software: Option<bool>,
+    /// Device features the adapter actually granted (`forge3d.capabilities()`
+    /// `granted`), sorted. `None` when the probe could not ask.
+    pub features: Option<Vec<String>>,
     /// Always present: what is missing, or what is ready.
     pub detail: String,
 }
@@ -274,6 +287,7 @@ impl Forge3dState {
                             adapter: None,
                             denoise: None,
                             software: None,
+                            features: None,
                             detail,
                         });
                     }
@@ -290,6 +304,7 @@ impl Forge3dState {
             adapter: None,
             denoise: None,
             software: None,
+            features: None,
             detail: "no Python interpreter was found".to_owned(),
         });
         if let Ok(mut guard) = self.engine.lock() {
@@ -801,7 +816,15 @@ fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|error| format!("the engine probe returned invalid JSON: {error}"))?;
 
-    Ok(EngineStatus {
+    Ok(engine_status_from_probe(python, &value))
+}
+
+/// Map one probe JSON object onto [`EngineStatus`].
+///
+/// Split out from the process plumbing so the wire shape (including a missing
+/// `features` key from an older engine) is testable without Python.
+fn engine_status_from_probe(python: &str, value: &serde_json::Value) -> EngineStatus {
+    EngineStatus {
         available: value.get("ok").and_then(|ok| ok.as_bool()).unwrap_or(false),
         python: python.to_owned(),
         package_version: value
@@ -824,12 +847,19 @@ fn probe_interpreter(python: &str) -> Result<EngineStatus, String> {
         software: value
             .get("software")
             .and_then(|software| software.as_bool()),
+        features: value.get("features").and_then(|features| {
+            features.as_array().map(|list| {
+                list.iter()
+                    .filter_map(|name| name.as_str().map(str::to_owned))
+                    .collect()
+            })
+        }),
         detail: value
             .get("detail")
             .and_then(|detail| detail.as_str())
             .unwrap_or("the engine probe returned no detail")
             .to_owned(),
-    })
+    }
 }
 
 fn first_line(text: &str) -> String {
@@ -856,4 +886,64 @@ mod tests {
         let missing = parse_solar_reply(r#"{"ok":true}"#).expect_err("incomplete reply");
         assert!(missing.contains("azimuth"), "{missing}");
     }
+}
+
+#[test]
+fn probe_json_maps_the_engine_facts() {
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{
+                "ok": true,
+                "version": "1.47.1",
+                "viewer": "/bin/viewer",
+                "detail": "engine ready",
+                "backend": "Vulkan",
+                "adapter": "NVIDIA GeForce RTX 5060 Laptop GPU",
+                "software": false,
+                "denoise": true,
+                "features": ["texture_binding_array", "timestamp_query"]
+            }"#,
+    )
+    .expect("probe JSON parses");
+
+    let status = engine_status_from_probe("/venv/bin/python", &value);
+    assert!(status.available);
+    assert_eq!(status.python, "/venv/bin/python");
+    assert_eq!(status.package_version.as_deref(), Some("1.47.1"));
+    assert_eq!(status.viewer_binary.as_deref(), Some("/bin/viewer"));
+    assert_eq!(status.backend.as_deref(), Some("Vulkan"));
+    assert_eq!(
+        status.adapter.as_deref(),
+        Some("NVIDIA GeForce RTX 5060 Laptop GPU")
+    );
+    assert_eq!(status.denoise, Some(true));
+    assert_eq!(status.software, Some(false));
+    assert_eq!(
+        status.features,
+        Some(vec![
+            "texture_binding_array".to_owned(),
+            "timestamp_query".to_owned()
+        ])
+    );
+}
+
+#[test]
+fn an_older_probe_without_features_is_not_an_error() {
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"ok": true, "version": "1.40.0", "detail": "engine ready"}"#)
+            .expect("probe JSON parses");
+    let status = engine_status_from_probe("python3", &value);
+    assert_eq!(status.features, None);
+    assert_eq!(status.software, None);
+    assert_eq!(status.denoise, None);
+    assert!(status.available);
+}
+
+#[test]
+fn a_failed_probe_stays_unavailable() {
+    let value: serde_json::Value =
+        serde_json::from_str(r#"{"ok": false, "detail": "import forge3d failed: no module"}"#)
+            .expect("probe JSON parses");
+    let status = engine_status_from_probe("python3", &value);
+    assert!(!status.available);
+    assert_eq!(status.detail, "import forge3d failed: no module");
 }

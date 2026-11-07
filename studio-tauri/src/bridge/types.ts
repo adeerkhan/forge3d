@@ -357,6 +357,8 @@ export interface EngineStatus {
   denoise?: boolean | null;
   /** True when the engine fell back to a software (CPU) adapter. */
   software?: boolean | null;
+  /** Device features the adapter granted (`forge3d.capabilities().granted`). */
+  features?: string[] | null;
   detail: string;
 }
 
