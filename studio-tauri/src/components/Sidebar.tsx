@@ -13,6 +13,7 @@ import {
   ObjectProperties,
   ProjectFacts,
   RenderSettingsEditor,
+  SkySection,
 } from "./Inspector";
 
 /**
@@ -118,6 +119,7 @@ export function SettingsSidebar() {
               {tab === "light" && (
                 <>
                   <LightRig />
+                  <SkySection />
                   <EnvironmentSettings />
                 </>
               )}

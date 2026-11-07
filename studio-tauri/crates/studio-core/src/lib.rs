@@ -53,7 +53,7 @@ pub use integrity::{asset_integrity, AssetIntegrity};
 pub use math::{Transform, Vec3};
 pub use persist::{load, save_atomic, to_json_pretty};
 pub use project::{
-    Asset, AssetKind, Project, RenderSettings, ShadowTechnique, StillAov, TerrainSeed,
+    Asset, AssetKind, Project, RenderSettings, ShadowTechnique, SkyModel, StillAov, TerrainSeed,
     TerrainSeedOverlay, ViewportMode, ViewportState, Workspace, FORMAT, SCHEMA_VERSION,
 };
 pub use scene::{

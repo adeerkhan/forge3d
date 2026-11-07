@@ -1,15 +1,28 @@
 {
   "_comment": "One scene, two readers: crates (src-tauri/src/render.rs) assert the renderer payload, node (src/viewport/lighting.test.ts) asserts the preview rig. Both must match `expected` for the fields they own, so Solid/Material/Rendered cannot drift apart. `project` is the input; `expected` is what both sides must produce from it.",
   "project": {
-    "sunRotationDeg": { "x": -50.0, "y": 30.0, "z": 0.0 },
-    "sunColor": [1.0, 0.97, 0.92],
+    "sunRotationDeg": {
+      "x": -50.0,
+      "y": 30.0,
+      "z": 0.0
+    },
+    "sunColor": [
+      1.0,
+      0.97,
+      0.92
+    ],
     "sunIntensity": 3.0,
     "render": {
       "exposure": 1.35,
       "shadows": true,
       "shadowTechnique": "pcf",
       "shadowResolution": 4096,
-      "environment": null
+      "environment": null,
+      "sky": true,
+      "skyModel": "hosek",
+      "skyTurbidity": 2.0,
+      "skyGroundAlbedo": 0.3,
+      "skyExposure": 0.08
     }
   },
   "expected": {
@@ -17,7 +30,11 @@
       "azimuthDeg": 60.0,
       "elevationDeg": 50.0,
       "intensity": 3.0,
-      "color": [1.0, 0.97, 0.92]
+      "color": [
+        1.0,
+        0.97,
+        0.92
+      ]
     },
     "exposure": 1.35,
     "environment": null,
@@ -25,6 +42,15 @@
       "enabled": true,
       "technique": "pcf",
       "resolution": 4096
+    },
+    "renderOnly": {
+      "sky": {
+        "enabled": true,
+        "model": "hosek",
+        "turbidity": 2.0,
+        "groundAlbedo": 0.3,
+        "exposure": 0.08
+      }
     }
   }
 }

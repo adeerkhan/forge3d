@@ -588,6 +588,106 @@ export function RenderSettingsEditor() {
   );
 }
 
+/** Light tab: the backdrop sky (render-only — the environment lights). */
+export function SkySection() {
+  const settings = useRenderSettings();
+  if (!settings) return null;
+  const { render, commit } = settings;
+
+  const hasHdri = render.environment !== null;
+  const aether = render.skyModel === "aether";
+  const shippedBake =
+    Math.abs(render.skyTurbidity - 2) < 1e-6 && Math.abs(render.skyGroundAlbedo - 0.3) < 1e-6;
+
+  return (
+    <Section title="Sky" id="light-sky">
+      <Toggle
+        label="Sky background"
+        checked={render.sky}
+        onChange={(sky) => commit({ sky })}
+      />
+      {hasHdri ? (
+        <>
+          <div className="readout readout--compact">
+            <dt>Model</dt>
+            <dd>HDRI (project environment)</dd>
+          </div>
+          <p className="hint">
+            The project's HDRI is the sky, so its model and exposure live in{" "}
+            <strong>Environment</strong> below. Remove the HDRI to draw an
+            analytic sky instead.
+          </p>
+        </>
+      ) : (
+        <>
+          <ChoiceField
+            label="Model"
+            value={render.skyModel}
+            options={[
+              {
+                value: "hosek",
+                label: "Hosek",
+                title: "Hosek–Wilkie: the engine's default daylight fit",
+              },
+              {
+                value: "preetham",
+                label: "Preetham",
+                title: "Preetham: the older fit; reads bluer at the same exposure",
+              },
+              {
+                value: "aether",
+                label: "AETHER",
+                title: shippedBake
+                  ? "Spectral sky from the shipped LUT (turbidity 2.0, ground 0.3)"
+                  : "AETHER needs a baked LUT for these values; the shipped bake is 2.0 / 0.3",
+                disabled: !shippedBake,
+              },
+            ]}
+            onChange={(skyModel) => commit({ skyModel })}
+          />
+          <RangeField
+            label="Turbidity"
+            value={render.skyTurbidity}
+            min={1}
+            max={10}
+            step={0.1}
+            disabled={aether}
+            onCommit={(skyTurbidity) => commit({ skyTurbidity })}
+          />
+          <RangeField
+            label="Ground albedo"
+            value={render.skyGroundAlbedo}
+            min={0}
+            max={1}
+            step={0.01}
+            disabled={aether}
+            onCommit={(skyGroundAlbedo) => commit({ skyGroundAlbedo })}
+          />
+          <NumberField
+            label="Sky exposure"
+            value={render.skyExposure}
+            step={0.01}
+            min={0}
+            max={4}
+            onCommit={(skyExposure) => commit({ skyExposure })}
+          />
+          {aether && (
+            <p className="hint">
+              AETHER renders from the shipped bake, so turbidity and ground
+              albedo are fixed at 2.0 / 0.3. Pick another model to change them.
+            </p>
+          )}
+          <p className="hint">
+            The backdrop only: the environment map below (or the built-in studio
+            sky) is what lights the terrain. Sky exposure moves the sky pass, not
+            the scene.
+          </p>
+        </>
+      )}
+    </Section>
+  );
+}
+
 /** Light tab: the scene's environment — the map that lights everything. */
 export function EnvironmentSettings() {
   const { actions, bridgeKind } = useSession();
@@ -601,11 +701,6 @@ export function EnvironmentSettings() {
 
   return (
     <Section title="Environment" id="light-environment">
-      <Toggle
-        label="Sky background"
-        checked={render.sky}
-        onChange={(sky) => commit({ sky })}
-      />
       <NumberField
         label="Environment / IBL intensity"
         value={render.iblIntensity}

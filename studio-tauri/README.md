@@ -275,7 +275,7 @@ viewport the extra width when it is hidden).
 |---|---|
 | **Render** | output size, exposure, shadows (filter + map size), quality (final AO), still extras (AOV, denoise) |
 | **Scene** | project and scene facts, the asset list with relinking |
-| **Lighting** | the sun (type, intensity, linear colour, pitch/yaw/roll, solar placement) and the environment (sky toggle, IBL intensity, HDRI map, backdrop intensity) |
+| **Lighting** | the sun (type, intensity, linear colour, pitch/yaw/roll, solar placement), the sky (model, turbidity, ground albedo, exposure) and the environment (IBL intensity, HDRI map, backdrop intensity) |
 | **Object** | the selected object: identity, transform, and its kind-specific editors |
 
 Sections remember whether they were open, and the panel remembers its tab,
@@ -283,6 +283,30 @@ between runs (`localStorage`) — a settings panel whose sections forget their
 state is one you re-open by hand every time. Settings stay one command per
 edit (`setRenderSettings` with the whole object), so undo is one step per
 change, not one per keystroke.
+
+### Sky vs environment
+
+Two different things, deliberately kept apart:
+
+- **Environment** is what *lights* the scene: the project's HDRI, or the
+  built-in studio gradient. Its intensity is `iblIntensity` and the preview
+  and Rendered use the same map.
+- **Sky** is the backdrop Rendered draws behind the terrain: an analytic model
+  (Hosek–Wilkie, Preetham, or AETHER from the shipped LUT) with its own
+  turbidity, ground albedo and exposure. `skyExposure` scales only the sky
+  pass, so changing it cannot move the terrain's shading.
+
+The preview cannot draw the analytic sky (it would be a second sky
+implementation in three.js), so Solid and Material keep their neutral or HDRI
+backdrop. Setting a project HDRI makes it the sky as well, and the Sky
+controls become a readout pointing at Environment.
+
+Measured while landing this: Hosek–Wilkie reads green-grey in the engine's sky
+pass at every exposure (RGB ≈ 75/88/85 at exposure 0.02, where the CPU radiance
+table says blue), and roughly 7× brighter than Preetham at the same exposure;
+Preetham gives the expected blue. The controls are real either way — model,
+turbidity and exposure all move pixels — but Preetham is the bluer fit until
+the Hosek channel evaluation is fixed engine-side.
 
 The tabs split a single long scroll into the four questions you actually ask:
 what comes out (Render), what the project is (Scene), what lights it

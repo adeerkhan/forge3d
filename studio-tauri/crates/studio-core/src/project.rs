@@ -432,6 +432,20 @@ impl Project {
         if !(256..=8192).contains(&self.render.shadow_resolution) {
             return Err("shadow resolution must be between 256 and 8192 texels".to_owned());
         }
+        if !self.render.sky_turbidity.is_finite()
+            || !(1.0..=10.0).contains(&self.render.sky_turbidity)
+        {
+            return Err("sky turbidity must be between 1 and 10".to_owned());
+        }
+        if !self.render.sky_ground_albedo.is_finite()
+            || !(0.0..=1.0).contains(&self.render.sky_ground_albedo)
+        {
+            return Err("sky ground albedo must be between 0 and 1".to_owned());
+        }
+        if !self.render.sky_exposure.is_finite() || !(0.0..=4.0).contains(&self.render.sky_exposure)
+        {
+            return Err("sky exposure must be between 0 and 4".to_owned());
+        }
         self.timeline.validate()?;
 
         Ok(())
@@ -615,6 +629,46 @@ pub struct RenderSettings {
     /// generous for a 960×600 preview; 1024–2048 trades crispness for cost.
     #[serde(default = "default_shadow_resolution")]
     pub shadow_resolution: u32,
+    /// Which sky model draws the backdrop when no HDRI is set. The backdrop
+    /// only: the environment map (HDRI, or the built-in studio sky) is what
+    /// lights the terrain.
+    #[serde(default)]
+    pub sky_model: SkyModel,
+    /// Hosek/Preetham turbidity (atmospheric haze), 1..=10.
+    #[serde(default = "default_sky_turbidity")]
+    pub sky_turbidity: f32,
+    /// Ground reflectance the sky model bounces back into the lower hemisphere.
+    #[serde(default = "default_sky_ground_albedo")]
+    pub sky_ground_albedo: f32,
+    /// Camera-style exposure for the *analytic* sky pass (the engine applies
+    /// it to the sky texture only; terrain radiance and IBL are untouched).
+    /// HDRI skies keep using `environment_background_intensity` instead.
+    #[serde(default = "default_sky_exposure")]
+    pub sky_exposure: f32,
+}
+
+/// The analytic sky models the engine can draw as a backdrop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkyModel {
+    /// Hosek–Wilkie: the engine's default daylight fit.
+    #[default]
+    Hosek,
+    /// Preetham: the older analytic fit, still useful for a flatter sky.
+    Preetham,
+    /// AETHER: spectral sky from a baked LUT (shipped for 2.0 / 0.3).
+    Aether,
+}
+
+impl SkyModel {
+    /// The token the render service maps onto `SkySettings.model`.
+    pub fn token(self) -> &'static str {
+        match self {
+            SkyModel::Hosek => "hosek",
+            SkyModel::Preetham => "preetham",
+            SkyModel::Aether => "aether",
+        }
+    }
 }
 
 /// Shadow filter the renderer applies to the sun's shadow map.
@@ -658,6 +712,18 @@ fn default_shadow_resolution() -> u32 {
     4096
 }
 
+fn default_sky_turbidity() -> f32 {
+    2.0
+}
+
+fn default_sky_ground_albedo() -> f32 {
+    0.3
+}
+
+fn default_sky_exposure() -> f32 {
+    0.08
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -674,6 +740,10 @@ impl Default for RenderSettings {
             still_denoise: false,
             shadow_technique: ShadowTechnique::default(),
             shadow_resolution: default_shadow_resolution(),
+            sky_model: SkyModel::default(),
+            sky_turbidity: default_sky_turbidity(),
+            sky_ground_albedo: default_sky_ground_albedo(),
+            sky_exposure: default_sky_exposure(),
         }
     }
 }

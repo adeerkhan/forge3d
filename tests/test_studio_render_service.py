@@ -150,3 +150,60 @@ def test_dem_span_uses_pixel_size_for_a_projected_raster():
         transform = None
 
     assert service.dem_span(FakeDem()) == (4000.0, 3800.0)
+
+
+class _SkyStub:
+    """`sky_settings` only needs the class's model map, not a GPU session."""
+
+    SKY_MODELS = {}
+
+
+@pytest.fixture
+def sky_settings():
+    service = load_service()
+    stub = _SkyStub()
+    stub.SKY_MODELS = service.StudioRenderer.SKY_MODELS
+    return lambda request, quality, environment: service.StudioRenderer.sky_settings(
+        stub, request, quality, environment
+    )
+
+
+def test_hdri_owns_the_sky_and_keeps_the_backdrop_intensity(sky_settings):
+    """The project HDRI branch must not read the analytic fields at all."""
+    settings = sky_settings(
+        {"environmentBackgroundIntensity": 0.7},
+        {"sky": True, "skyModel": "preetham", "skyTurbidity": 8.0, "skyExposure": 0.9},
+        "/maps/studio.hdr",
+    )
+    assert settings.model == "hdri"
+    assert settings.sky_exposure == pytest.approx(0.7)
+    # The analytic values are ignored, not merged into the HDRI sky.
+    assert settings.turbidity == pytest.approx(2.0)
+
+
+def test_the_analytic_sky_carries_the_projects_values(sky_settings):
+    settings = sky_settings(
+        {"environmentBackgroundIntensity": 1.0},
+        {
+            "sky": True,
+            "skyModel": "preetham",
+            "skyTurbidity": 6.5,
+            "skyGroundAlbedo": 0.4,
+            "skyExposure": 0.03,
+        },
+        None,
+    )
+    assert settings.model == "preetham"
+    assert settings.turbidity == pytest.approx(6.5)
+    assert settings.ground_albedo == pytest.approx(0.4)
+    assert settings.sky_exposure == pytest.approx(0.03)
+
+
+def test_aether_refuses_parameters_the_shipped_bake_does_not_cover(sky_settings):
+    """A way-off turbidity must fail loudly, not render the wrong atmosphere."""
+    with pytest.raises(RuntimeError, match="baked LUT"):
+        sky_settings(
+            {"environmentBackgroundIntensity": 1.0},
+            {"sky": True, "skyModel": "aether", "skyTurbidity": 3.0, "skyGroundAlbedo": 0.3},
+            None,
+        )

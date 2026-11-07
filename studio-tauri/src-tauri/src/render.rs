@@ -364,6 +364,12 @@ pub struct RenderRequest {
     /// Shadow filter (`PCF` | `PCSS`) and shadow-map edge length in texels.
     pub shadow_technique: String,
     pub shadow_resolution: u32,
+    /// Analytic sky model token (`hosek` | `preetham` | `aether`) and its
+    /// backdrop parameters. Used only when the project has no HDRI.
+    pub sky_model: String,
+    pub sky_turbidity: f32,
+    pub sky_ground_albedo: f32,
+    pub sky_exposure: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -389,6 +395,10 @@ impl RenderRequest {
         self.still_denoise = settings.still_denoise;
         self.shadow_technique = settings.shadow_technique.engine_name().to_owned();
         self.shadow_resolution = settings.shadow_resolution;
+        self.sky_model = settings.sky_model.token().to_owned();
+        self.sky_turbidity = settings.sky_turbidity;
+        self.sky_ground_albedo = settings.sky_ground_albedo;
+        self.sky_exposure = settings.sky_exposure;
         self
     }
 
@@ -452,6 +462,10 @@ impl RenderRequest {
                 "denoise": final_quality && self.still_denoise,
                 "shadowTechnique": self.shadow_technique,
                 "shadowResolution": self.shadow_resolution,
+                "skyModel": self.sky_model,
+                "skyTurbidity": self.sky_turbidity,
+                "skyGroundAlbedo": self.sky_ground_albedo,
+                "skyExposure": self.sky_exposure,
             },
             "overlay": self.overlay,
             "exposure": self.exposure,
@@ -544,6 +558,10 @@ impl RenderRequest {
             still_denoise: false,
             shadow_technique: "PCF".to_owned(),
             shadow_resolution: 4096,
+            sky_model: "hosek".to_owned(),
+            sky_turbidity: 2.0,
+            sky_ground_albedo: 0.3,
+            sky_exposure: 0.08,
         })
     }
 }
@@ -581,6 +599,10 @@ mod tests {
             still_denoise: false,
             shadow_technique: "PCF".to_owned(),
             shadow_resolution: 4096,
+            sky_model: "hosek".to_owned(),
+            sky_turbidity: 2.0,
+            sky_ground_albedo: 0.3,
+            sky_exposure: 0.08,
         }
     }
 
@@ -705,6 +727,27 @@ mod tests {
         assert_eq!(
             payload["quality"]["shadowResolution"],
             expected["shadows"]["resolution"]
+        );
+
+        // Render-only: the analytic sky draws the backdrop and is not part of
+        // the preview rig (the environment map lights the scene).
+        let sky = &expected["renderOnly"]["sky"];
+        assert_eq!(payload["quality"]["sky"], sky["enabled"]);
+        assert_eq!(payload["quality"]["skyModel"], sky["model"]);
+        near_json(
+            "quality.skyTurbidity",
+            &payload["quality"]["skyTurbidity"],
+            &sky["turbidity"],
+        );
+        near_json(
+            "quality.skyGroundAlbedo",
+            &payload["quality"]["skyGroundAlbedo"],
+            &sky["groundAlbedo"],
+        );
+        near_json(
+            "quality.skyExposure",
+            &payload["quality"]["skyExposure"],
+            &sky["exposure"],
         );
     }
 

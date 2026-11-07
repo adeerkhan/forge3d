@@ -282,7 +282,7 @@ export function ChoiceField<T extends string>({
 }: {
   label: string;
   value: T;
-  options: { value: T; label: string; title?: string }[];
+  options: { value: T; label: string; title?: string; disabled?: boolean }[];
   onChange(value: T): void;
   hint?: string;
 }) {
@@ -297,6 +297,7 @@ export function ChoiceField<T extends string>({
             className={`segmented__option${option.value === value ? " is-active" : ""}`}
             aria-pressed={option.value === value}
             title={option.title ?? option.label}
+            disabled={option.disabled}
             onClick={() => {
               if (option.value !== value) onChange(option.value);
             }}

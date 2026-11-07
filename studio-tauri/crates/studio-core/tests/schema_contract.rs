@@ -68,6 +68,10 @@ fn project_document_key_shape_is_stable() {
             "stillDenoise",
             "shadowTechnique",
             "shadowResolution",
+            "skyModel",
+            "skyTurbidity",
+            "skyGroundAlbedo",
+            "skyExposure",
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);

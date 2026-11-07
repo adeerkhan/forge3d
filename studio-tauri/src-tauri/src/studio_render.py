@@ -265,6 +265,57 @@ class StudioRenderer:
             rgba, strength=float(overlay.get("opacity", 0.82))
         )
 
+    #: Model token -> the engine's `SkySettings.model` spelling.
+    SKY_MODELS = {"hosek": "hosek-wilkie", "preetham": "preetham", "aether": "aether"}
+
+    def sky_settings(self, request: Dict[str, Any], quality: Dict[str, Any], environment):
+        """The visible sky for one frame.
+
+        An HDRI owns the sky (it is the same map lighting the terrain) and keeps
+        the project's backdrop intensity. Without one, the project's analytic
+        model draws the backdrop with its own exposure; that exposure moves the
+        sky pass only — terrain radiance and IBL intensity are untouched.
+
+        AETHER renders from a *baked* LUT. The wheel ships one for turbidity 2.0
+        / ground albedo 0.3; any other pair needs a feature-gated bake, so the
+        service refuses instead of silently rendering the wrong atmosphere.
+        """
+        from forge3d.terrain_params import SkySettings
+
+        enabled = bool(quality.get("sky", True))
+        if environment is not None:
+            return SkySettings(
+                enabled=enabled,
+                model="hdri",
+                aerial_perspective=False,
+                sky_exposure=float(request.get("environmentBackgroundIntensity", 1.0)),
+            )
+
+        model = str(quality.get("skyModel") or "hosek").lower()
+        turbidity = float(quality.get("skyTurbidity", 2.0))
+        ground_albedo = float(quality.get("skyGroundAlbedo", 0.3))
+        lut_handle = None
+        if model == "aether":
+            if abs(turbidity - 2.0) > 1e-6 or abs(ground_albedo - 0.3) > 1e-6:
+                raise RuntimeError(
+                    "the AETHER sky needs a baked LUT for turbidity %.2f / ground albedo %.2f; "
+                    "the shipped bake is 2.0 / 0.3 — set those, or bake the atmosphere first"
+                    % (turbidity, ground_albedo)
+                )
+            import forge3d as f3d
+
+            lut_handle = f3d.atmosphere_bake_luts()
+
+        return SkySettings(
+            enabled=enabled,
+            model=self.SKY_MODELS.get(model, "hosek-wilkie"),
+            turbidity=turbidity,
+            ground_albedo=ground_albedo,
+            aerial_perspective=False,
+            sky_exposure=float(quality.get("skyExposure", 0.08)),
+            lut_handle=lut_handle,
+        )
+
     def render(self, request: Dict[str, Any]) -> Dict[str, Any]:
         f3d = self.f3d
         from forge3d.terrain_params import (
@@ -321,6 +372,8 @@ class StudioRenderer:
         # HDRI when set, otherwise the built-in studio sky.
         ibl = self.environment_map(environment)
         ibl.intensity = float(request.get("iblIntensity", 1.0))
+
+        sky_settings = self.sky_settings(request, quality, environment)
 
         settings = make_terrain_params_config(
             size_px=(width, height),
@@ -381,20 +434,7 @@ class StudioRenderer:
                 depth=aov_flags["depth"],
                 format="png",
             ),
-            # With a project HDRI the visible sky is that environment map (the
-            # same one lighting the terrain). Without one the engine's
-            # procedural sky does not correspond to anything the preview shows
-            # — it renders a flat, blown-out background — so Rendered keeps the
-            # neutral studio surround the Solid/Material views use instead.
-            # Background intensity is independent of the IBL lighting intensity.
-            sky=SkySettings(
-                enabled=bool(quality.get("sky", True)) and environment is not None,
-                model="hdri" if environment else "hosek-wilkie",
-                aerial_perspective=False,
-                sky_exposure=float(request.get("environmentBackgroundIntensity", 1.0))
-                if environment
-                else 1.0,
-            ),
+            sky=sky_settings,
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))
         # Shadow filter and map size are the project's, not the service's: PCF

@@ -96,6 +96,11 @@ function projectFromFixture(): Project {
       stillDenoise: false,
       shadowTechnique: fixture.project.render.shadowTechnique,
       shadowResolution: fixture.project.render.shadowResolution,
+      // The analytic sky is render-only; the preview rig must not read these.
+      skyModel: "hosek",
+      skyTurbidity: 2,
+      skyGroundAlbedo: 0.3,
+      skyExposure: 0.08,
     },
     timeline: {
       length: 1,
@@ -103,7 +108,7 @@ function projectFromFixture(): Project {
       currentFrame: 0,
       tracks: [],
     },
-  } as Project;
+  } as unknown as Project;
 }
 
 const rig = lightingRig(projectFromFixture());
@@ -138,6 +143,14 @@ near("direction.length", Math.hypot(dx, dy, dz), 1, 1e-6);
 if (!(dy < 0)) {
   failures += 1;
   console.error(`FAIL direction: the sun must travel downward, got y=${dy}`);
+}
+
+// The analytic sky is render-only: it paints the backdrop, while the
+// environment map lights the scene. If someone wires sky values into the
+// preview without updating the contract, this notices.
+if (Object.keys(rig).includes("sky")) {
+  failures += 1;
+  console.error("FAIL rig: the preview rig must not carry sky settings (background-only)");
 }
 
 if (failures > 0) {

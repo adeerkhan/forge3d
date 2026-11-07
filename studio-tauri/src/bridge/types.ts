@@ -150,7 +150,17 @@ export interface RenderSettings {
   shadowTechnique: ShadowTechnique;
   /** Shadow-map edge length in texels (256-8192); bigger is crisper and slower. */
   shadowResolution: number;
+  /** Analytic sky model for the backdrop when no HDRI is set. */
+  skyModel: SkyModel;
+  /** Hosek/Preetham turbidity (haze), 1..=10. */
+  skyTurbidity: number;
+  /** Ground reflectance the sky bounces back, 0..=1. */
+  skyGroundAlbedo: number;
+  /** Exposure for the analytic sky pass (backdrop only), 0..=4. */
+  skyExposure: number;
 }
+
+export type SkyModel = "hosek" | "preetham" | "aether";
 
 export type ShadowTechnique = "pcf" | "pcss";
 

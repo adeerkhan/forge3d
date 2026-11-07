@@ -33,6 +33,10 @@ be a payload field: vector layers and meshes.
 | HDRI/sky axis fix (Z-up terrain → Y-up environment frame for the sky pass) | done |
 | Properties sidebar (Render / Scene / Lighting / Object tabs, N, remembered sections) | done |
 | 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
+| One lighting rig shared by preview and payload (fixture read by Rust and node) | done |
+| 8.0b — granted device features in the probe/status bar | done |
+| 5.1 sky & atmosphere — model, turbidity, ground albedo, exposure; AETHER gated on the shipped bake | done (backdrop-only by design) |
+| Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
 | Everything below (§3–§6, except 9.0) | **not started** |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
@@ -111,14 +115,22 @@ sections below list only what differs from this recipe.
 
 All use §2. Nothing new is introduced beyond the settings below.
 
-### 5.1 Sky model and atmosphere (1 day)
-- Settings: `skyModel` (`hosek-wilkie` | `preetham` | `aether` | `hdri`),
-  `turbidity` (1–10), `groundAlbedo` (0–1), `skyExposure` (0–4).
-- Service: `SkySettings(enabled=sky, model=…, turbidity=…, ground_albedo=…,
-  sky_exposure=…)`. Keep the existing "environment ⇒ hdri" branch.
-- **Defer AETHER**: it needs `atmosphere_bake_luts` and a stored LUT handle.
-  The UI option stays disabled with "requires bake" until asked.
-- Check: payload fields + Python `SkySettings` validation test.
+### 5.1 Sky model and atmosphere (1 day) — **done**
+- Shipped: `skyModel` (`hosek` | `preetham` | `aether`), `skyTurbidity`
+  (1–10), `skyGroundAlbedo` (0–1), `skyExposure` (0–4) on `RenderSettings`
+  (serde-default, v4-safe); payload `quality.sky*`; service maps to
+  `SkySettings` and keeps the "environment ⇒ hdri" branch byte-identical
+  (measured: the HDRI sample still hashes 848cea2e6fdcc450).
+- The analytic branch is enabled again when no HDRI is set, so Rendered has a
+  sky instead of the neutral surround.
+- AETHER is offered only at the shipped bake's parameters (turbidity 2.0,
+  ground albedo 0.3); any other pair fails loudly in the service.
+- Measured: turbidity 2→8 moves the frame 11.6 (mean abs), sky exposure
+  0.05→0.10 moves it 33.8; no-HDRI sky mean 163.
+- **Open engine item:** Hosek–Wilkie reads green-dominant (75/88/85 at
+  exposure 0.02) where the CPU radiance table is blue and Preetham renders
+  blue; it is also ~7× brighter at the same exposure. The Studio exposes the
+  model instead of hiding the difference.
 
 ### 5.2 Water (0.5 day)
 - Settings: `water.enabled`, `water.level`, `water.slopeThreshold`.
