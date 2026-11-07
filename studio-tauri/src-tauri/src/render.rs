@@ -20,7 +20,10 @@ use serde_json::json;
 
 const SERVICE_SCRIPT: &str = include_str!("studio_render.py");
 const READY_TIMEOUT: Duration = Duration::from_secs(240);
-const FRAME_TIMEOUT: Duration = Duration::from_secs(180);
+pub const FRAME_TIMEOUT: Duration = Duration::from_secs(180);
+/// A viewport frame is a preview: a wedged one must not block the queue behind
+/// it for the still timeout.
+pub const PREVIEW_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_LOG: usize = 200;
 
 #[derive(Debug, Clone, Serialize)]
@@ -56,7 +59,9 @@ struct Session {
 /// finished one comes back without a poll interval of latency.
 struct Shared {
     replies: Mutex<HashMap<u64, serde_json::Value>>,
-    ready: Mutex<Option<Result<(), String>>>,
+    /// Readiness for the current session, tagged with its generation so a
+    /// reader from a previous session cannot satisfy (or fail) a new one.
+    ready: Mutex<Option<(u64, Result<(), String>)>>,
     log: Mutex<VecDeque<String>>,
     changed: Condvar,
 }
@@ -130,6 +135,7 @@ impl RenderState {
         python: &str,
         dem: &str,
         request: serde_json::Value,
+        timeout: Duration,
     ) -> Result<RenderFrame, String> {
         // Serialise first, then start the clock: a viewport frame queued behind
         // a still must not spend the still's time against its own deadline.
@@ -153,13 +159,7 @@ impl RenderState {
                 .map_err(|error| format!("lost the renderer: {error}"))?;
         }
 
-        let reply = match wait_for_reply(
-            &self.shared,
-            &self.generation,
-            generation,
-            id,
-            FRAME_TIMEOUT,
-        ) {
+        let reply = match wait_for_reply(&self.shared, &self.generation, generation, id, timeout) {
             WaitOutcome::Reply(reply) => reply,
             WaitOutcome::Stopped => return Err("the render was stopped".to_owned()),
             WaitOutcome::TimedOut => {
@@ -200,10 +200,12 @@ impl RenderState {
         if let Some(mut session) = guard.take() {
             let _ = writeln!(session.stdin, "{}", json!({"id": 0, "cmd": "close"}));
             let _ = session.stdin.flush();
-            for _ in 0..20 {
+            // The service exits on `close` immediately; do not spend a second
+            // of a worker's time waiting for a graceful exit that will not come.
+            for _ in 0..10 {
                 match session.child.try_wait() {
                     Ok(Some(_)) => break,
-                    Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                    Ok(None) => std::thread::sleep(Duration::from_millis(20)),
                     Err(_) => break,
                 }
             }
@@ -272,14 +274,17 @@ impl RenderState {
 
         // `stop()` above bumped the generation; readiness belongs to this one.
         let generation = self.generation.load(Ordering::SeqCst);
-        spawn_reader(stdout, Arc::clone(&self.shared));
+        spawn_reader(stdout, Arc::clone(&self.shared), generation);
         spawn_stderr(stderr, Arc::clone(&self.shared));
 
         let mut ready = self.shared.ready.lock().map_err(lock_error)?;
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            if let Some(result) = ready.take() {
-                return result;
+            if let Some((tag, result)) = ready.take() {
+                if tag == generation {
+                    return result;
+                }
+                // A stale reader finished after its session was replaced.
             }
             if self.generation.load(Ordering::SeqCst) != generation {
                 return Err("the renderer was stopped".to_owned());
@@ -352,7 +357,7 @@ fn push_log(shared: &Shared, line: String) {
     }
 }
 
-fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>) {
+fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>, generation: u64) {
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let trimmed = line.trim();
@@ -364,7 +369,7 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>
                 Some("ready") => {
                     push_log(&shared, "renderer ready".to_owned());
                     if let Ok(mut state) = shared.ready.lock() {
-                        *state = Some(Ok(()));
+                        *state = Some((generation, Ok(())));
                     }
                     shared.changed.notify_all();
                 }
@@ -376,7 +381,7 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>
                         .to_owned();
                     push_log(&shared, message.clone());
                     if let Ok(mut state) = shared.ready.lock() {
-                        *state = Some(Err(message));
+                        *state = Some((generation, Err(message)));
                     }
                     shared.changed.notify_all();
                 }
@@ -392,7 +397,10 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>
         }
         if let Ok(mut state) = shared.ready.lock() {
             if state.is_none() {
-                *state = Some(Err("the renderer exited unexpectedly".to_owned()));
+                *state = Some((
+                    generation,
+                    Err("the renderer exited unexpectedly".to_owned()),
+                ));
             }
         }
         shared.changed.notify_all();
@@ -791,6 +799,7 @@ mod tests {
                 python.to_str().expect("utf-8 python path"),
                 dem.to_str().expect("utf-8 dem path"),
                 payload,
+                FRAME_TIMEOUT,
             )
             .expect("one frame from the service");
         // The service clamps each side to at least 64 px.

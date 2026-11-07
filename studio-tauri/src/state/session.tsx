@@ -161,17 +161,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   // can run, without a whole workspace for it.
   useEffect(() => {
     void refreshEngine();
-    if (bridge.kind === "tauri") {
-      bridge
-        .scenePresets()
-        .then(setPresets)
-        .catch(() => undefined);
-    } else {
-      bridge
-        .scenePresets()
-        .then(setPresets)
-        .catch(() => undefined);
-    }
+    bridge
+      .scenePresets()
+      .then(setPresets)
+      .catch(() => undefined);
     // Mount-time probe only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

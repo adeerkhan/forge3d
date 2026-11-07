@@ -207,8 +207,9 @@ pub struct PlayheadResult {
 pub fn check_assets(
     state: State<'_, AppState>,
 ) -> Result<Vec<studio_core::AssetIntegrity>, String> {
-    let session = lock(&state)?;
-    let snapshot = session
+    // Clone the snapshot, then drop the guard: statting N assets (possibly on a
+    // network mount) must not block every other command.
+    let snapshot = lock(&state)?
         .state()
         .ok_or_else(|| "no project is open".to_owned())?;
     Ok(studio_core::asset_integrity(
@@ -726,7 +727,7 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
             "{path} is not a PNG/JPEG image; GeoTIFF textures are not yet decoded in the viewport"
         ));
     }
-    let (_file, bytes) = read_file_capped(&path, None)?;
+    let (_file, bytes) = read_file_capped(&path, Some((MAX_HDR_BYTES, "images are limited to")))?;
     Ok(payload(
         path,
         studio_core::AssetKind::Orthophoto,
@@ -821,7 +822,12 @@ pub fn render_frame(
     )?;
     let python = forge.probe(false).python;
     let quality = quality.unwrap_or_else(|| "final".to_owned());
-    render.render(&python, &request.dem, request.to_payload(&quality, None))
+    render.render(
+        &python,
+        &request.dem,
+        request.to_payload(&quality, None),
+        crate::render::PREVIEW_TIMEOUT,
+    )
 }
 
 /// Render a final still at the project's configured resolution and write it to
@@ -893,6 +899,7 @@ pub fn render_still(
         &python,
         &request.dem,
         request.to_payload("final", Some(&target.to_string_lossy())),
+        crate::render::FRAME_TIMEOUT,
     )?;
     frame.path = Some(target.display().to_string());
 
@@ -974,6 +981,7 @@ pub fn render_animation_frame(
         &python,
         &request.dem,
         request.to_payload(&quality, Some(&target.to_string_lossy())),
+        crate::render::FRAME_TIMEOUT,
     )?;
     written.path = Some(target.display().to_string());
 

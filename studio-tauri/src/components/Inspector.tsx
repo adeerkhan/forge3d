@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   Asset,
   CapabilityLevel,
@@ -490,15 +490,18 @@ export function AssetsPanel() {
  *  edit is one command, like `setChannelKeys`). */
 function useRenderSettings() {
   const { state, actions } = useSession();
-  const render = state?.project.render;
-  if (!render || !state) return null;
+  const latest = useRef(state?.project.render);
+  latest.current = state?.project.render;
+  if (!state || !latest.current) return null;
   const commit = (patch: Partial<RenderSettings>) => {
-    void actions.apply({
-      type: "setRenderSettings",
-      render: { ...render, ...patch },
-    });
+    // Two edits can land before the first command returns; build the next
+    // settings on what this hook last sent, not on the snapshot React has not
+    // seen yet (otherwise the earlier edit is silently dropped).
+    const next = { ...latest.current!, ...patch };
+    latest.current = next;
+    void actions.apply({ type: "setRenderSettings", render: next });
   };
-  return { project: state.project, render, commit };
+  return { project: state.project, render: latest.current, commit };
 }
 
 /** Render tab: what the still and the Rendered frame are made of. */
@@ -592,9 +595,13 @@ export function RenderSettingsEditor() {
 export function SkySection() {
   const settings = useRenderSettings();
   if (!settings) return null;
-  const { render, commit } = settings;
+  const { project, render, commit } = settings;
 
-  const hasHdri = render.environment !== null;
+  // A dangling id (asset removed) must not lock the panel to "HDRI": the
+  // renderer drops the missing map and draws the analytic sky.
+  const hasHdri =
+    render.environment !== null &&
+    project.assets.some((asset) => asset.id === render.environment);
   const aether = render.skyModel === "aether";
   const shippedBake =
     Math.abs(render.skyTurbidity - 2) < 1e-6 && Math.abs(render.skyGroundAlbedo - 0.3) < 1e-6;
@@ -695,7 +702,8 @@ export function EnvironmentSettings() {
   const settings = useRenderSettings();
   if (!settings) return null;
   const { project, render, commit } = settings;
-  const environment = render.environment
+  const linked = render.environment !== null;
+  const environment = linked
     ? project.assets.find((asset) => asset.id === render.environment)
     : undefined;
 
@@ -711,7 +719,10 @@ export function EnvironmentSettings() {
       />
       <div className="readout readout--compact">
         <dt>Map</dt>
-        <dd>{environment?.name ?? "built-in studio sky"}</dd>
+        <dd>
+          {environment?.name ??
+            (linked ? "missing asset — relink or remove" : "built-in studio sky")}
+        </dd>
       </div>
       <div className="inline-actions">
         <button
@@ -723,7 +734,7 @@ export function EnvironmentSettings() {
         >
           {environment ? "Replace HDRI…" : "Add HDRI…"}
         </button>
-        {environment && (
+        {linked && (
           <button
             type="button"
             className="button button--small"

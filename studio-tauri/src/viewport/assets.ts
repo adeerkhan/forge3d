@@ -24,8 +24,22 @@ export function base64ToArrayBuffer(base64: string): ArrayBuffer {
 
 export function putAssetBytes(path: string, buffer: ArrayBuffer): void {
   bytesByPath.set(path, buffer);
+  // Bounded: relinking many assets must not keep every file's bytes alive.
+  while (bytesByPath.size > 64) {
+    const oldest = bytesByPath.keys().next();
+    if (oldest.done) break;
+    bytesByPath.delete(oldest.value);
+  }
   scenesByPath.delete(path);
   nodesByPath.delete(path);
+}
+
+/** Drop the parse caches. Call when the project closes: scene objects are
+ *  disposed by the viewport, and these maps would otherwise keep them alive. */
+export function clearAssetCaches(): void {
+  bytesByPath.clear();
+  scenesByPath.clear();
+  nodesByPath.clear();
 }
 
 export function parseGltf(buffer: ArrayBuffer, path: string): Promise<Group> {

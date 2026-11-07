@@ -449,18 +449,25 @@ fn resolve_bundled(relative: &str) -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
-/// Sample a DEM into a heightfield for the Studio viewport.
-pub fn sample_terrain(
+const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run a one-shot Python script with a deadline.
+///
+/// `Command::output()` has no timeout, so a hung interpreter leaves the caller
+/// pending forever. The pipes are drained on threads, otherwise a large payload
+/// (a DEM preview, a base64 PNG) can fill the pipe buffer and stall the child
+/// before it exits.
+fn run_script(
     python: &str,
-    path: &str,
-    resolution: u32,
-) -> Result<serde_json::Value, String> {
+    script: &str,
+    args: &[String],
+    timeout: Duration,
+) -> Result<(String, String), String> {
     let mut command = Command::new(python);
     command
         .arg("-c")
-        .arg(PREVIEW_SCRIPT)
-        .arg(path)
-        .arg(resolution.to_string())
+        .arg(script)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -468,19 +475,69 @@ pub fn sample_terrain(
         command.env("PYTHONPATH", extra);
     }
 
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("could not run {python}: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "the script has no stdout".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "the script has no stderr".to_owned())?;
+    let out_reader = std::thread::spawn(move || read_all(stdout));
+    let err_reader = std::thread::spawn(move || read_all(stderr));
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = out_reader.join().unwrap_or_default();
+                let stderr = err_reader.join().unwrap_or_default();
+                if !status.success() && stdout.trim().is_empty() {
+                    return Err(format!("{python} exited with {status}: {}", stderr.trim()));
+                }
+                return Ok((stdout, stderr));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(format!(
+                    "{python} did not answer within {}s",
+                    timeout.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => return Err(format!("could not wait for {python}: {error}")),
+        }
+    }
+}
+
+fn read_all(mut reader: impl std::io::Read) -> String {
+    let mut text = String::new();
+    let _ = reader.read_to_string(&mut text);
+    text
+}
+
+/// Sample a DEM into a heightfield for the Studio viewport.
+pub fn sample_terrain(
+    python: &str,
+    path: &str,
+    resolution: u32,
+) -> Result<serde_json::Value, String> {
+    let (stdout, stderr) = run_script(
+        python,
+        PREVIEW_SCRIPT,
+        &[path.to_owned(), resolution.to_string()],
+        SCRIPT_TIMEOUT,
+    )?;
     let line = stdout
         .lines()
         .find(|line| line.trim_start().starts_with('{'))
-        .ok_or_else(|| {
-            format!(
-                "the DEM sampler produced no output: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        })?;
+        .ok_or_else(|| format!("the DEM sampler produced no output: {}", stderr.trim()))?;
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|error| format!("the DEM sampler returned invalid JSON: {error}"))?;
     if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
@@ -536,33 +593,20 @@ pub fn solar_position(
     longitude: f64,
     datetime_utc: &str,
 ) -> Result<SolarPosition, String> {
-    let mut command = Command::new(python);
-    command
-        .arg("-c")
-        .arg(SOLAR_SCRIPT)
-        .arg(latitude.to_string())
-        .arg(longitude.to_string())
-        .arg(datetime_utc)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(extra) = python_path_entries() {
-        command.env("PYTHONPATH", extra);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("could not run {python}: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stdout, stderr) = run_script(
+        python,
+        SOLAR_SCRIPT,
+        &[
+            latitude.to_string(),
+            longitude.to_string(),
+            datetime_utc.to_owned(),
+        ],
+        SCRIPT_TIMEOUT,
+    )?;
     let line = stdout
         .lines()
         .find(|line| line.trim_start().starts_with('{'))
-        .ok_or_else(|| {
-            format!(
-                "the solar probe produced no output: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        })?;
+        .ok_or_else(|| format!("the solar probe produced no output: {}", stderr.trim()))?;
     parse_solar_reply(line)
 }
 
@@ -662,32 +706,16 @@ except Exception as exc:
 
 /// Decode a raster into a downsampled PNG for the Solid viewport's drape.
 pub fn raster_preview_png(python: &str, path: &str, width: u32) -> Result<Vec<u8>, String> {
-    let mut command = Command::new(python);
-    command
-        .arg("-c")
-        .arg(RASTER_PREVIEW_SCRIPT)
-        .arg(path)
-        .arg(width.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(extra) = python_path_entries() {
-        command.env("PYTHONPATH", extra);
-    }
-
-    let output = command
-        .output()
-        .map_err(|error| format!("could not run {python}: {error}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (stdout, stderr) = run_script(
+        python,
+        RASTER_PREVIEW_SCRIPT,
+        &[path.to_owned(), width.to_string()],
+        SCRIPT_TIMEOUT,
+    )?;
     let line = stdout
         .lines()
         .find(|line| line.trim_start().starts_with('{'))
-        .ok_or_else(|| {
-            format!(
-                "the raster preview produced no output: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-        })?;
+        .ok_or_else(|| format!("the raster preview produced no output: {}", stderr.trim()))?;
     let value: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|error| format!("the raster preview returned invalid JSON: {error}"))?;
     if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {

@@ -17,7 +17,12 @@ import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session-context";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
 import type { Material, TerrainPreview } from "../bridge/types";
-import { base64ToArrayBuffer, disposeTree, loadAssetScene } from "./assets";
+import {
+  base64ToArrayBuffer,
+  clearAssetCaches,
+  disposeTree,
+  loadAssetScene,
+} from "./assets";
 import { viewStore } from "./viewStore";
 import { lightingRig } from "./lighting";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
@@ -85,6 +90,8 @@ interface Runtime {
   glStep: number;
   /** False until the probe has seen a clean frame after the last downgrade. */
   glProbed: boolean;
+  /** Set by anything that changes the picture; the loop renders and clears it. */
+  needsRender: boolean;
   /** Latest selection, so the canvas click handler is not a stale closure. */
   selection: string[];
 }
@@ -848,6 +855,7 @@ export function Viewport3D() {
       pmrem,
       glStep: 0,
       glProbed: false,
+      needsRender: true,
       selection: [],
     };
     runtimeRef.current = runtime;
@@ -859,6 +867,7 @@ export function Viewport3D() {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      runtime.needsRender = true;
       setSize((current) =>
         current.width === width && current.height === height
           ? current
@@ -874,6 +883,9 @@ export function Viewport3D() {
     });
     gizmo.addEventListener("objectChange", () => {
       for (const helper of runtime.helpers) helper.update();
+      // The gizmo moves the object directly; the command that records it is
+      // applied later, so this frame has to be drawn on its own.
+      runtime.needsRender = true;
     });
     // Rendered mode follows the camera. Viewport frames cost ~190 ms (the SSAO
     // pass, which alone costs ~4.8 s, is reserved for final stills), so this is
@@ -995,8 +1007,10 @@ export function Viewport3D() {
       frame = requestAnimationFrame(tick);
       // OrbitControls.update() ends with `camera.lookAt(target)`, which would
       // overwrite the camera-view quaternion every frame. While looking through
-      // the project camera, the model owns the view.
-      if (!inCameraView.current) orbit.update();
+      // the project camera, the model owns the view. Its return value also
+      // tells us whether the camera actually moved (damping keeps it true
+      // until the motion settles) — an idle viewport then costs no draw.
+      const moved = inCameraView.current ? false : orbit.update();
       updateViewStore();
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
@@ -1009,6 +1023,8 @@ export function Viewport3D() {
         lastQuaternion = [q.x, q.y, q.z, q.w];
         setQuaternion(lastQuaternion);
       }
+      if (!moved && !runtime.needsRender) return;
+      runtime.needsRender = false;
       renderer.render(scene, camera);
       // Some webviews reject the first draw of a shadow/float-texture pass.
       // Probe once per change; a rejected draw downgrades one step and the
@@ -1019,6 +1035,7 @@ export function Viewport3D() {
         if (error !== renderer.getContext().NO_ERROR) {
           setGpuNote(applyGpuStep(runtime));
           runtime.glProbed = false;
+          runtime.needsRender = true;
         }
       }
     };
@@ -1044,6 +1061,9 @@ export function Viewport3D() {
       grid.geometry.dispose();
       (grid.material as THREE.Material).dispose();
       runtime.studioEnvironment?.dispose();
+      environmentRef.current?.source.dispose();
+      environmentRef.current?.background.dispose();
+      environmentRef.current?.target.dispose();
       runtime.pmrem?.dispose();
       renderer.dispose();
       runtimeRef.current = null;
@@ -1071,6 +1091,14 @@ export function Viewport3D() {
       }
       runtime.helpers = [];
       runtime.helperKey = "";
+      // Nothing references these any more: free them rather than keeping the
+      // closed project's bytes, scenes and textures for the session.
+      clearAssetCaches();
+      for (const pending of textureCache.current.values()) {
+        void pending.then((texture) => texture.dispose()).catch(() => undefined);
+      }
+      textureCache.current.clear();
+      runtime.needsRender = true;
       return;
     }
 
@@ -1149,6 +1177,7 @@ export function Viewport3D() {
               // the same geometry as clay.
               setSolidShading(loaded, viewportModeRef.current === "solid");
               setProblem(null);
+              runtime.needsRender = true;
             })
             .catch((cause) => {
               setProblem(
@@ -1189,6 +1218,7 @@ export function Viewport3D() {
                   if (group.userData.signature !== expected) return;
                   mesh.userData.drape = texture;
                   applyTerrainShading(mesh, viewportModeRef.current === "solid");
+                  runtime.needsRender = true;
                 })
                 .catch((cause) => {
                   setProblem(
@@ -1332,6 +1362,8 @@ export function Viewport3D() {
       runtime.gizmo.setSpace(space);
       if (runtime.gizmo.object !== editable) runtime.gizmo.attach(editable);
     }
+    // Everything above mutated the scene; draw once on the next tick.
+    runtime.needsRender = true;
   }, [cameraView, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
 
   // A project HDRI replaces the studio sky for Material and Rendered. The
@@ -1346,13 +1378,15 @@ export function Viewport3D() {
     if (!runtime) return;
     let cancelled = false;
     const settings = stateRef.current?.project.render;
-    const apply = () =>
+    const apply = () => {
       applyEnvironment(
         runtime,
         viewportModeRef.current === "solid" ? "solid" : "material",
         settings?.iblIntensity ?? 1,
         settings?.environmentBackgroundIntensity ?? 1,
       );
+      runtime.needsRender = true;
+    };
 
     if (!environmentPath) {
       const previous = environmentRef.current;
@@ -1459,6 +1493,7 @@ export function Viewport3D() {
     runtime.camera.up.set(0, axis === "y" ? 0 : 1, axis === "y" ? -1 : 0);
     runtime.camera.lookAt(runtime.orbit.target);
     runtime.orbit.update();
+    runtime.needsRender = true;
   }, []);
 
   /** Viewport render resolution for Rendered mode. Options: 1×/2×/4× the

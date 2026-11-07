@@ -28,25 +28,12 @@ import io
 import json
 import os
 import sys
-import sysconfig
 import tempfile
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
-
-
-def ensure_native_runtime() -> None:
-    """Make the interpreter's libpython loadable (uv keeps it outside venvs)."""
-    if not sys.platform.startswith("linux"):
-        return
-    libdir = sysconfig.get_config_var("LIBDIR")
-    if not libdir or not os.path.isdir(libdir):
-        return
-    existing = [part for part in os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep) if part]
-    if libdir not in existing:
-        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([libdir, *existing])
 
 
 def emit(payload: Dict[str, Any]) -> None:
@@ -160,6 +147,9 @@ class StudioRenderer:
         # Rendered mode re-requests frames while the camera moves.
         self._ibl_cache: Dict[tuple, Any] = {}
         self._ibl_cache_limit = 4
+        # The AETHER LUT is a shipped table: resolving it per frame costs a few
+        # ms, and its parameters are fixed by the gate in `sky_settings`.
+        self._aether_lut: Any = None
 
         self.session = f3d.Session(window=False, backend="vulkan")
         self.renderer = f3d.TerrainRenderer(self.session)
@@ -283,6 +273,10 @@ class StudioRenderer:
         from forge3d.terrain_params import SkySettings
 
         enabled = bool(quality.get("sky", True))
+        # Nothing to draw: do not evaluate a model (AETHER would demand a LUT
+        # for parameters that no longer matter).
+        if not enabled:
+            return SkySettings(enabled=False)
         if environment is not None:
             return SkySettings(
                 enabled=enabled,
@@ -304,7 +298,9 @@ class StudioRenderer:
                 )
             import forge3d as f3d
 
-            lut_handle = f3d.atmosphere_bake_luts()
+            if self._aether_lut is None:
+                self._aether_lut = f3d.atmosphere_bake_luts()
+            lut_handle = self._aether_lut
 
         return SkySettings(
             enabled=enabled,
@@ -495,9 +491,10 @@ class StudioRenderer:
         output = request.get("output")
         if output:
             Path(output).parent.mkdir(parents=True, exist_ok=True)
-            Path(output).write_bytes(png)
             if want_aov and aov_frame is not None:
-                # Engine naming, next to the still / the frame.
+                # Engine naming, next to the still / the frame. Written before
+                # the beauty: a failed AOV save must not leave a still on disk
+                # that looks complete while the command reports failure.
                 stem = Path(output).with_suffix("")
                 if aov_flags["albedo"]:
                     aov_frame.save_albedo(str(stem) + "_albedo.png")
@@ -505,6 +502,7 @@ class StudioRenderer:
                     aov_frame.save_normal(str(stem) + "_normal.png")
                 if aov_flags["depth"]:
                     aov_frame.save_depth(str(stem) + "_depth.png")
+            Path(output).write_bytes(png)
 
         return {
             "width": width,
@@ -522,8 +520,6 @@ def encode_png(rgb: np.ndarray) -> bytes:
 
 
 def main() -> int:
-    ensure_native_runtime()
-
     try:
         config = json.loads(sys.stdin.readline())
         dem = config["dem"]
