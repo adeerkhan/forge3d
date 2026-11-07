@@ -68,7 +68,7 @@ pub struct ScenePreset {
     pub available: bool,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
     let mut presets = Vec::new();
     for (id, name, _dem_file, description) in crate::forge3d::SCENE_PRESETS {
@@ -87,7 +87,7 @@ pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
     presets
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn new_project(
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
@@ -104,14 +104,14 @@ pub fn new_project(
     Ok(lock(&state)?.new_project_seeded(name, seed))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn open_project(state: State<'_, AppState>, path: String) -> Result<SessionState, String> {
     lock(&state)?
         .open_project(Path::new(&path))
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_project(
     state: State<'_, AppState>,
     path: Option<String>,
@@ -203,7 +203,7 @@ pub struct PlayheadResult {
 /// Read-only: the UI shows "missing"/"changed" next to each asset and offers
 /// Relink; nothing here modifies the project. The pure half lives in
 /// `studio_core::integrity`, so the rules are testable without disk.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_assets(
     state: State<'_, AppState>,
 ) -> Result<Vec<studio_core::AssetIntegrity>, String> {
@@ -226,7 +226,7 @@ pub fn check_assets(
 /// One undoable `SetTransform`: the date, place and UTC timestamp are an input
 /// to the calculation, not project state. The light's rotation is what both
 /// the Solid/Material viewport and the Rendered handoff read.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_sun_from_solar(
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
@@ -296,7 +296,7 @@ pub struct SolarResult {
     pub state: SessionState,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn autosave_now(state: State<'_, AppState>) -> Result<Option<AutosaveReport>, String> {
     lock(&state)?
         .autosave_if_needed(&state.autosave)
@@ -314,12 +314,12 @@ pub fn autosave_status(state: State<'_, AppState>) -> Result<AutosaveStatus, Str
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_recovery(state: State<'_, AppState>) -> Result<Vec<RecoveryEntry>, String> {
     state.autosave.list().map_err(|error| error.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_recovery(state: State<'_, AppState>, id: String) -> Result<SessionState, String> {
     let project = state
         .autosave
@@ -334,7 +334,7 @@ pub fn restore_recovery(state: State<'_, AppState>, id: String) -> Result<Sessio
     Ok(session.restore_recovery(&entry, project))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn discard_recovery(state: State<'_, AppState>, id: String) -> Result<(), String> {
     state
         .autosave
@@ -454,7 +454,7 @@ fn payload(path: String, kind: AssetKind, fallback_name: &str, bytes: Vec<u8>) -
 ///
 /// The UI parses the bytes before registering anything, so a corrupt file
 /// never reaches the project model.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
     let path = PathBuf::from(path);
     let kind = AssetKind::from_path(&path).ok_or_else(|| {
@@ -488,7 +488,7 @@ pub fn read_mesh_file(path: String) -> Result<MeshFilePayload, String> {
 /// The sample is a preview, not the render: Forge3D still receives the original
 /// GeoTIFF. Returns the sampler's JSON so the UI reads exactly what was measured
 /// (dimensions, elevation range, extent, heights).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn terrain_preview(
     forge: State<'_, Forge3dState>,
     path: String,
@@ -524,9 +524,22 @@ pub struct ShellInfo {
 // ---------------------------------------------------------------------- Forge3D
 
 /// Probe the Forge3D engine without opening anything.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn forge3d_probe(forge: State<'_, Forge3dState>, force: Option<bool>) -> EngineStatus {
-    forge.probe(force.unwrap_or(false))
+    // The probe spawns a Python interpreter, so it must not run on the UI
+    // thread. The command is `async`; this line makes the context observable
+    // in the shell log (`tokio-runtime-worker`, never `main`).
+    log::debug!(
+        "engine probe running on thread {:?}",
+        std::thread::current().name()
+    );
+    let status = forge.probe(force.unwrap_or(false));
+    log::debug!(
+        "engine probe: available={} detail={}",
+        status.available,
+        status.detail
+    );
+    status
 }
 
 // ---------------------------------------------------------------------- render
@@ -535,7 +548,7 @@ pub fn forge3d_probe(forge: State<'_, Forge3dState>, force: Option<bool>) -> Eng
 /// Forge3D pipeline (the same one the golden tests certify).
 /// Replace the scene terrain's DEM with a raster the user picked; on an empty
 /// scene, create the terrain (so the Add menu can start from a DEM too).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_terrain_dem(
     forge: State<'_, Forge3dState>,
     state: State<'_, AppState>,
@@ -705,7 +718,7 @@ pub fn set_terrain_overlay(
 }
 
 /// Read an image asset (PNG/JPEG) for the Solid viewport's textures.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
     let lower = path.to_ascii_lowercase();
     if !(lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")) {
@@ -728,7 +741,7 @@ pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {
 /// and the viewport parses it with three's `HDRLoader` before pre-filtering it
 /// with PMREM. Rendered frames do not go through here: the engine reads the
 /// path itself (`IBL.from_hdr`).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_hdr(path: String) -> Result<MeshFilePayload, String> {
     if AssetKind::from_path(std::path::Path::new(&path)) != Some(AssetKind::Hdr) {
         return Err(format!(
@@ -743,7 +756,7 @@ pub fn read_hdr(path: String) -> Result<MeshFilePayload, String> {
 /// Decoded, downsampled PNG of a raster overlay for the Material preview's
 /// terrain drape — the webview cannot decode GeoTIFF, so the engine python
 /// does it and hands back a PNG the canvas can display.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn raster_preview(
     forge: State<'_, Forge3dState>,
     path: String,
@@ -775,7 +788,7 @@ fn build_request(
         .with_settings(settings))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn render_frame(
     render: State<'_, RenderState>,
     forge: State<'_, Forge3dState>,
@@ -813,7 +826,7 @@ pub fn render_frame(
 
 /// Render a final still at the project's configured resolution and write it to
 /// `path` (the shell picks the path with a save dialog).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn render_still(
     render: State<'_, RenderState>,
     forge: State<'_, Forge3dState>,
@@ -914,7 +927,7 @@ pub fn render_status(render: State<'_, RenderState>) -> RenderStatus {
 // Tauri commands take their IPC fields as arguments; the wire schema is the
 // point, so the argument count is not a code smell here.
 #[allow(clippy::too_many_arguments)]
-#[tauri::command]
+#[tauri::command(async)]
 pub fn render_animation_frame(
     render: State<'_, RenderState>,
     forge: State<'_, Forge3dState>,
@@ -982,7 +995,7 @@ pub struct WrittenFrame {
     pub evaluated_frame: f32,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn render_stop(render: State<'_, RenderState>) -> RenderStatus {
     render.stop();
     render.status()

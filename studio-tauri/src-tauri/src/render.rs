@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -49,10 +49,38 @@ struct Session {
     dem: String,
 }
 
+/// State the reader thread and the waiting command share.
+///
+/// The condition variable is the point: a render waits for its own reply
+/// instead of waking every 40 ms, so a stopped render returns at once and a
+/// finished one comes back without a poll interval of latency.
+struct Shared {
+    replies: Mutex<HashMap<u64, serde_json::Value>>,
+    ready: Mutex<Option<Result<(), String>>>,
+    log: Mutex<VecDeque<String>>,
+    changed: Condvar,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            replies: Mutex::new(HashMap::new()),
+            ready: Mutex::new(None),
+            log: Mutex::new(VecDeque::new()),
+            changed: Condvar::new(),
+        }
+    }
+}
+
 pub struct RenderState {
     session: Mutex<Option<Session>>,
-    replies: Arc<Mutex<HashMap<u64, serde_json::Value>>>,
-    log: Arc<Mutex<VecDeque<String>>>,
+    shared: Arc<Shared>,
+    /// One request at a time. The service is a single-threaded stdio loop, and
+    /// a viewport frame must not race a still (or a session restart).
+    request: Mutex<()>,
+    /// Bumped by [`RenderState::stop`]; a waiter compares it and returns
+    /// instead of waiting out its own timeout.
+    generation: AtomicU64,
     next_id: AtomicU64,
 }
 
@@ -66,8 +94,9 @@ impl RenderState {
     pub fn new() -> Self {
         Self {
             session: Mutex::new(None),
-            replies: Arc::new(Mutex::new(HashMap::new())),
-            log: Arc::new(Mutex::new(VecDeque::new())),
+            shared: Arc::new(Shared::new()),
+            request: Mutex::new(()),
+            generation: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
         }
     }
@@ -84,6 +113,7 @@ impl RenderState {
             running,
             dem,
             diagnostics: self
+                .shared
                 .log
                 .lock()
                 .map(|log| log.iter().cloned().collect())
@@ -92,13 +122,20 @@ impl RenderState {
     }
 
     /// Render one frame for `dem`, starting the service on first use.
+    ///
+    /// Blocks. Every caller runs on a worker thread (the commands are `async`
+    /// and hand the body to the runtime), never on the UI thread.
     pub fn render(
         &self,
         python: &str,
         dem: &str,
         request: serde_json::Value,
     ) -> Result<RenderFrame, String> {
+        // Serialise first, then start the clock: a viewport frame queued behind
+        // a still must not spend the still's time against its own deadline.
+        let _request = self.request.lock().map_err(lock_error)?;
         self.ensure_session(python, dem)?;
+        let generation = self.generation.load(Ordering::SeqCst);
 
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let mut payload = request;
@@ -116,47 +153,54 @@ impl RenderState {
                 .map_err(|error| format!("lost the renderer: {error}"))?;
         }
 
-        let deadline = Instant::now() + FRAME_TIMEOUT;
-        loop {
-            if let Ok(mut replies) = self.replies.lock() {
-                if let Some(reply) = replies.remove(&id) {
-                    if reply.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
-                        return Err(reply
-                            .get("error")
-                            .and_then(|error| error.as_str())
-                            .unwrap_or("the renderer reported a failure")
-                            .to_owned());
-                    }
-                    return Ok(RenderFrame {
-                        width: reply.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        height: reply.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-                        ms: reply.get("ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
-                        png: reply
-                            .get("png")
-                            .and_then(|png| png.as_str())
-                            .unwrap_or_default()
-                            .to_owned(),
-                        path: None,
-                    });
-                }
-            }
-            if Instant::now() > deadline {
+        let reply = match wait_for_reply(
+            &self.shared,
+            &self.generation,
+            generation,
+            id,
+            FRAME_TIMEOUT,
+        ) {
+            WaitOutcome::Reply(reply) => reply,
+            WaitOutcome::Stopped => return Err("the render was stopped".to_owned()),
+            WaitOutcome::TimedOut => {
                 // A hung render must not wedge the session.
                 self.stop();
                 return Err("the renderer did not answer in time".to_owned());
             }
-            std::thread::sleep(Duration::from_millis(40));
+        };
+
+        if reply.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+            return Err(reply
+                .get("error")
+                .and_then(|error| error.as_str())
+                .unwrap_or("the renderer reported a failure")
+                .to_owned());
         }
+        Ok(RenderFrame {
+            width: reply.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            height: reply.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            ms: reply.get("ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            png: reply
+                .get("png")
+                .and_then(|png| png.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            path: None,
+        })
     }
 
+    /// Stop the renderer. A command waiting on a reply wakes immediately
+    /// (`"the render was stopped"`) instead of waiting out its frame timeout.
     pub fn stop(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.shared.changed.notify_all();
         let Ok(mut guard) = self.session.lock() else {
             return;
         };
         if let Some(mut session) = guard.take() {
             let _ = writeln!(session.stdin, "{}", json!({"id": 0, "cmd": "close"}));
             let _ = session.stdin.flush();
-            for _ in 0..40 {
+            for _ in 0..20 {
                 match session.child.try_wait() {
                     Ok(Some(_)) => break,
                     Ok(None) => std::thread::sleep(Duration::from_millis(50)),
@@ -166,7 +210,7 @@ impl RenderState {
             let _ = session.child.kill();
             let _ = session.child.wait();
         }
-        push_log(&self.log, "renderer stopped".to_owned());
+        push_log(&self.shared, "renderer stopped".to_owned());
     }
 
     fn ensure_session(&self, python: &str, dem: &str) -> Result<(), String> {
@@ -179,6 +223,9 @@ impl RenderState {
             }
         }
         self.stop();
+        if let Ok(mut ready) = self.shared.ready.lock() {
+            *ready = None;
+        }
 
         let directory = std::env::temp_dir().join("forge3d-studio");
         std::fs::create_dir_all(&directory)
@@ -187,7 +234,7 @@ impl RenderState {
         std::fs::write(&script, SERVICE_SCRIPT)
             .map_err(|error| format!("could not write {}: {error}", script.display()))?;
 
-        push_log(&self.log, format!("starting renderer for {dem}"));
+        push_log(&self.shared, format!("starting renderer for {dem}"));
         let mut child = Command::new(python)
             .arg("-u")
             .arg(&script)
@@ -214,7 +261,6 @@ impl RenderState {
             .and_then(|_| stdin.flush())
             .map_err(|error| format!("could not configure the renderer: {error}"))?;
 
-        let ready = Arc::new(Mutex::new(None::<Result<(), String>>));
         {
             let mut guard = self.session.lock().map_err(lock_error)?;
             *guard = Some(Session {
@@ -224,27 +270,72 @@ impl RenderState {
             });
         }
 
-        spawn_reader(
-            stdout,
-            Arc::clone(&self.replies),
-            Arc::clone(&self.log),
-            Arc::clone(&ready),
-        );
-        spawn_stderr(stderr, Arc::clone(&self.log));
+        // `stop()` above bumped the generation; readiness belongs to this one.
+        let generation = self.generation.load(Ordering::SeqCst);
+        spawn_reader(stdout, Arc::clone(&self.shared));
+        spawn_stderr(stderr, Arc::clone(&self.shared));
 
+        let mut ready = self.shared.ready.lock().map_err(lock_error)?;
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            if let Ok(mut state) = ready.lock() {
-                if let Some(result) = state.take() {
-                    return result;
-                }
+            if let Some(result) = ready.take() {
+                return result;
             }
-            if Instant::now() > deadline {
+            if self.generation.load(Ordering::SeqCst) != generation {
+                return Err("the renderer was stopped".to_owned());
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                drop(ready);
                 self.stop();
                 return Err("the renderer did not become ready in time".to_owned());
-            }
-            std::thread::sleep(Duration::from_millis(60));
+            };
+            let (guard, _) = self
+                .shared
+                .changed
+                .wait_timeout(ready, remaining)
+                .map_err(lock_error)?;
+            ready = guard;
         }
+    }
+}
+
+/// What a waiting command saw.
+#[derive(Debug)]
+enum WaitOutcome {
+    Reply(serde_json::Value),
+    Stopped,
+    TimedOut,
+}
+
+/// Block until `id`'s reply arrives, the renderer is stopped, or `timeout`
+/// elapses. Split out so the wake/stop/timeout behaviour is testable without a
+/// Python process.
+fn wait_for_reply(
+    shared: &Shared,
+    generation: &AtomicU64,
+    expected: u64,
+    id: u64,
+    timeout: Duration,
+) -> WaitOutcome {
+    let deadline = Instant::now() + timeout;
+    let mut replies = match shared.replies.lock() {
+        Ok(replies) => replies,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    loop {
+        if let Some(reply) = replies.remove(&id) {
+            return WaitOutcome::Reply(reply);
+        }
+        if generation.load(Ordering::SeqCst) != expected {
+            return WaitOutcome::Stopped;
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return WaitOutcome::TimedOut;
+        };
+        replies = match shared.changed.wait_timeout(replies, remaining) {
+            Ok((guard, _)) => guard,
+            Err(poisoned) => poisoned.into_inner().0,
+        };
     }
 }
 
@@ -252,8 +343,8 @@ fn lock_error<T>(_: T) -> String {
     "the renderer is unavailable after an internal error".to_owned()
 }
 
-fn push_log(log: &Arc<Mutex<VecDeque<String>>>, line: String) {
-    if let Ok(mut log) = log.lock() {
+fn push_log(shared: &Shared, line: String) {
+    if let Ok(mut log) = shared.log.lock() {
         log.push_back(line);
         while log.len() > MAX_LOG {
             log.pop_front();
@@ -261,25 +352,21 @@ fn push_log(log: &Arc<Mutex<VecDeque<String>>>, line: String) {
     }
 }
 
-fn spawn_reader(
-    stdout: impl std::io::Read + Send + 'static,
-    replies: Arc<Mutex<HashMap<u64, serde_json::Value>>>,
-    log: Arc<Mutex<VecDeque<String>>>,
-    ready: Arc<Mutex<Option<Result<(), String>>>>,
-) {
+fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>) {
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let trimmed = line.trim();
             let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                push_log(&log, trimmed.to_owned());
+                push_log(&shared, trimmed.to_owned());
                 continue;
             };
             match value.get("event").and_then(|event| event.as_str()) {
                 Some("ready") => {
-                    push_log(&log, "renderer ready".to_owned());
-                    if let Ok(mut state) = ready.lock() {
+                    push_log(&shared, "renderer ready".to_owned());
+                    if let Ok(mut state) = shared.ready.lock() {
                         *state = Some(Ok(()));
                     }
+                    shared.changed.notify_all();
                 }
                 Some("error") => {
                     let message = value
@@ -287,33 +374,36 @@ fn spawn_reader(
                         .and_then(|message| message.as_str())
                         .unwrap_or("the renderer failed to start")
                         .to_owned();
-                    push_log(&log, message.clone());
-                    if let Ok(mut state) = ready.lock() {
+                    push_log(&shared, message.clone());
+                    if let Ok(mut state) = shared.ready.lock() {
                         *state = Some(Err(message));
                     }
+                    shared.changed.notify_all();
                 }
                 _ => {
                     if let Some(id) = value.get("id").and_then(|id| id.as_u64()) {
-                        if let Ok(mut replies) = replies.lock() {
+                        if let Ok(mut replies) = shared.replies.lock() {
                             replies.insert(id, value);
                         }
+                        shared.changed.notify_all();
                     }
                 }
             }
         }
-        if let Ok(mut state) = ready.lock() {
+        if let Ok(mut state) = shared.ready.lock() {
             if state.is_none() {
                 *state = Some(Err("the renderer exited unexpectedly".to_owned()));
             }
         }
-        push_log(&log, "renderer closed".to_owned());
+        shared.changed.notify_all();
+        push_log(&shared, "renderer closed".to_owned());
     });
 }
 
-fn spawn_stderr(stderr: impl std::io::Read + Send + 'static, log: Arc<Mutex<VecDeque<String>>>) {
+fn spawn_stderr(stderr: impl std::io::Read + Send + 'static, shared: Arc<Shared>) {
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            push_log(&log, format!("stderr: {line}"));
+            push_log(&shared, format!("stderr: {line}"));
         }
     });
 }
@@ -670,6 +760,110 @@ mod tests {
     /// payload the renderer receives; the node half asserts the numbers the
     /// preview hands to three.js. A drift in either fails, instead of showing
     /// up as "the render looks different from the preview".
+    /// End-to-end through the real service: spawn the engine Python, render one
+    /// frame over stdio, and stop. Ignored by default because it needs the
+    /// checkout's `.venv` and a GPU; run with
+    /// `cargo test -p forge3d-studio-shell the_session_renders -- --ignored`.
+    #[test]
+    #[ignore = "spawns the engine Python session and the GPU"]
+    fn the_session_renders_a_frame_and_stops_cleanly() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = root.join(".venv/bin/python");
+        let dem = root.join("assets/tif/Bryce_Canyon_1024.tif");
+        if !python.exists() || !dem.exists() {
+            eprintln!("skipping: this checkout has no .venv/engine DEM pair");
+            return;
+        }
+
+        let state = RenderState::new();
+        let payload = json!({
+            "width": 96,
+            "height": 64,
+            "camera": {"phiDeg": 310.0, "thetaDeg": 40.0, "radius": 6000.0, "target": [0, 0, 0], "fovDeg": 45.0},
+            "sun": {"azimuthDeg": 135.0, "elevationDeg": 40.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
+            "quality": {"aov": {}, "sky": true, "skyModel": "hosek", "skyTurbidity": 2.0, "skyGroundAlbedo": 0.3, "skyExposure": 0.08},
+            "exposure": 1.35,
+            "iblIntensity": 1.0,
+            "environmentBackgroundIntensity": 1.0
+        });
+        let frame = state
+            .render(
+                python.to_str().expect("utf-8 python path"),
+                dem.to_str().expect("utf-8 dem path"),
+                payload,
+            )
+            .expect("one frame from the service");
+        // The service clamps each side to at least 64 px.
+        assert_eq!((frame.width, frame.height), (96, 64));
+        assert!(frame.png.len() > 1000, "a PNG came back");
+        assert!(state.status().running);
+
+        state.stop();
+        assert!(!state.status().running);
+    }
+
+    #[test]
+    fn reply_wait_returns_the_reply_without_a_poll_interval() {
+        let state = RenderState::new();
+        state
+            .shared
+            .replies
+            .lock()
+            .expect("replies lock")
+            .insert(7, json!({"ok": true, "width": 4}));
+        match wait_for_reply(
+            &state.shared,
+            &state.generation,
+            0,
+            7,
+            Duration::from_secs(1),
+        ) {
+            WaitOutcome::Reply(reply) => assert_eq!(reply["width"], 4),
+            other => panic!("expected a reply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stopping_wakes_a_waiting_render_instead_of_waiting_for_the_timeout() {
+        let state = Arc::new(RenderState::new());
+        let started = Instant::now();
+        let waiter = {
+            let state = Arc::clone(&state);
+            std::thread::spawn(move || {
+                wait_for_reply(
+                    &state.shared,
+                    &state.generation,
+                    0,
+                    1,
+                    Duration::from_secs(60),
+                )
+            })
+        };
+        std::thread::sleep(Duration::from_millis(80));
+        state.stop();
+        let outcome = waiter.join().expect("waiter finished");
+        assert!(matches!(outcome, WaitOutcome::Stopped), "got {outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "stop must wake the waiter, not wait out the frame timeout"
+        );
+    }
+
+    #[test]
+    fn the_reply_wait_honours_its_timeout() {
+        let state = RenderState::new();
+        let started = Instant::now();
+        let outcome = wait_for_reply(
+            &state.shared,
+            &state.generation,
+            0,
+            2,
+            Duration::from_millis(60),
+        );
+        assert!(matches!(outcome, WaitOutcome::TimedOut), "got {outcome:?}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn payload_matches_the_shared_lighting_rig_fixture() {
         let fixture: serde_json::Value =
