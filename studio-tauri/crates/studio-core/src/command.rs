@@ -158,6 +158,9 @@ pub enum Command {
         world_origin_xz: Option<[f64; 2]>,
         #[serde(default)]
         world_span_xz: Option<[f64; 2]>,
+        /// Vertical exaggeration; omitted means "the new DEM's default".
+        #[serde(default)]
+        z_scale: Option<f32>,
     },
 
     /// Re-point an asset at a new file (relinking after a move).
@@ -577,10 +580,19 @@ impl Command {
                     crate::scene::ObjectKind::Terrain(terrain) => terrain.z_scale,
                     _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
                 };
-                if !z_scale.is_finite() || *z_scale <= 0.0 {
+                // `TerrainRenderParams` raises "z_scale must be 0.1-50.0"
+                // rather than clamping, so an out-of-range value must be
+                // rejected here — not handed to the renderer.
+                if !z_scale.is_finite()
+                    || !(crate::scene::MIN_Z_SCALE..=crate::scene::MAX_Z_SCALE).contains(z_scale)
+                {
                     return Err(CommandError::invalid(
                         "terrain vertical scale",
-                        "must be a positive number",
+                        format!(
+                            "must be between {} and {}",
+                            crate::scene::MIN_Z_SCALE,
+                            crate::scene::MAX_Z_SCALE
+                        ),
                     ));
                 }
                 if let Some(object) = project.scene.object_mut(*id) {
@@ -604,6 +616,7 @@ impl Command {
                 elevation_range,
                 world_origin_xz,
                 world_span_xz,
+                z_scale,
             } => {
                 let object = project
                     .scene
@@ -625,6 +638,7 @@ impl Command {
                         terrain.elevation_range,
                         terrain.world_origin_xz,
                         terrain.world_span_xz,
+                        terrain.z_scale,
                     ),
                     _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
                 };
@@ -635,6 +649,12 @@ impl Command {
                         terrain.elevation_range = *elevation_range;
                         terrain.world_origin_xz = *world_origin_xz;
                         terrain.world_span_xz = *world_span_xz;
+                        // A new DEM's relief has nothing to do with the old
+                        // one's, so its vertical scale is re-derived unless the
+                        // command names one (the undo carries the old value).
+                        terrain.z_scale = z_scale.unwrap_or_else(|| {
+                            crate::scene::dem_default_z_scale(*elevation_range, *world_span_xz)
+                        });
                     }
                 }
                 Ok(Outcome {
@@ -645,6 +665,7 @@ impl Command {
                         elevation_range: previous.2,
                         world_origin_xz: previous.3,
                         world_span_xz: previous.4,
+                        z_scale: Some(previous.5),
                     },
                     affected: vec![*id],
                 })

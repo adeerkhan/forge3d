@@ -506,6 +506,8 @@ export type Command =
       elevationRange?: [number, number] | null;
       worldOriginXz?: [number, number] | null;
       worldSpanXz?: [number, number] | null;
+      /** Omitted means "the new DEM's own default". */
+      zScale?: number | null;
     }
   | { type: "setTerrainOverlay"; id: string; overlay: TerrainOverlay | null }
   | { type: "setActiveCamera"; id: string | null }

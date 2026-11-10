@@ -417,6 +417,34 @@ fn default_z_scale() -> f32 {
     1.0
 }
 
+/// What `TerrainRenderParams` accepts; it raises `z_scale must be 0.1-50.0`.
+pub const MIN_Z_SCALE: f32 = 0.1;
+pub const MAX_Z_SCALE: f32 = 50.0;
+
+/// How much relief makes a DEM read as terrain rather than as a printed sheet:
+/// 6% of the longer footprint edge.
+///
+/// The rule only ever exaggerates. Bryce Canyon, the bundled sample, is 11.3%
+/// relief at true scale, so it keeps `1.0`; the Swiss DEM is 1.1% (4,031 m of
+/// relief across 352 km) and comes out at 5.25, where its valleys and ridges
+/// are visible instead of a plate. A DEM whose footprint is unknown stays at
+/// true scale rather than guessing.
+pub fn dem_default_z_scale(
+    elevation_range: Option<[f32; 2]>,
+    world_span_xz: Option<[f64; 2]>,
+) -> f32 {
+    const TARGET_RELIEF_RATIO: f64 = 0.06;
+    let (Some([low, high]), Some(span)) = (elevation_range, world_span_xz) else {
+        return 1.0;
+    };
+    let relief = f64::from(high) - f64::from(low);
+    let footprint = span[0].max(span[1]);
+    if !relief.is_finite() || !footprint.is_finite() || relief <= 0.0 || footprint <= 0.0 {
+        return 1.0;
+    }
+    (TARGET_RELIEF_RATIO * footprint / relief).clamp(1.0, f64::from(MAX_Z_SCALE)) as f32
+}
+
 impl TerrainObject {
     pub fn new(asset: AssetId) -> Self {
         Self {
@@ -432,6 +460,10 @@ impl TerrainObject {
     }
 
     /// Attach the DEM's measured size, footprint, and elevation range.
+    ///
+    /// The vertical scale follows the DEM: a new elevation model's relief has
+    /// nothing to do with the previous one's, so the default is re-derived
+    /// here (and the Inspector shows the value, so it is still the user's).
     pub fn with_dem_info(
         mut self,
         dimensions: [u32; 2],
@@ -443,6 +475,7 @@ impl TerrainObject {
         self.elevation_range = Some(elevation_range);
         self.world_origin_xz = world_origin_xz;
         self.world_span_xz = world_span_xz;
+        self.z_scale = dem_default_z_scale(self.elevation_range, self.world_span_xz);
         self
     }
 
@@ -480,8 +513,13 @@ impl TerrainObject {
         if let Some(overlay) = &self.overlay {
             overlay.validate()?;
         }
-        if !self.z_scale.is_finite() || self.z_scale <= 0.0 {
-            return Err("terrain vertical scale must be a positive number".to_owned());
+        // The engine refuses anything outside its range (it raises instead of
+        // clamping), so a value in here must be one `TerrainRenderParams`
+        // accepts.
+        if !self.z_scale.is_finite() || !(MIN_Z_SCALE..=MAX_Z_SCALE).contains(&self.z_scale) {
+            return Err(format!(
+                "terrain vertical scale must be between {MIN_Z_SCALE} and {MAX_Z_SCALE}"
+            ));
         }
         Ok(())
     }

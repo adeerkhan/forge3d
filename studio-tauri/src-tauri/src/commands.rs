@@ -598,6 +598,8 @@ pub fn import_terrain_dem(
             elevation_range,
             world_origin_xz: pair_f64("originXz"),
             world_span_xz: pair_f64("spanXz"),
+            // The new DEM's own relief decides the vertical scale.
+            z_scale: None,
         }),
         None => {
             let mut terrain = studio_core::TerrainObject::new(asset.id);

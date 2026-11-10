@@ -258,6 +258,32 @@ All use §2. Nothing new is introduced beyond the settings below.
   (built from the catalogue, strength 0 off, overlay conflict), and the
   byte-identical no-colormap still (`9f8f5c3c2f1ae4be` before and after).
 
+### 5.7 A per-DEM vertical scale (0.5 day) — **done**
+- `zScale` used to be `1.0` for every DEM. That is right for the bundled
+  Bryce sample (454 m of relief across 4 km, 11.3%) and wrong for a
+  country-size DEM: the Swiss Alps are 4,031 m across 352 km — 1.1% — so at
+  true scale they render as a printed sheet.
+- `scene::dem_default_z_scale` targets **6% relief**: `clamp(0.06 ×
+  max_span / relief, 1.0, 50.0)`. It only ever exaggerates, so a DEM that
+  already reads as terrain keeps its true scale: Bryce stays `1.0`, the Swiss
+  becomes `5.246` (`0.06 × 352,427 / 4,031`). No footprint or no relief
+  (a local DEM, a flat one) stays at `1.0` rather than guessing.
+- Applied where a DEM is attached (`TerrainObject::with_dem_info`) and where
+  one is replaced (`SetTerrainDem`, which re-derives unless the command names
+  a scale; its undo carries the previous value, so undo restores `5.246`).
+- The engine's range is the model's range: `TerrainRenderParams` raises
+  `z_scale must be 0.1-50.0` instead of clamping, but `SetTerrainZScale`
+  accepted any positive number (and the Inspector offered 0.05, then 20 as a
+  maximum). Both now use `MIN_Z_SCALE`/`MAX_Z_SCALE` and the command rejects
+  an out-of-range value with an error instead of producing a project the
+  editor cannot validate.
+- Measured on the Swiss DEM at the gallery camera (922×795, `render_scale`
+  2): `1.0 → 5.246` changes 1,234,577 of 2,198,970 channel samples (mean
+  10.16, frame mean 113.2 → 106.1). The relief is visible at 5.246 and the
+  zScale-1/2.5/5.25/10 sheet in `/tmp/opencode/zs` shows why 5.25 was chosen
+  over 10 (jagged) and 2.5 (still flat).
+- Still open in the cartography tier: legend, despeckle, and the map plate.
+
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.

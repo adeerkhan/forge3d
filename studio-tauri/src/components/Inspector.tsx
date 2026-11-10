@@ -1058,15 +1058,20 @@ function TerrainEditor({
         label="Vertical scale"
         value={terrain.zScale}
         step={0.1}
-        // The engine's TerrainRenderParams rejects anything below 0.1 (it
-        // raises "z_scale must be 0.1-50.0"), so 0.05 here was a value the
-        // renderer refused.
+        // The engine's TerrainRenderParams range: it raises "z_scale must be
+        // 0.1-50.0" rather than clamping, so the field must not offer a value
+        // outside it (0.05 here used to fail the render).
         min={0.1}
-        max={20}
+        max={50}
         onCommit={(zScale) =>
           void actions.apply({ type: "setTerrainZScale", id: object.id, zScale })
         }
       />
+      <span className="hint">
+        Derived from the DEM's relief (6% of its footprint): a country-size DEM
+        comes up exaggerated, a steep one keeps its true scale. Change it here
+        to override.
+      </span>
       {renderSettings && (
         <>
           <ChoiceField
