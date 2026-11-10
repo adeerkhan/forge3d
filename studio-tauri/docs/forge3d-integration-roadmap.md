@@ -39,12 +39,19 @@ be a payload field: vector layers and meshes.
 | 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
 | 5.2 water — level + slope threshold, mask derived with the engine's own `derive_water_mask` | done (optics deferred) |
 | 5.4 bloom + vignette — service-side post-process on the finished frame | done (engine-native needs a pinned-hash refresh) |
-| 5.3 clouds — the engine's cloud shadows exist, but only `render_interactive` consumes them | **not started** (needs the cloud pass in the terrain draw path) |
+| 5.3 clouds — the engine's cloud shadows exist, but only `render_interactive` consumes them | **blocked, measured** (the interactive path's shader contract is stale) |
 | One lighting rig shared by preview and payload (fixture read by Rust and node) | done |
 | 8.0b — granted device features in the probe/status bar | done |
 | 5.1 sky & atmosphere — model, turbidity, ground albedo, exposure; AETHER gated on the shipped bake | done (backdrop-only by design) |
+| 5.6 colormap — the engine's own catalogue through `Colormap1D`/`OverlayLayer` | done (needs `albedo_mode="mix"`; one LUT slot per frame) |
+| 5.7 per-DEM vertical scale — 6% relief target, derived on import and DEM replacement | done |
+| 5.8 terrain sun shadows — `SunVisibilitySettings` ray march, reach + steps | done (one hard ray; soft/resolution dials measured and skipped) |
+| 5.9 despeckle — the land-cover gallery's 3×3 class rule on class overlays | done |
+| Material layers (snow/rock/wetness) | **blocked, measured** (`vs_main` writes a constant `world_normal`; slope ≈ 0) |
+| Tonemap operators/LUT, SSAO/SSGI/SSR, planar reflections | **inert on this path, measured 0** (see 5.8) |
 | Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
-| Everything below (§3–§6, except 9.0) | **not started** |
+| Cartography: legend, map plate | **not built** (needs a class scheme the project does not have) |
+| Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
 to decisions in §7 and the appendix; most of them are now explicitly **not
@@ -329,6 +336,31 @@ All use §2. Nothing new is introduced beyond the settings below.
   and that an RGB raster ignores it.
 - Check: schema/default test (phase4), payload assertion, service test on the
   rule (a lone cell absorbed, a 3×3 block kept, a clean raster unchanged).
+
+### 5.10 The release audit, run after 5.9 — **green, one range fixed**
+- **Every `RenderSettings` field reaches the payload.** 26 fields; each is read
+  in `with_settings`/`to_payload` or, for `width`/`height`, is the request's
+  frame size.
+- **Payload and service agree in both directions.** Every key the service
+  reads out of `quality` is a key `to_payload` sends, and every key
+  `to_payload` sends is read by the service (the nested blocks included:
+  `water`, `fog`, `bloom`, `sunVisibility`, `aov`). Checked by extracting both
+  sets from the source, not by eye.
+- **UI ranges sit inside the renderer's range.** One mismatch found and fixed:
+  Width/Height offered 16384 while the render service caps a frame at 4096 px
+  per side (the viewport already caps there too), so a larger still was being
+  silently shrunk. The rest check out: vertical scale 0.1–50 (model and
+  command too), sun reach 100–20000 m, ray steps 16–64 (engine `< 64`), sky
+  turbidity 1–10, sky exposure 0–4, shadow map 512–4096 (engine `<= 8192`),
+  colormap strength 0–1, overlay opacity 0–1, fog density `>= 0`.
+- **No client-side re-implementation.** Supersampling is `render_scale`; the
+  class palette is `thematic.apply_palette`; the colormap is
+  `Colormap1D`/`OverlayLayer.from_colormap1d`; the camera is
+  `camera_render_view`; water, fog, shadows, sun visibility, sky and IBL are
+  the engine's settings. Shell-side code is limited to what the engine has no
+  consumer for on this path, and each case says why in code: bloom/vignette
+  (needs an HDR target and a pinned-shader change), the water blob filter and
+  the class despeckle (raster rules, not renderer mechanisms).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

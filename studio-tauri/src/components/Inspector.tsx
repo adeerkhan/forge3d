@@ -507,8 +507,12 @@ export function RenderSettingsEditor() {
     <>
       <Section title="Output" id="render-output">
         <div className="pair">
-          <NumberField label="Width" value={render.width} step={16} min={64} max={16384} onCommit={(width) => commit({ width: Math.round(width) })} />
-          <NumberField label="Height" value={render.height} step={16} min={64} max={16384} onCommit={(height) => commit({ height: Math.round(height) })} />
+          {/* The render service caps a frame at 4096 px per side (a 4096²
+              still at render_scale 2 would be an 8192² target, which the
+              engine refuses or crawls through), so the field must not offer a
+              size the renderer will silently shrink. */}
+          <NumberField label="Width" value={render.width} step={16} min={64} max={4096} onCommit={(width) => commit({ width: Math.round(width) })} />
+          <NumberField label="Height" value={render.height} step={16} min={64} max={4096} onCommit={(height) => commit({ height: Math.round(height) })} />
         </div>
         <NumberField label="Exposure" value={render.exposure} step={0.05} min={0.05} max={8} onCommit={(exposure) => commit({ exposure })} />
         <p className="hint">

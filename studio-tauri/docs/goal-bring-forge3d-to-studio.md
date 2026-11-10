@@ -64,12 +64,20 @@ sequence export; timeline with camera-path recording; render queue; AOV and
 OIDN denoise; sky and atmosphere; shadows; water (physical optics, blob
 filter); fog (reach and tint); bloom and vignette; supersampled frames.
 
-Not built, in order of value: **colormaps** (the engine ships the catalogue and
-needs no new code), **material layers** (snow/rock/wetness by slope and
-altitude), **tonemap operators and LUT**, **screen-space SSAO/SSGI/SSR**,
-**planar water reflections**, **sun visibility**; then the cartography tier —
-a per-DEM vertical-scale default (the Swiss scene is 1.1% relief and renders
-as a plate), a legend, a despeckle pass, and the map plate.
+Added since: **colormaps** (the engine's own catalogue; needs
+`albedo_mode="mix"`, and one colormap LUT per frame), **terrain sun shadows**
+(`SunVisibilitySettings`; reach and steps), a **per-DEM vertical scale** (6%
+relief; Bryce stays 1.0, the Swiss DEM 5.25), and a **despeckle** pass for
+class rasters.
+
+Measured and **blocked**, with the numbers in the roadmap: material layers
+(`vs_main` writes a constant `world_normal`, so the layer slope is ~0), tonemap
+operators and LUT, SSAO/SSGI/SSR, planar water reflections — all 0 changed
+samples on this path. Clouds wait on the interactive path's stale shader
+contract.
+
+Not built: a legend and the map plate (they need a class scheme the project
+does not have — guessing one would be the exact dishonesty this page forbids).
 
 ## Definition of done
 
