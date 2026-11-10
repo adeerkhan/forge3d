@@ -127,7 +127,11 @@ All use §2. Nothing new is introduced beyond the settings below.
   (1–10), `skyGroundAlbedo` (0–1), `skyExposure` (0–4) on `RenderSettings`
   (serde-default, v4-safe); payload `quality.sky*`; service maps to
   `SkySettings` and keeps the "environment ⇒ hdri" branch byte-identical
-  (measured: the HDRI sample still hashes 848cea2e6fdcc450).
+  (measured: the HDRI sample still hashes `848cea2e6fdcc450` at
+  `render_scale=1`; since the viewport and the stills supersample at
+  `render_scale=2` — the terrain's per-cell normals alias into sparkles at
+  close camera ranges — the current anchor is `716555b1dd1a4cfd`, mean 97.8,
+  and any change to `render_scale` moves it).
 - The analytic branch is enabled again when no HDRI is set, so Rendered has a
   sky instead of the neutral surround.
 - AETHER is offered only at the shipped bake's parameters (turbidity 2.0,
