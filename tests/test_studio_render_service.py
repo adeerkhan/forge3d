@@ -207,3 +207,67 @@ def test_aether_refuses_parameters_the_shipped_bake_does_not_cover(sky_settings)
             {"sky": True, "skyModel": "aether", "skyTurbidity": 3.0, "skyGroundAlbedo": 0.3},
             None,
         )
+
+
+class _WaterStub:
+    """The two attributes `water_mask` reads: the scaled heights and the
+    scale that produced them."""
+
+    def __init__(self, heights, scale):
+        self.heights = heights
+        self.scale = scale
+
+
+@pytest.fixture
+def water_mask():
+    service = load_service()
+    return service.StudioRenderer.water_mask
+
+
+def test_water_is_off_unless_the_project_asks_for_it(water_mask):
+    """No mask means no water: the terrain path shades the DEM as land."""
+    stub = _WaterStub(heights=np.zeros((4, 4), dtype=np.float32), scale=1.0)
+    assert water_mask(stub, {}) is None
+    assert water_mask(stub, {"quality": {"water": {"enabled": False}}}) is None
+
+
+def test_the_mask_floods_low_flat_ground_and_leaves_cliffs_dry(water_mask):
+    heights = np.zeros((4, 4), dtype=np.float32)
+    heights[2, 2] = 10.0  # one cliff in the middle
+    stub = _WaterStub(heights=heights, scale=1.0)
+    mask = water_mask(
+        stub,
+        {"quality": {"water": {"enabled": True, "level": 0.0, "slopeThreshold": 0.02}}},
+    )
+    assert mask is not None
+    assert mask.dtype == np.float32
+    assert mask[0, 0] == 1.0  # flat and low: water
+    assert mask[2, 2] == 0.0  # the cliff: dry
+
+
+def test_the_level_is_scaled_into_the_renderers_units(water_mask):
+    """The project speaks DEM metres; the renderer works in scaled heights."""
+    heights = np.full((3, 3), 80.0, dtype=np.float32)
+    stub = _WaterStub(heights=heights, scale=0.5)
+    # 100 m in the DEM is 50 m in the scaled heights the renderer sees, so
+    # ground at 80 m stays dry.
+    mask = water_mask(
+        stub,
+        {"quality": {"water": {"enabled": True, "level": 100.0, "slopeThreshold": 1.0}}},
+    )
+    assert mask is not None
+    assert mask[1, 1] == 0.0
+
+
+def test_level_zero_is_the_engines_own_auto_default(water_mask):
+    heights = np.zeros((4, 4), dtype=np.float32)
+    heights[3, 3] = 100.0
+    stub = _WaterStub(heights=heights, scale=1.0)
+    mask = water_mask(
+        stub,
+        {"quality": {"water": {"enabled": True, "level": 0.0, "slopeThreshold": 1.0}}},
+    )
+    assert mask is not None
+    # Auto is the engine's 15th percentile, so most of the flat ground is wet.
+    assert mask.mean() > 0.5
+    assert mask[3, 3] == 0.0

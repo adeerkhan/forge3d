@@ -501,7 +501,12 @@ export function RenderSettingsEditor() {
   const { engine } = useSession();
   const settings = useRenderSettings();
   if (!settings) return null;
-  const { render, commit } = settings;
+  const { project, render, commit } = settings;
+  // The water level is an absolute elevation, so the user needs to know the
+  // terrain's range to pick one.
+  const terrain = project.scene.objects.find((object) => object.kind.type === "terrain");
+  const terrainRange =
+    terrain && terrain.kind.type === "terrain" ? terrain.kind.elevationRange : null;
 
   return (
     <>
@@ -539,6 +544,49 @@ export function RenderSettingsEditor() {
           onChange={(value) => commit({ shadowResolution: Number(value) })}
           hint="Applies to previews too: the Rendered viewport re-renders on orbit, so a big map costs frame time."
         />
+      </Section>
+
+      <Section title="Water" id="render-water">
+        <Toggle
+          label="Flood the low ground"
+          checked={render.water.enabled}
+          onChange={(enabled) => commit({ water: { ...render.water, enabled } })}
+        />
+        {render.water.enabled && (
+          <>
+            {terrainRange && (
+              <div className="readout readout--compact">
+                <dt>Terrain</dt>
+                <dd>
+                  {Math.round(terrainRange[0]).toLocaleString()}–{Math.round(terrainRange[1]).toLocaleString()} m
+                </dd>
+              </div>
+            )}
+            <NumberField
+              label="Level (m)"
+              value={render.water.level}
+              step={1}
+              min={0}
+              onCommit={(level) => commit({ water: { ...render.water, level } })}
+            />
+            <NumberField
+              label="Slope threshold"
+              value={render.water.slopeThreshold}
+              step={0.005}
+              min={0}
+              max={1}
+              onCommit={(slopeThreshold) =>
+                commit({ water: { ...render.water, slopeThreshold } })
+              }
+            />
+            <p className="hint">
+              The engine derives the water mask from the DEM: ground below the
+              level that is flat enough to hold it. Level 0 picks the lowest
+              15% of the terrain automatically. The slope threshold is metres
+              of rise per DEM cell — steeper ground stays dry.
+            </p>
+          </>
+        )}
       </Section>
 
       <Section title="Quality" id="render-quality">

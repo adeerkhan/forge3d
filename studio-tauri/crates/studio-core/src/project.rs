@@ -446,6 +446,14 @@ impl Project {
         {
             return Err("sky exposure must be between 0 and 4".to_owned());
         }
+        if !self.render.water.level.is_finite() {
+            return Err("water level must be a finite elevation".to_owned());
+        }
+        if !self.render.water.slope_threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.render.water.slope_threshold)
+        {
+            return Err("water slope threshold must be between 0 and 1".to_owned());
+        }
         self.timeline.validate()?;
 
         Ok(())
@@ -575,6 +583,37 @@ impl StillAov {
     }
 }
 
+/// Water on the terrain.
+///
+/// The terrain path has no "water level" knob: it shades water where a *mask*
+/// says so, and the mask comes from the DEM (low, flat ground). The project
+/// therefore stores the level and the slope threshold, and the render service
+/// derives the mask with the engine's own `forge3d.gis.derive_water_mask`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaterSettings {
+    /// Flood the low, flat ground.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Water surface elevation in the DEM's own metres. 0 means "auto": the
+    /// engine's own default, the lowest 15% of the terrain.
+    #[serde(default)]
+    pub level: f32,
+    /// Ground steeper than this (metres of rise per DEM cell) stays dry.
+    #[serde(default = "default_water_slope_threshold")]
+    pub slope_threshold: f32,
+}
+
+impl Default for WaterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            level: 0.0,
+            slope_threshold: default_water_slope_threshold(),
+        }
+    }
+}
+
 /// Render output configuration — the Forge3D controls the pipeline exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -645,6 +684,11 @@ pub struct RenderSettings {
     /// HDRI skies keep using `environment_background_intensity` instead.
     #[serde(default = "default_sky_exposure")]
     pub sky_exposure: f32,
+    /// Water on the terrain: flood the low, flat ground. The engine derives
+    /// the water mask from the DEM, so the project stores the level and the
+    /// slope threshold rather than a mask.
+    #[serde(default)]
+    pub water: WaterSettings,
 }
 
 /// The analytic sky models the engine can draw as a backdrop.
@@ -724,6 +768,12 @@ fn default_sky_exposure() -> f32 {
     0.08
 }
 
+fn default_water_slope_threshold() -> f32 {
+    // The engine's own water-and-clouds example uses 0.18; the library default
+    // (0.02) is flat-only and leaves a puddle.
+    0.18
+}
+
 impl Default for RenderSettings {
     fn default() -> Self {
         Self {
@@ -744,6 +794,7 @@ impl Default for RenderSettings {
             sky_turbidity: default_sky_turbidity(),
             sky_ground_albedo: default_sky_ground_albedo(),
             sky_exposure: default_sky_exposure(),
+            water: WaterSettings::default(),
         }
     }
 }

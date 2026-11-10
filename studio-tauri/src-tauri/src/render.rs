@@ -468,6 +468,11 @@ pub struct RenderRequest {
     pub sky_turbidity: f32,
     pub sky_ground_albedo: f32,
     pub sky_exposure: f32,
+    /// Water on the terrain: the level and the slope threshold the render
+    /// service turns into the engine's water mask.
+    pub water_enabled: bool,
+    pub water_level: f32,
+    pub water_slope_threshold: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -497,6 +502,9 @@ impl RenderRequest {
         self.sky_turbidity = settings.sky_turbidity;
         self.sky_ground_albedo = settings.sky_ground_albedo;
         self.sky_exposure = settings.sky_exposure;
+        self.water_enabled = settings.water.enabled;
+        self.water_level = settings.water.level;
+        self.water_slope_threshold = settings.water.slope_threshold;
         self
     }
 
@@ -564,6 +572,11 @@ impl RenderRequest {
                 "skyTurbidity": self.sky_turbidity,
                 "skyGroundAlbedo": self.sky_ground_albedo,
                 "skyExposure": self.sky_exposure,
+                "water": {
+                    "enabled": self.water_enabled,
+                    "level": self.water_level,
+                    "slopeThreshold": self.water_slope_threshold,
+                },
             },
             "overlay": self.overlay,
             "exposure": self.exposure,
@@ -660,6 +673,9 @@ impl RenderRequest {
             sky_turbidity: 2.0,
             sky_ground_albedo: 0.3,
             sky_exposure: 0.08,
+            water_enabled: false,
+            water_level: 0.0,
+            water_slope_threshold: 0.18,
         })
     }
 }
@@ -701,6 +717,9 @@ mod tests {
             sky_turbidity: 2.0,
             sky_ground_albedo: 0.3,
             sky_exposure: 0.08,
+            water_enabled: false,
+            water_level: 0.0,
+            water_slope_threshold: 0.18,
         }
     }
 
@@ -761,6 +780,24 @@ mod tests {
             .to_payload("preview", None);
         assert_eq!(payload["quality"]["shadowTechnique"], "PCSS");
         assert_eq!(payload["quality"]["shadowResolution"], 2048);
+    }
+
+    #[test]
+    fn payload_carries_the_water_settings() {
+        let settings = studio_core::RenderSettings {
+            water: studio_core::WaterSettings {
+                enabled: true,
+                level: 1650.0,
+                slope_threshold: 0.05,
+            },
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request()
+            .with_settings(&settings)
+            .to_payload("preview", None);
+        assert_eq!(payload["quality"]["water"]["enabled"], true);
+        assert_eq!(payload["quality"]["water"]["level"], 1650.0);
+        assert_eq!(payload["quality"]["water"]["slopeThreshold"], 0.05);
     }
 
     /// The fixture `studio-tauri/tests/fixtures/lighting-rig.json` is read by

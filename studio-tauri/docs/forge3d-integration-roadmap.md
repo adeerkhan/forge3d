@@ -19,7 +19,7 @@ be a payload field: vector layers and meshes.
 | Project model, commands, undo, schema v4 | done |
 | Solid / Material / Rendered viewport, HDRI sky | done |
 | Terrain stills, Rendered frames, animation export | done |
-| Timeline drawer, render queue, asset integrity, samples | done |
+| Animation tab (timeline, keyframes, camera-path recording), render queue, asset integrity, samples | done |
 | Sun from date/time/location (increment 9.0) | done |
 | AOV + OIDN denoise final stills (increment 10.0) | done |
 | Denoise runtime actually works (oidn+tbb in `.venv`, 1.4 commit order, TBB preload) | done |
@@ -37,6 +37,7 @@ be a payload field: vector layers and meshes.
 | Fly camera (W A S D, Q E, drag-look, Shift to sprint) and camera-path recording onto the timeline | done |
 | Captured camera keeps its own orientation (it used to be re-aimed at the world origin) | done |
 | 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
+| 5.2 water — level + slope threshold, mask derived with the engine's own `derive_water_mask` | done (optics deferred) |
 | One lighting rig shared by preview and payload (fixture read by Rust and node) | done |
 | 8.0b — granted device features in the probe/status bar | done |
 | 5.1 sky & atmosphere — model, turbidity, ground albedo, exposure; AETHER gated on the shipped bake | done (backdrop-only by design) |
@@ -136,11 +137,22 @@ All use §2. Nothing new is introduced beyond the settings below.
   blue; it is also ~7× brighter at the same exposure. The Studio exposes the
   model instead of hiding the difference.
 
-### 5.2 Water (0.5 day)
-- Settings: `water.enabled`, `water.level`, `water.slopeThreshold`.
-- Service: `WaterSettings(enabled, level, slope_threshold, optics=default)`.
-- Defer water mask paths and optics.
-- Check: round-trip.
+### 5.2 Water (0.5 day) — **done**
+- Settings: `water.enabled`, `water.level`, `water.slopeThreshold` (a
+  `WaterSettings` group on `RenderSettings`).
+- Service: the terrain path has **no water-level knob** — it shades water where
+  a *mask* says so, and `params.water` is inert there (measured: 0 pixels
+  changed). The service therefore derives the mask with the engine's own
+  `forge3d.gis.derive_water_mask` (low ground below the level, flat enough to
+  hold it) and passes it as the `water_mask` argument. Measured: a mask moves
+  1,422–14,373 pixels on the Bryce DEM depending on the slope threshold; a
+  zero mask moves 0, so the mask — not the plumbing — is what draws the water.
+- The level is in the DEM's metres and is scaled with the heights into the
+  renderer's units, so the control means the same thing on a 4 km amphitheatre
+  and a 350 km country. Level 0 = auto (the engine's 15th percentile).
+- Defer water mask paths and optics (reflections, roughness): the water is the
+  engine's depth-graded blue, not a physical surface.
+- Check: schema contract, payload assertion, four service tests, round-trip.
 
 ### 5.3 Clouds (0.5 day)
 - Settings: `clouds.enabled`, `coverage`, `density`, `shadowStrength`.

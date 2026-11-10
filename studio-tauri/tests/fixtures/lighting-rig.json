@@ -22,7 +22,12 @@
       "skyModel": "hosek",
       "skyTurbidity": 2.0,
       "skyGroundAlbedo": 0.3,
-      "skyExposure": 0.08
+      "skyExposure": 0.08,
+      "water": {
+        "enabled": false,
+        "level": 0.0,
+        "slopeThreshold": 0.18
+      }
     }
   },
   "expected": {

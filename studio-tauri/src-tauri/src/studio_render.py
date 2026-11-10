@@ -187,6 +187,41 @@ class StudioRenderer:
                 self._ibl_cache.pop(next(iter(self._ibl_cache)))
         return cached
 
+    def water_mask(self, request: Dict[str, Any]):
+        """The engine's water mask for the project's water settings.
+
+        The terrain path has no water-level knob: it shades water where a mask
+        says so. The mask is derived from the DEM by the engine's own
+        `forge3d.gis.derive_water_mask` — low ground below the level, and only
+        where it is flat enough to hold water.
+
+        The project's level is in the DEM's own metres and the heights here are
+        scaled into the renderer's view budget, so both the level and the slope
+        threshold are scaled with them: the control then means the same thing
+        on a 4 km amphitheatre and on a 350 km country.
+        """
+        water = (request.get("quality") or {}).get("water") or {}
+        if not bool(water.get("enabled", False)):
+            return None
+        try:
+            from forge3d.gis import derive_water_mask
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"event": "warning", "message": "water skipped: %s" % (exc,)}), flush=True)
+            return None
+        level = float(water.get("level", 0.0) or 0.0)
+        slope = float(water.get("slopeThreshold", 0.02) or 0.0)
+        try:
+            mask = derive_water_mask(
+                self.heights,
+                # 0 means auto: the engine's own default, the lowest 15%.
+                level=None if level == 0.0 else level * self.scale,
+                slope_threshold=slope * self.scale,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"event": "warning", "message": "water skipped: %s" % (exc,)}), flush=True)
+            return None
+        return np.ascontiguousarray(np.asarray(mask, dtype=np.float32))
+
     def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
         """Read a raster overlay decimated to the frame, aiming for the drape.
 
@@ -451,13 +486,14 @@ class StudioRenderer:
         settings.shadows.normal_bias = 0.00001
 
         params = f3d.TerrainRenderParams(settings)
+        water_mask = self.water_mask(request)
         if want_aov or want_denoise:
             frame, aov_frame = self.renderer.render_with_aov(
-                self.materials, ibl, params, self.heights
+                self.materials, ibl, params, self.heights, water_mask=water_mask
             )
         else:
             frame = self.renderer.render_terrain_pbr_pom(
-                self.materials, ibl, params, self.heights
+                self.materials, ibl, params, self.heights, water_mask=water_mask
             )
             aov_frame = None
         image = np.asarray(frame.to_numpy())

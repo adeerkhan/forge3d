@@ -158,6 +158,22 @@ export interface RenderSettings {
   skyGroundAlbedo: number;
   /** Exposure for the analytic sky pass (backdrop only), 0..=4. */
   skyExposure: number;
+  /** Water on the terrain: the level and the slope threshold the render
+   *  service turns into the engine's water mask. */
+  water: WaterSettings;
+}
+
+/** Water on the terrain. The terrain path takes a mask, not a level: the
+ *  render service derives the mask from the DEM with the engine's own
+ *  `derive_water_mask`. */
+export interface WaterSettings {
+  /** Flood the low, flat ground. */
+  enabled: boolean;
+  /** Water surface elevation in the DEM's own metres; 0 = auto (the lowest
+   *  15% of the terrain). */
+  level: number;
+  /** Metres of rise per DEM cell; steeper ground stays dry. */
+  slopeThreshold: number;
 }
 
 export type SkyModel = "hosek" | "preetham" | "aether";

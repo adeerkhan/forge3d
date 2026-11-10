@@ -72,9 +72,17 @@ fn project_document_key_shape_is_stable() {
             "skyTurbidity",
             "skyGroundAlbedo",
             "skyExposure",
+            "water",
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
+    // Water is off until the project asks for it; the engine derives the mask.
+    expect_keys(
+        &value["render"]["water"],
+        &["enabled", "level", "slopeThreshold"],
+    );
+    assert_eq!(value["render"]["water"]["enabled"], false);
+    assert_eq!(value["render"]["water"]["level"], 0.0);
     // The default project uses the built-in studio sky.
     assert_eq!(value["render"]["environment"], serde_json::Value::Null);
 
