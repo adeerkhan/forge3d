@@ -150,6 +150,13 @@ export interface RenderSettings {
   shadowTechnique: ShadowTechnique;
   /** Shadow-map edge length in texels (256-8192); bigger is crisper and slower. */
   shadowResolution: number;
+  /** Terrain self-shadowing: ray-marches the heightfield toward the sun, so a
+   *  ridge shadows the ground behind it. */
+  sunVisibility: boolean;
+  /** How far each sun ray searches, in metres (100..20000). */
+  sunVisibilityDistance: number;
+  /** Steps per sun ray (8..64). */
+  sunVisibilitySteps: number;
   /** Analytic sky model for the backdrop when no HDRI is set. */
   skyModel: SkyModel;
   /** Hosek/Preetham turbidity (haze), 1..=10. */

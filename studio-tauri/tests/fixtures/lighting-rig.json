@@ -29,6 +29,9 @@
         "slopeThreshold": 0.18,
         "roughness": 0.35
       },
+      "sunVisibility": false,
+      "sunVisibilityDistance": 2000.0,
+      "sunVisibilitySteps": 32,
       "colormap": "",
       "colormapStrength": 1.0,
       "fog": {

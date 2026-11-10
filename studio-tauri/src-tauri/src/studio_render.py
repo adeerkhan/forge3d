@@ -248,6 +248,34 @@ class StudioRenderer:
             domain=domain,
         )
 
+    def sun_visibility_settings(self, quality: Dict[str, Any]):
+        """The engine's heightfield sun-visibility pass, or None when off.
+
+        A ray march toward the sun per pixel: a ridge shadows the ground
+        behind it, which the shadow map cannot resolve because it samples a
+        different projection. Hard shadows with one ray — the engine's soft
+        mode jittered 8 samples and moved 490 of 256,000 channel samples on
+        the frame measured here, so penumbra and jitter are not worth a dial.
+        """
+        block = quality.get("sunVisibility") or {}
+        if not bool(block.get("enabled", False)):
+            return None
+        from forge3d.terrain_params import SunVisibilitySettings
+
+        return SunVisibilitySettings(
+            enabled=True,
+            mode="hard",
+            samples=1,
+            steps=int(block.get("steps", 32)),
+            max_distance=float(block.get("distance", 2000.0)),
+            softness=0.0,
+            # Grain-scale self-shadowing; the engine default is 0.01.
+            bias=0.005,
+            # Full resolution: the engine's 0.5 default upsamples the pass and
+            # moved 231 samples against 1.0 on the test frame.
+            resolution_scale=1.0,
+        )
+
     def fog_settings(self, quality: Dict[str, Any]):
         """The engine's height-based fog, or None when the project has none.
 
@@ -559,6 +587,7 @@ class StudioRenderer:
         colormap_overlay = self.colormap_overlay(quality, bool(overlays))
         if colormap_overlay is not None:
             overlays.insert(0, colormap_overlay)
+        sun_visibility = self.sun_visibility_settings(quality)
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
 
@@ -631,6 +660,7 @@ class StudioRenderer:
             ),
             sky=sky_settings,
             fog=fog_settings,
+            sun_visibility=sun_visibility,
             water=water_settings,
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))

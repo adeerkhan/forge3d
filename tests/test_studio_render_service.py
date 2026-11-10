@@ -438,3 +438,23 @@ def test_the_colormap_is_built_from_the_engines_own_catalogue():
         service.StudioRenderer.colormap_overlay(
             stub, {"colormap": "viridis"}, has_raster_overlay=True
         )
+
+
+def test_sun_visibility_is_off_unless_asked_and_maps_the_rays():
+    """Terrain self-shadowing is a ray march over the heightfield: off means
+    `None` (the engine's own default), on carries the reach and step count."""
+    service = load_service()
+    stub = _WaterStub(
+        heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(0.0, 100.0)
+    )
+    assert service.StudioRenderer.sun_visibility_settings(stub, {}) is None
+    settings = service.StudioRenderer.sun_visibility_settings(
+        stub,
+        {"sunVisibility": {"enabled": True, "distance": 5000.0, "steps": 48}},
+    )
+    assert settings is not None
+    assert settings.max_distance == 5000.0
+    assert settings.steps == 48
+    # One hard ray: the engine's soft mode moved 490 of 256,000 samples.
+    assert settings.mode == "hard"
+    assert settings.samples == 1

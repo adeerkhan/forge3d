@@ -68,6 +68,9 @@ fn project_document_key_shape_is_stable() {
             "stillDenoise",
             "shadowTechnique",
             "shadowResolution",
+            "sunVisibility",
+            "sunVisibilityDistance",
+            "sunVisibilitySteps",
             "skyModel",
             "skyTurbidity",
             "skyGroundAlbedo",
@@ -81,6 +84,10 @@ fn project_document_key_shape_is_stable() {
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
+    // Terrain self-shadowing is off by default and its rays reach 2 km.
+    assert_eq!(value["render"]["sunVisibility"], false);
+    assert_eq!(value["render"]["sunVisibilityDistance"], 2000.0);
+    assert_eq!(value["render"]["sunVisibilitySteps"], 32);
     // Water is off until the project asks for it; the engine derives the mask.
     expect_keys(
         &value["render"]["water"],

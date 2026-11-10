@@ -539,6 +539,38 @@ export function RenderSettingsEditor() {
           onChange={(value) => commit({ shadowResolution: Number(value) })}
           hint="Applies to previews too: the Rendered viewport re-renders on orbit, so a big map costs frame time."
         />
+        <Toggle
+          label="Terrain sun shadows"
+          checked={render.sunVisibility}
+          onChange={(sunVisibility) => commit({ sunVisibility })}
+        />
+        {render.sunVisibility && (
+          <>
+            <NumberField
+              label="Sun reach (m)"
+              value={render.sunVisibilityDistance}
+              step={100}
+              min={100}
+              max={20000}
+              onCommit={(sunVisibilityDistance) =>
+                commit({ sunVisibilityDistance })
+              }
+            />
+            <ChoiceField
+              label="Ray steps"
+              value={String(render.sunVisibilitySteps)}
+              options={[16, 32, 48, 64].map((steps) => ({
+                value: String(steps),
+                label: String(steps),
+                title: `${steps} steps per sun ray: more follows a ridge line further before missing it`,
+              }))}
+              onChange={(value) =>
+                commit({ sunVisibilitySteps: Number(value) })
+              }
+              hint="A ray march per pixel over the heightfield: the shadow map cannot resolve a ridge shadowing the ground behind it."
+            />
+          </>
+        )}
       </Section>
 
       <Section title="Quality" id="render-quality">

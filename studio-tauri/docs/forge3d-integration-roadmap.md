@@ -284,6 +284,35 @@ All use §2. Nothing new is introduced beyond the settings below.
   over 10 (jagged) and 2.5 (still flat).
 - Still open in the cartography tier: legend, despeckle, and the map plate.
 
+### 5.8 Terrain sun shadows (0.5 day) — **done**
+- Settings: `sunVisibility`, `sunVisibilityDistance` (metres, 100–20000) and
+  `sunVisibilitySteps` (8–64) on `RenderSettings`; payload
+  `quality.sunVisibility { enabled, distance, steps }`.
+- The engine's `SunVisibilitySettings` ray-marches the heightfield toward the
+  sun per pixel, so a ridge shadows the ground behind it — terrain
+  self-shadowing the shadow map cannot resolve because it samples a different
+  projection. Measured on the Bryce DEM (922×795, sun 18°): off → on changes
+  395,389 of 2,198,970 channel samples (mean 3.47), and the still shows the
+  valley shadows the shadow map leaves flat.
+- Two dials, both measured: `distance` 2000 → 8000 m changes 38,304 samples
+  (a short reach only catches nearby ridges), `steps` 32 → 16 changes 14,734
+  (fewer steps miss a ridge line sooner).
+- Not shipped: `mode="soft"` with 8 jittered samples moved 490 samples and
+  `softness` 0.1 vs 0.5 moved 491 — a sub-pixel edge — so the service sends one
+  hard ray. `resolution_scale` 0.5 moved 231 samples against 1.0, so the pass
+  runs full-resolution.
+- Not final-gated (unlike SSAO): one ray march per pixel is cheap enough for
+  the Rendered viewport, so the shadows are visible while authoring.
+- Measured inert on this path, all 0 samples: `ScreenSpaceSettings` SSAO,
+  SSGI and SSR; `ReflectionSettings` (planar water reflections); every
+  `TonemapSettings` operator (`reinhard`, `reinhard_extended`, `aces`,
+  `uncharted2`, `exposure`) and white balance. The material-layer system is
+  **blocked**: `vs_main` writes a constant `world_normal` (`(0,0,1)`), so the
+  layer slope is ~0 — a rock layer at 0.001° changes 160,785 samples but at 1°
+  changes **0**, even from a grazing camera (98,488 → 0). Altitude-driven snow
+  would draw, but on cliffs too, so it is not shipped.
+- Check: schema contract + fixture, payload assertion, one service test.
+
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.

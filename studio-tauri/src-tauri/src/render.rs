@@ -462,6 +462,11 @@ pub struct RenderRequest {
     /// Shadow filter (`PCF` | `PCSS`) and shadow-map edge length in texels.
     pub shadow_technique: String,
     pub shadow_resolution: u32,
+    /// Terrain self-shadowing from the heightfield (the engine's sun
+    /// visibility pass): how far each ray searches, and how many steps.
+    pub sun_visibility: bool,
+    pub sun_visibility_distance: f64,
+    pub sun_visibility_steps: u32,
     /// Analytic sky model token (`hosek` | `preetham` | `aether`) and its
     /// backdrop parameters. Used only when the project has no HDRI.
     pub sky_model: String,
@@ -513,6 +518,9 @@ impl RenderRequest {
         self.still_denoise = settings.still_denoise;
         self.shadow_technique = settings.shadow_technique.engine_name().to_owned();
         self.shadow_resolution = settings.shadow_resolution;
+        self.sun_visibility = settings.sun_visibility;
+        self.sun_visibility_distance = settings.sun_visibility_distance;
+        self.sun_visibility_steps = settings.sun_visibility_steps;
         self.sky_model = settings.sky_model.token().to_owned();
         self.sky_turbidity = settings.sky_turbidity;
         self.sky_ground_albedo = settings.sky_ground_albedo;
@@ -610,6 +618,13 @@ impl RenderRequest {
                 "denoise": final_quality && self.still_denoise,
                 "shadowTechnique": self.shadow_technique,
                 "shadowResolution": self.shadow_resolution,
+                // Terrain self-shadowing. Cheap enough for previews (one ray
+                // march per pixel), so it is not final-gated like SSAO.
+                "sunVisibility": {
+                    "enabled": self.sun_visibility,
+                    "distance": self.sun_visibility_distance,
+                    "steps": self.sun_visibility_steps,
+                },
                 "skyModel": self.sky_model,
                 "skyTurbidity": self.sky_turbidity,
                 "skyGroundAlbedo": self.sky_ground_albedo,
@@ -727,6 +742,9 @@ impl RenderRequest {
             still_denoise: false,
             shadow_technique: "PCF".to_owned(),
             shadow_resolution: 4096,
+            sun_visibility: false,
+            sun_visibility_distance: 2000.0,
+            sun_visibility_steps: 32,
             sky_model: "hosek".to_owned(),
             sky_turbidity: 2.0,
             sky_ground_albedo: 0.3,
@@ -783,6 +801,9 @@ mod tests {
             still_denoise: false,
             shadow_technique: "PCF".to_owned(),
             shadow_resolution: 4096,
+            sun_visibility: false,
+            sun_visibility_distance: 2000.0,
+            sun_visibility_steps: 32,
             sky_model: "hosek".to_owned(),
             sky_turbidity: 2.0,
             sky_ground_albedo: 0.3,
@@ -901,6 +922,23 @@ mod tests {
             request().to_payload("final", None)["quality"]["renderScale"],
             2.0
         );
+    }
+
+    #[test]
+    fn payload_carries_the_sun_visibility() {
+        let settings = studio_core::RenderSettings {
+            sun_visibility: true,
+            sun_visibility_distance: 5000.0,
+            sun_visibility_steps: 48,
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request()
+            .with_settings(&settings)
+            .to_payload("preview", None);
+        // Cheap enough for previews, unlike SSAO: not final-gated.
+        assert_eq!(payload["quality"]["sunVisibility"]["enabled"], true);
+        assert_eq!(payload["quality"]["sunVisibility"]["distance"], 5000.0);
+        assert_eq!(payload["quality"]["sunVisibility"]["steps"], 48);
     }
 
     #[test]

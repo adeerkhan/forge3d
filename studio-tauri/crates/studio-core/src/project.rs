@@ -459,6 +459,15 @@ impl Project {
         {
             return Err("water slope threshold must be between 0 and 1".to_owned());
         }
+        if !self.render.sun_visibility_distance.is_finite()
+            || !(100.0..=20_000.0).contains(&self.render.sun_visibility_distance)
+        {
+            return Err("sun visibility distance must be between 100 and 20000 m".to_owned());
+        }
+        // The engine refuses more than 64 steps per sun ray.
+        if !(8..=64).contains(&self.render.sun_visibility_steps) {
+            return Err("sun visibility steps must be between 8 and 64".to_owned());
+        }
         if !self.render.colormap_strength.is_finite()
             || !(0.0..=1.0).contains(&self.render.colormap_strength)
         {
@@ -789,6 +798,19 @@ pub struct RenderSettings {
     /// generous for a 960×600 preview; 1024–2048 trades crispness for cost.
     #[serde(default = "default_shadow_resolution")]
     pub shadow_resolution: u32,
+    /// Sun visibility: the terrain ray-marches the heightfield toward the sun,
+    /// so a ridge shadows the ground behind it — terrain self-shadowing the
+    /// shadow map does not resolve. Off by default; it costs a ray march.
+    #[serde(default)]
+    pub sun_visibility: bool,
+    /// How far (metres) each sun ray searches across the heightfield. A short
+    /// reach only catches nearby ridges; a long one catches the far skyline.
+    #[serde(default = "default_sun_visibility_distance")]
+    pub sun_visibility_distance: f64,
+    /// Steps per sun ray. More steps follow a ridge line further before it is
+    /// missed; the engine caps this at 64.
+    #[serde(default = "default_sun_visibility_steps")]
+    pub sun_visibility_steps: u32,
     /// Which sky model draws the backdrop when no HDRI is set. The backdrop
     /// only: the environment map (HDRI, or the built-in studio sky) is what
     /// lights the terrain.
@@ -906,6 +928,14 @@ fn default_sky_exposure() -> f32 {
     0.08
 }
 
+fn default_sun_visibility_distance() -> f64 {
+    2000.0
+}
+
+fn default_sun_visibility_steps() -> u32 {
+    32
+}
+
 fn default_colormap_strength() -> f32 {
     1.0
 }
@@ -961,6 +991,9 @@ impl Default for RenderSettings {
             still_denoise: false,
             shadow_technique: ShadowTechnique::default(),
             shadow_resolution: default_shadow_resolution(),
+            sun_visibility: false,
+            sun_visibility_distance: default_sun_visibility_distance(),
+            sun_visibility_steps: default_sun_visibility_steps(),
             sky_model: SkyModel::default(),
             sky_turbidity: default_sky_turbidity(),
             sky_ground_albedo: default_sky_ground_albedo(),
