@@ -564,14 +564,30 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const path = typeof picked === "string" ? picked : null;
       if (!path) return;
       setBusy(true);
-      setState(await bridge.setTerrainOverlay(path, 0.82));
-      flash("Overlay attached");
+      const next = await bridge.setTerrainOverlay(path, 0.82);
+      setState(next);
+      // A raster overlay and a colormap both need the engine's single colormap
+      // binding (`extract_overlay_binding` binds the first LUT and stops), so
+      // leaving both set means every frame fails. Clear the ramp and say so,
+      // rather than handing the user a render error to work out.
+      const cleared = next.project.render.colormap;
+      if (cleared) {
+        await applyCommand({
+          type: "setRenderSettings",
+          render: { ...next.project.render, colormap: "" },
+        });
+        flash(
+          `Overlay attached — colormap ${cleared} cleared: one colormap binding per frame`,
+        );
+      } else {
+        flash("Overlay attached");
+      }
     } catch (cause) {
       fail(cause);
     } finally {
       setBusy(false);
     }
-  }, [fail, flash]);
+  }, [applyCommand, fail, flash]);
 
   const setTerrainOverlayOpacity = useCallback(
     async (opacity: number) => {
