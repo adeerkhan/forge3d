@@ -164,8 +164,13 @@ All use §2. Nothing new is introduced beyond the settings below.
 - The level is in the DEM's metres and is scaled with the heights into the
   renderer's units, so the control means the same thing on a 4 km amphitheatre
   and a 350 km country. Level 0 = auto (the engine's 15th percentile).
-- Defer water mask paths and optics (reflections, roughness): the water is the
-  engine's depth-graded blue, not a physical surface.
+- Shipped since: the water surface (`WaterOpticsSettings(mode="physical",
+  roughness=…)`) with its own height and normals, plus a roughness control —
+  measured .35 → .95 changes 8,415 samples on a 480×300 frame, and the surface
+  is what removed the per-cell glints (302 → 2 sparkle pixels in a 1180×330
+  frame).
+- Deferred: mask paths and planar reflections (`ReflectionSettings` measured 0
+  changed samples on this path).
 - Check: schema contract, payload assertion, four service tests, round-trip.
 
 **Fog tint is conditional, and the UI says so.** The shader scatters the sky
