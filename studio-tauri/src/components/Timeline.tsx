@@ -5,8 +5,10 @@ import type {
   Channel,
   ChannelKeys,
   Interpolation,
+  Keyframe,
   Project,
   SceneObject,
+  Transform,
 } from "../bridge/types";
 import { useSession } from "../state/session-context";
 import { viewStore } from "../viewport/viewStore";
@@ -75,6 +77,33 @@ function recordTarget(project: Project): SceneObject | null {
 const RECORD_KEY_INTERVAL = 4;
 
 /**
+ * Write one sampled pose into a take's key lists.
+ *
+ * A path is six channels — the camera's position and its orientation. The
+ * orientation is the camera's own quaternion (the studio transform's forward is
+ * -Z, the axis a three.js camera looks down), so a replayed frame faces where
+ * the take faced.
+ */
+function putPose(
+  keys: Map<Channel, Keyframe[]>,
+  frame: number,
+  transform: Transform,
+  interpolation: Interpolation,
+): void {
+  const put = (channel: Channel, value: number) => {
+    const list = keys.get(channel) ?? [];
+    list.push({ frame, value, interpolation });
+    keys.set(channel, list);
+  };
+  put("translationX", transform.translation.x);
+  put("translationY", transform.translation.y);
+  put("translationZ", transform.translation.z);
+  put("rotationX", transform.rotationDeg.x);
+  put("rotationY", transform.rotationDeg.y);
+  put("rotationZ", transform.rotationDeg.z);
+}
+
+/**
  * The animation timeline: playback, scrubbing, keyframing, camera-path
  * recording and frame-sequence export.
  *
@@ -91,7 +120,6 @@ export function Timeline() {
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
   const [interpolation, setInterpolation] = useState<Interpolation>("linear");
-  const [recordNote, setRecordNote] = useState<string | null>(null);
 
   const project = state?.project;
   const timeline = project?.timeline;
@@ -113,8 +141,6 @@ export function Timeline() {
   stateRef.current = state;
   const settingsRef = useRef({ frameRate, length });
   settingsRef.current = { frameRate, length };
-  const recordingRef = useRef(false);
-  recordingRef.current = recording;
   /** Sampled keys for the take in progress, keyed by channel. */
   const recordedRef = useRef(new Map<Channel, ChannelKeys["keys"]>());
   const recordCameraRef = useRef<string | null>(null);
@@ -143,33 +169,33 @@ export function Timeline() {
     void actionsRef.current.apply({ type: "setChannelKeys", id: cameraId, channels });
   }, [setFlyMode]);
 
-  const startRecording = useCallback(() => {
+  const startRecording = useCallback(
+    (camera: SceneObject | null) => {
     const current = stateRef.current?.project;
-    const camera = current ? recordTarget(current) : null;
     if (!current || !camera || camera.kind.type !== "camera") {
-      setRecordNote("Recording a path needs a camera object — add one from the viewport Add menu.");
       return;
     }
     recordedRef.current = new Map();
     recordCameraRef.current = camera.id;
-    setRecordNote(null);
     setPlaying(false);
     setFlyMode(true);
     setRecording(true);
+    // Select the camera: the timeline draws the keys of the selected object,
+    // so a take that nobody can see is a take nobody can fix.
+    void actionsRef.current.select([camera.id]);
     // The pose the take starts from is a key too.
     const transform = viewStore.cameraTransform;
     if (transform) {
-      const keys = recordedRef.current;
-      const put = (channel: Channel, value: number) =>
-        keys.set(channel, [{ frame: Math.round(current.timeline.currentFrame), value, interpolation: "linear" }]);
-      put("translationX", transform.translation.x);
-      put("translationY", transform.translation.y);
-      put("translationZ", transform.translation.z);
-      put("rotationX", transform.rotationDeg.x);
-      put("rotationY", transform.rotationDeg.y);
-      put("rotationZ", transform.rotationDeg.z);
+      putPose(
+        recordedRef.current,
+        Math.round(current.timeline.currentFrame),
+        transform,
+        interpolation,
+      );
     }
-  }, [setFlyMode]);
+    },
+    [setFlyMode, interpolation],
+  );
 
   // Playback: advance one frame per 1/frameRate seconds, wrapping at the end.
   // Each step is a setPlayhead IPC — the same evaluation the export uses.
@@ -203,24 +229,13 @@ export function Timeline() {
       inFlight = true;
       void actionsRef.current.setPlayhead(next).finally(() => {
         inFlight = false;
-        if (!recordingRef.current) return;
+        if (!recording) return;
         // Sample the viewport's live camera, not the evaluated object: flying
         // is what the take is made of.
         const transform = viewStore.cameraTransform;
         const cameraId = recordCameraRef.current;
         if (transform && cameraId && next % RECORD_KEY_INTERVAL === 0) {
-          const keys = recordedRef.current;
-          const put = (channel: Channel, value: number) => {
-            const list = keys.get(channel) ?? [];
-            list.push({ frame: next, value, interpolation: "linear" });
-            keys.set(channel, list);
-          };
-          put("translationX", transform.translation.x);
-          put("translationY", transform.translation.y);
-          put("translationZ", transform.translation.z);
-          put("rotationX", transform.rotationDeg.x);
-          put("rotationY", transform.rotationDeg.y);
-          put("rotationZ", transform.rotationDeg.z);
+          putPose(recordedRef.current, next, transform, interpolation);
         }
         // The take fills the timeline: stop instead of wrapping and re-recording.
         if (next >= settingsRef.current.length) stopRecording();
@@ -313,7 +328,7 @@ export function Timeline() {
           type="button"
           className="timeline__play"
           aria-label={playing ? "Stop playback" : "Start playback"}
-          disabled={busy || recording}
+          disabled={busy}
           onClick={() => setPlaying((value) => !value)}
         >
           {playing ? "■" : "▶"}
@@ -326,7 +341,7 @@ export function Timeline() {
           className={`button button--record${recording ? " is-recording" : ""}`}
           disabled={exporting !== null || !camera}
           title={recordingTitle}
-          onClick={() => (recording ? stopRecording() : startRecording())}
+          onClick={() => (recording ? stopRecording() : startRecording(camera))}
         >
           {recording ? "Stop take" : "Record path"}
         </button>
@@ -419,14 +434,18 @@ export function Timeline() {
         >
           {exporting ? `Exporting ${exporting.done}/${exporting.total}…` : "Export frames…"}
         </button>
-        {busy && (
+        {exporting !== null && (
           <button type="button" className="button" onClick={actions.cancelExport}>
             Stop
           </button>
         )}
       </div>
 
-      {recordNote && <p className="hint hint--warn">{recordNote}</p>}
+      {!camera && (
+        <p className="hint hint--warn">
+          Recording a path needs a camera object — add one from the viewport Add menu.
+        </p>
+      )}
       <p className="hint">
         {recording
           ? `Recording onto "${camera?.name}" — fly with W A S D and Q E, drag to look. The take fills the timeline.`

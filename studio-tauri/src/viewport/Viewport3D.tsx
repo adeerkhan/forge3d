@@ -28,6 +28,8 @@ import { lightingRig } from "./lighting";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
+/** Fly-camera keys: WASD in the view plane, Q/E down and up, Shift to sprint. */
+const FLY_KEYS = new Set(["w", "a", "s", "d", "q", "e", "shift"]);
 const ACCENT = 0xf0a94a;
 /**
  * Solid is a Blender-style clay view: no albedo, no textures, no material
@@ -901,7 +903,10 @@ export function Viewport3D() {
     resize();
 
     gizmo.addEventListener("dragging-changed", (event) => {
-      orbit.enabled = !(event as unknown as { value: boolean }).value;
+      // Fly mode owns the camera: re-enabling OrbitControls here would let its
+      // own pointer handlers rotate the camera behind the fly-look handler.
+      orbit.enabled =
+        !(event as unknown as { value: boolean }).value && !flyModeRef.current;
     });
     gizmo.addEventListener("objectChange", () => {
       for (const helper of runtime.helpers) helper.update();
@@ -1008,7 +1013,6 @@ export function Viewport3D() {
     canvas.addEventListener("pointerup", onPointerUp);
 
     // Fly camera: WASD in the view plane, Q/E down and up, Shift to go faster.
-    const FLY_KEYS = new Set(["w", "a", "s", "d", "q", "e", "shift"]);
     const onFlyKeyDown = (event: KeyboardEvent) => {
       if (!flyModeRef.current) return;
       const key = event.key.toLowerCase();
@@ -1045,15 +1049,16 @@ export function Viewport3D() {
         viewStore.current = null;
         return;
       }
-      const aim = cameraViewRef.current
-        ? camera.position
-            .clone()
-            .add(
-              new THREE.Vector3(0, 0, -1)
-                .applyQuaternion(camera.quaternion)
-                .multiplyScalar(10),
-            )
-        : orbit.target;
+      const aim =
+        cameraViewRef.current || flyModeRef.current
+          ? camera.position
+              .clone()
+              .add(
+                new THREE.Vector3(0, 0, -1)
+                  .applyQuaternion(camera.quaternion)
+                  .multiplyScalar(10),
+              )
+          : orbit.target;
       viewStore.current = computeRenderView({
         camera: [camera.position.x, camera.position.y, camera.position.z],
         aim: [aim.x, aim.y, aim.z],
@@ -1070,10 +1075,6 @@ export function Viewport3D() {
      * recorder reads it while a take is running, so what gets keyed is exactly
      * what is on screen — the camera's own orientation, not an orbit aim.
      */
-    const publishCameraTransform = () => {
-      viewStore.cameraTransform = cameraTransform(camera);
-    };
-
     let frame = 0;
     let lastQuaternion: Quaternion = [0, 0, 0, 1];
     let lastTick = performance.now();
@@ -1101,7 +1102,7 @@ export function Viewport3D() {
         runtime.needsRender = true;
       }
       updateViewStore();
-      publishCameraTransform();
+      viewStore.cameraTransform = cameraTransform(camera);
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
       if (

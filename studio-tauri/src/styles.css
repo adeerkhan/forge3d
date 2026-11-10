@@ -165,7 +165,7 @@ kbd {
   grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   padding: 8px 12px;
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
@@ -251,10 +251,6 @@ kbd {
 
 /* The timeline lives in the Animation tab now: a narrow column, so the
    transport keeps its row and the config fields wrap. */
-.props .timeline {
-  gap: 8px;
-}
-
 .timeline__transport {
   gap: 8px;
 }
