@@ -187,6 +187,67 @@ class StudioRenderer:
                 self._ibl_cache.pop(next(iter(self._ibl_cache)))
         return cached
 
+    def colormap_overlay(self, quality: Dict[str, Any], has_raster_overlay: bool = False):
+        """The engine's elevation colormap as a terrain overlay.
+
+        `forge3d.get_colormap` returns a `Colormap`; the terrain takes a
+        `Colormap1D` built from stops over the elevation domain, wrapped in an
+        `OverlayLayer` — the engine's own path, not a second implementation.
+        Returns None when the project has no colormap (or its strength is 0).
+        """
+        name = str(quality.get("colormap") or "").strip()
+        if not name:
+            return None
+        strength = float(quality.get("colormapStrength", 1.0))
+        if has_raster_overlay:
+            # `extract_overlay_binding` binds exactly one colormap LUT per
+            # frame (the first overlay that has one, then stops), so a raster
+            # overlay and a colormap cannot both apply. Say so instead of
+            # dropping one of them silently.
+            raise RuntimeError(
+                "a terrain overlay and a colormap both need the engine's "
+                "single colormap binding; remove the overlay or the colormap"
+            )
+        if strength <= 0.0:
+            # 0 means off: no overlay. The engine normalizes the height its
+            # material layers sample by the colormap's domain, so a bound
+            # colormap at strength 0 still shifted the layer blend by 162,905
+            # samples (mean 4.4/255) against the same scene with no overlay.
+            return None
+        import forge3d as f3d
+
+        token = name if ":" in name else f"forge3d:{name}"
+        try:
+            cmap = f3d.get_colormap(token)
+        except KeyError as exc:
+            raise RuntimeError(
+                "unknown colormap %r; the engine offers %s"
+                % (name, ", ".join(f3d.available_colormaps()))
+            ) from exc
+        rgba = np.asarray(cmap.rgba, dtype=np.float32)
+        stops_count = min(64, len(rgba))
+        indices = np.linspace(0, len(rgba) - 1, stops_count, dtype=int)
+        low, high = self.range
+        # The renderer works in the scaled heights the service built.
+        domain = (float(low) * self.scale, float(high) * self.scale)
+        span = max(domain[1] - domain[0], 1e-6)
+        stops = [
+            (
+                domain[0] + span * index / max(stops_count - 1, 1),
+                "#%02x%02x%02x"
+                % tuple(int(round(float(rgba[row][channel]) * 255.0)) for channel in range(3)),
+            )
+            for index, row in enumerate(indices)
+        ]
+        colormap = f3d.Colormap1D.from_stops(stops=stops, domain=domain)
+        return f3d.OverlayLayer.from_colormap1d(
+            colormap,
+            strength=strength,
+            offset=0.0,
+            blend_mode="Alpha",
+            domain=domain,
+        )
+
     def fog_settings(self, quality: Dict[str, Any]):
         """The engine's height-based fog, or None when the project has none.
 
@@ -493,6 +554,11 @@ class StudioRenderer:
         ibl.intensity = float(request.get("iblIntensity", 1.0))
 
         sky_settings = self.sky_settings(request, quality, environment)
+        # The colormap tints the terrain; a raster overlay drawn after it
+        # still wins where it covers the ground.
+        colormap_overlay = self.colormap_overlay(quality, bool(overlays))
+        if colormap_overlay is not None:
+            overlays.insert(0, colormap_overlay)
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
 
@@ -517,7 +583,17 @@ class StudioRenderer:
             ),
             domain=self.range,
             overlays=overlays,
-            albedo_mode="material",
+            # The colormap only reaches the pixels in `mix` mode: the shader's
+            # `material` branch assigns `material_albedo` last, so a colormap
+            # overlay measured zero changed samples under it. `mix` blends
+            # material -> colormap by `colormap_strength`, so 0 is the
+            # material set and 1 is the ramp. With no colormap selected the
+            # mode stays `material` (a `mix` mode with no overlay applies the
+            # engine's fallback LUT to the whole terrain).
+            albedo_mode="mix" if colormap_overlay is not None else "material",
+            colormap_strength=float(quality.get("colormapStrength", 1.0))
+            if colormap_overlay is not None
+            else 0.0,
             # One lighting model across the app. The viewport's Solid/Material
             # preview is three.js `MeshStandardMaterial` — radiance =
             # albedo/pi * sun_color*intensity * n.l plus one IBL irradiance
@@ -529,7 +605,6 @@ class StudioRenderer:
             # while authoring it.
             terrain_shading_model="lambert_physical",
             hue_variation_strength=0.0,
-            colormap_strength=1.0,
             light_azimuth_deg=float(sun.get("azimuthDeg", 135.0)),
             light_elevation_deg=float(sun.get("elevationDeg", 35.0)),
             sun_intensity=float(sun.get("intensity", 3.0)),

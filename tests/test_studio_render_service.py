@@ -407,3 +407,34 @@ def test_a_single_band_classification_overlay_is_palette_mapped():
     # The palette is the engine gallery's land cover: water, trees, crops, ...
     assert service.CLASSIFICATION_PALETTE[0] == (65, 155, 223)
     assert service.CLASSIFICATION_PALETTE[4] == (196, 40, 27)
+
+
+def test_the_colormap_is_built_from_the_engines_own_catalogue():
+    """`get_colormap` returns a Colormap; the terrain takes a Colormap1D built
+    from stops over the elevation domain, wrapped in an OverlayLayer."""
+    service = load_service()
+    stub = _WaterStub(
+        heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(100.0, 500.0)
+    )
+    assert service.StudioRenderer.colormap_overlay(stub, {}) is None
+    layer = service.StudioRenderer.colormap_overlay(stub, {"colormap": "viridis"})
+    assert layer is not None
+    # Strength 0 is off. A bound colormap at strength 0 still shifted the
+    # material layer blend by 162,905 samples (the shader normalizes the
+    # height the layers sample by the colormap domain), so the service does
+    # not bind one: measured 0 samples against the same scene with none.
+    assert (
+        service.StudioRenderer.colormap_overlay(
+            stub, {"colormap": "viridis", "colormapStrength": 0.0}
+        )
+        is None
+    )
+    # An unknown name must fail loudly, not render a silent grey terrain.
+    with pytest.raises(RuntimeError, match="unknown colormap"):
+        service.StudioRenderer.colormap_overlay(stub, {"colormap": "nope"})
+    # One LUT slot per frame: a raster overlay and a colormap cannot both
+    # apply, and dropping one silently would be a lie about the image.
+    with pytest.raises(RuntimeError, match="single colormap binding"):
+        service.StudioRenderer.colormap_overlay(
+            stub, {"colormap": "viridis"}, has_raster_overlay=True
+        )

@@ -61,7 +61,7 @@ fn the_environment_is_a_reversible_persisted_setting() {
 
     let render = RenderSettings {
         environment: Some(asset.id),
-        ..editor.project().render
+        ..editor.project().render.clone()
     };
     editor.apply(Command::SetRenderSettings { render }).unwrap();
     assert_eq!(
@@ -97,7 +97,7 @@ fn environment_validation_rejects_dangling_and_wrong_kinds() {
     // An id the project does not carry.
     let dangling = RenderSettings {
         environment: Some(ids::new_id()),
-        ..editor.project().render
+        ..editor.project().render.clone()
     };
     let error = editor
         .apply(Command::SetRenderSettings { render: dangling })
@@ -120,7 +120,7 @@ fn environment_validation_rejects_dangling_and_wrong_kinds() {
         .unwrap();
     let wrong_kind = RenderSettings {
         environment: Some(texture.id),
-        ..editor.project().render
+        ..editor.project().render.clone()
     };
     let error = editor
         .apply(Command::SetRenderSettings { render: wrong_kind })
@@ -143,7 +143,7 @@ fn the_environment_asset_cannot_be_removed_while_used() {
         .unwrap();
     let render = RenderSettings {
         environment: Some(asset.id),
-        ..editor.project().render
+        ..editor.project().render.clone()
     };
     editor.apply(Command::SetRenderSettings { render }).unwrap();
 
@@ -158,7 +158,7 @@ fn the_environment_asset_cannot_be_removed_while_used() {
         .apply(Command::SetRenderSettings {
             render: RenderSettings {
                 environment: None,
-                ..editor.project().render
+                ..editor.project().render.clone()
             },
         })
         .unwrap();
@@ -234,7 +234,7 @@ fn the_hdri_background_intensity_is_validated() {
     for value in [-0.1f32, 1.5, f32::NAN] {
         let render = RenderSettings {
             environment_background_intensity: value,
-            ..editor.project().render
+            ..editor.project().render.clone()
         };
         let error = editor
             .apply(Command::SetRenderSettings { render })
@@ -245,7 +245,7 @@ fn the_hdri_background_intensity_is_validated() {
 
     let render = RenderSettings {
         environment_background_intensity: 0.35,
-        ..editor.project().render
+        ..editor.project().render.clone()
     };
     editor.apply(Command::SetRenderSettings { render }).unwrap();
     assert_eq!(

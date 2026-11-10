@@ -474,6 +474,9 @@ pub struct RenderRequest {
     pub water_level: f32,
     pub water_slope_threshold: f32,
     pub water_roughness: f32,
+    /// Elevation colormap for the terrain; empty means none.
+    pub colormap: String,
+    pub colormap_strength: f32,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -518,6 +521,8 @@ impl RenderRequest {
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
         self.water_roughness = settings.water.roughness;
+        self.colormap = settings.colormap.clone();
+        self.colormap_strength = settings.colormap_strength;
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -615,6 +620,8 @@ impl RenderRequest {
                     "slopeThreshold": self.water_slope_threshold,
                     "roughness": self.water_roughness,
                 },
+                "colormap": self.colormap,
+                "colormapStrength": self.colormap_strength,
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
@@ -728,6 +735,8 @@ impl RenderRequest {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
+            colormap: String::new(),
+            colormap_strength: 1.0,
             fog_enabled: false,
             fog_density: 0.05,
             fog_reach: 0.5,
@@ -782,6 +791,8 @@ mod tests {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
+            colormap: String::new(),
+            colormap_strength: 1.0,
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -890,6 +901,20 @@ mod tests {
             request().to_payload("final", None)["quality"]["renderScale"],
             2.0
         );
+    }
+
+    #[test]
+    fn payload_carries_the_colormap() {
+        let settings = studio_core::RenderSettings {
+            colormap: "viridis".to_owned(),
+            colormap_strength: 0.8,
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request()
+            .with_settings(&settings)
+            .to_payload("preview", None);
+        assert_eq!(payload["quality"]["colormap"], "viridis");
+        assert_eq!(payload["quality"]["colormapStrength"], f64::from(0.8_f32));
     }
 
     #[test]

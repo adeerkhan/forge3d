@@ -29,6 +29,8 @@
         "slopeThreshold": 0.18,
         "roughness": 0.35
       },
+      "colormap": "",
+      "colormapStrength": 1.0,
       "fog": {
         "enabled": false,
         "density": 0.05,

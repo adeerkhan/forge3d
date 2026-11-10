@@ -224,6 +224,40 @@ All use §2. Nothing new is introduced beyond the settings below.
   silent no-op. The shader has to consume them first.
 - Deferred: `cascades` (the terrain path keeps the engine's 3).
 
+### 5.6 Colormap (0.5 day) — **done**
+- Settings: `colormap` (engine name, `""` = none) and `colormapStrength`
+  (0–1) on `RenderSettings`; payload `quality.colormap` /
+  `quality.colormapStrength`.
+- The engine ships the catalogue: `forge3d.available_colormaps()` is
+  `forge3d:magma`, `forge3d:vik`, `forge3d:viridis`. `get_colormap` returns a
+  `Colormap`; the terrain takes a `Colormap1D` built with `from_stops` over the
+  elevation domain, wrapped in `OverlayLayer.from_colormap1d`. No engine code
+  was added.
+- **The colormap does nothing under `albedo_mode="material"`.** The shader's
+  material branch assigns `material_albedo` last, so a colormap overlay
+  measured **0** changed samples against the material set; `mix` measures
+  162,541 and viridis vs magma 163,680 (Bryce, 640×400). The service
+  therefore sends `albedo_mode="mix"` (material → ramp by strength) when a
+  colormap is selected, and keeps `"material"` otherwise — a `mix` frame with
+  no overlay would apply the engine's *fallback* LUT to the whole terrain.
+- Strength 0 is off, not "a 0% ramp": a bound colormap at strength 0 still
+  normalized the height the material layers sample by its domain, which moved
+  162,905 samples (mean 4.4/255) against the same frame with no overlay. At 0
+  the service binds no colormap, so strength 0 is byte-identical to the
+  material set (measured: 0 changed samples).
+- One LUT slot per frame: `extract_overlay_binding` binds the first overlay
+  that has a LUT and stops, so a raster overlay and a colormap cannot both
+  apply. The service **raises** instead of silently dropping one, and the
+  Inspector disables the colormap while the terrain has a raster overlay
+  (the selected value stays reachable so it can be cleared).
+- Measured on the Swiss DEM at the gallery camera (922×795, zScale 1.0):
+  material → viridis changes 2,189,640 samples (mean 34.1). The ramp renders,
+  but at true scale the Alps are 1.1% relief — that is the vertical-scale
+  default below, not a colormap defect.
+- Check: schema contract + fixture, payload assertion, three service tests
+  (built from the catalogue, strength 0 off, overlay conflict), and the
+  byte-identical no-colormap still (`9f8f5c3c2f1ae4be` before and after).
+
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.

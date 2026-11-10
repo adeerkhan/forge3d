@@ -73,6 +73,8 @@ fn project_document_key_shape_is_stable() {
             "skyGroundAlbedo",
             "skyExposure",
             "water",
+            "colormap",
+            "colormapStrength",
             "fog",
             "bloom",
             "vignette",

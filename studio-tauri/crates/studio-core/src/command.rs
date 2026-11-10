@@ -651,13 +651,15 @@ impl Command {
             }
 
             Command::SetRenderSettings { render } => {
-                let previous = project.render;
+                // `RenderSettings` holds the colormap name, so it is no longer
+                // Copy: clone where a snapshot is needed.
+                let previous = project.render.clone();
                 let mut probe = project.clone();
-                probe.render = *render;
+                probe.render = render.clone();
                 probe
                     .validate()
                     .map_err(|reason| CommandError::invalid("render settings", reason))?;
-                project.render = *render;
+                project.render = render.clone();
                 Ok(Outcome {
                     inverse: Command::SetRenderSettings { render: previous },
                     affected: Vec::new(),

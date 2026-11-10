@@ -161,6 +161,10 @@ export interface RenderSettings {
   /** Water on the terrain: the level and the slope threshold the render
    *  service turns into the engine's water mask. */
   water: WaterSettings;
+  /** Elevation colormap for the terrain, by engine name; "" means none. */
+  colormap: string;
+  /** How strongly the colormap covers the terrain material, 0..=1. */
+  colormapStrength: number;
   /** Atmospheric fog on the terrain. */
   fog: FogSettings;
   /** Bloom on the finished frame: the bright pixels glow. */

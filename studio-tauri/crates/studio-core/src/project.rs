@@ -459,6 +459,11 @@ impl Project {
         {
             return Err("water slope threshold must be between 0 and 1".to_owned());
         }
+        if !self.render.colormap_strength.is_finite()
+            || !(0.0..=1.0).contains(&self.render.colormap_strength)
+        {
+            return Err("colormap strength must be between 0 and 1".to_owned());
+        }
         if !self.render.fog.density.is_finite() || !(0.0..=100.0).contains(&self.render.fog.density)
         {
             return Err("fog density must be between 0 and 100".to_owned());
@@ -731,7 +736,7 @@ impl Default for BloomSettings {
 }
 
 /// Render output configuration — the Forge3D controls the pipeline exposes.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderSettings {
     pub width: u32,
@@ -805,6 +810,14 @@ pub struct RenderSettings {
     /// slope threshold rather than a mask.
     #[serde(default)]
     pub water: WaterSettings,
+    /// Elevation colormap for the terrain, by engine name (`viridis`,
+    /// `magma`, `vik`). Empty means none: the terrain keeps its material set.
+    /// The list is the engine's own `forge3d.available_colormaps()`.
+    #[serde(default)]
+    pub colormap: String,
+    /// How strongly the colormap covers the terrain material, 0..=1.
+    #[serde(default = "default_colormap_strength")]
+    pub colormap_strength: f32,
     /// Atmospheric fog on the terrain.
     #[serde(default)]
     pub fog: FogSettings,
@@ -893,6 +906,10 @@ fn default_sky_exposure() -> f32 {
     0.08
 }
 
+fn default_colormap_strength() -> f32 {
+    1.0
+}
+
 fn default_fog_density() -> f32 {
     // 0.5 veiled 72% of a 922x795 frame; 0.05 is a haze you can see through.
     0.05
@@ -949,6 +966,8 @@ impl Default for RenderSettings {
             sky_ground_albedo: default_sky_ground_albedo(),
             sky_exposure: default_sky_exposure(),
             water: WaterSettings::default(),
+            colormap: String::new(),
+            colormap_strength: default_colormap_strength(),
             fog: FogSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,

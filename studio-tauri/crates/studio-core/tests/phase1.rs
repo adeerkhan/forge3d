@@ -323,7 +323,7 @@ fn materials_and_environment_settings_survive_save_and_reopen() {
             },
         })
         .unwrap();
-    let mut render = editor.project().render;
+    let mut render = editor.project().render.clone();
     render.sky = false;
     render.ibl_intensity = 0.4;
     editor.apply(Command::SetRenderSettings { render }).unwrap();

@@ -1020,6 +1020,7 @@ function TerrainEditor({
   asset: Asset | undefined;
 }) {
   const { actions, terrainResolution, setTerrainResolution, state } = useSession();
+  const renderSettings = useRenderSettings();
   const caps = useCapabilities();
   const elevation =
     terrain.elevationRange === null
@@ -1036,6 +1037,9 @@ function TerrainEditor({
     terrain.overlay
       ? state?.project.assets.find((entry) => entry.id === terrain.overlay?.asset)
       : undefined;
+  // The engine binds one colormap LUT per frame (the first overlay that has
+  // one), so a raster overlay and a colormap cannot both apply.
+  const overlayOwnsTheColormap = Boolean(terrain.overlay);
 
   return (
     <Section title="Terrain">
@@ -1063,6 +1067,45 @@ function TerrainEditor({
           void actions.apply({ type: "setTerrainZScale", id: object.id, zScale })
         }
       />
+      {renderSettings && (
+        <>
+          <ChoiceField
+            label="Colormap"
+            value={renderSettings.render.colormap}
+            options={[
+              { value: "", label: "None", title: "The terrain's own material set colours it" },
+              { value: "viridis", label: "Viridis", title: "The engine's forge3d:viridis elevation ramp" },
+              { value: "magma", label: "Magma", title: "The engine's forge3d:magma elevation ramp" },
+              { value: "vik", label: "Vik", title: "The engine's forge3d:vik elevation ramp" },
+            ].map((option) => ({
+              ...option,
+              // Keep the selected value reachable so it can be cleared.
+              disabled:
+                overlayOwnsTheColormap &&
+                option.value !== renderSettings.render.colormap,
+            }))}
+            onChange={(colormap) => renderSettings.commit({ colormap })}
+            hint={
+              overlayOwnsTheColormap
+                ? "The raster overlay uses the engine's single colormap binding; remove it to show an elevation ramp."
+                : "An elevation ramp over the terrain — the engine's own available_colormaps(). Strength 0 keeps the material set."
+            }
+          />
+          {renderSettings.render.colormap && (
+            <NumberField
+              label="Colormap strength"
+              value={renderSettings.render.colormapStrength}
+              step={0.05}
+              min={0}
+              max={1}
+              onCommit={(colormapStrength) =>
+                renderSettings.commit({ colormapStrength })
+              }
+            />
+          )}
+        </>
+      )}
+
       <label className="field">
         <span className="field-label">
           Solid mesh · {terrainResolution} × {terrainResolution}
