@@ -1054,7 +1054,10 @@ function TerrainEditor({
         label="Vertical scale"
         value={terrain.zScale}
         step={0.1}
-        min={0.05}
+        // The engine's TerrainRenderParams rejects anything below 0.1 (it
+        // raises "z_scale must be 0.1-50.0"), so 0.05 here was a value the
+        // renderer refused.
+        min={0.1}
         max={20}
         onCommit={(zScale) =>
           void actions.apply({ type: "setTerrainZScale", id: object.id, zScale })

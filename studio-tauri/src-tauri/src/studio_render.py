@@ -317,6 +317,26 @@ class StudioRenderer:
             valid = np.ones((height, width), dtype=bool)
             for plane in planes:
                 valid &= ~np.ma.getmaskarray(plane)
+
+            # A single-band raster with whole-number values is a classification
+            # (a land-cover map, say), not a picture: reading band 1 as the red
+            # channel paints it grey. Map the classes through the land-cover
+            # palette instead, with the engine's own thematic mapper.
+            if bands == 1 and valid.any():
+                values = np.asarray(planes[0].filled(0.0), dtype=np.float32)
+                classes = np.rint(values).astype(np.int32)
+                whole = np.abs(values[valid] - classes[valid]) < 1e-3
+                distinct = np.unique(classes[valid & (classes > 0)])
+                if whole.all() and 0 < distinct.size <= len(CLASSIFICATION_PALETTE):
+                    from forge3d.thematic import apply_palette
+
+                    rgba = apply_palette(classes, CLASSIFICATION_PALETTE)
+                    rgba[~valid] = (0, 0, 0, 0)
+                    return self.f3d.OverlayLayer.from_raster_rgba(
+                        np.ascontiguousarray(rgba),
+                        strength=float(overlay.get("opacity", 0.82)),
+                    )
+
             rgb = np.zeros((height, width, 3), dtype=np.float32)
             for index, plane in enumerate(planes):
                 values = np.asarray(plane.filled(0.0), dtype=np.float32)
@@ -709,6 +729,24 @@ def apply_post_effects(rgb: np.ndarray, quality: Dict[str, Any]) -> np.ndarray:
         image = apply_vignette(image, vignette)
     return np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
 
+
+#: The land-cover palette the engine's own gallery uses: water, trees, flooded
+#: vegetation, crops, built area, bare ground, snow, rangeland, plus four spare
+#: categories for a classification with more classes.
+CLASSIFICATION_PALETTE = [
+    (65, 155, 223),   # water
+    (57, 125, 73),    # trees
+    (122, 135, 198),  # flooded vegetation
+    (228, 150, 53),   # crops
+    (196, 40, 27),    # built area
+    (165, 155, 143),  # bare ground
+    (168, 235, 255),  # snow
+    (227, 226, 195),  # rangeland
+    (150, 100, 200),
+    (90, 190, 170),
+    (210, 120, 160),
+    (120, 120, 120),
+]
 
 #: The water surface's roughness. Higher is a softer, wider highlight.
 WATER_ROUGHNESS = 0.35

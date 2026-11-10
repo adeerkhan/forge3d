@@ -397,3 +397,13 @@ def test_the_water_roughness_reaches_the_optics(water):
     assert settings is not None
     assert settings.optics is not None
     assert settings.optics.roughness == pytest.approx(0.7)
+
+
+def test_a_single_band_classification_overlay_is_palette_mapped():
+    """A land-cover raster is class IDs, not a picture: reading band 1 as the
+    red channel paints it grey. The classes go through the palette instead."""
+    service = load_service()
+    assert len(service.CLASSIFICATION_PALETTE) >= 8
+    # The palette is the engine gallery's land cover: water, trees, crops, ...
+    assert service.CLASSIFICATION_PALETTE[0] == (65, 155, 223)
+    assert service.CLASSIFICATION_PALETTE[4] == (196, 40, 27)
