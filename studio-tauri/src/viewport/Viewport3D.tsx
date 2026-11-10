@@ -28,6 +28,19 @@ import { lightingRig } from "./lighting";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
+/**
+ * How many pixels the frame may cost. The rendered frame is supersampled to
+ * hide the terrain's aliasing; this budget keeps the extra pixels bounded, so a
+ * small viewport gets the full 2x and a huge one less.
+ */
+const FRAME_PIXEL_BUDGET = 4_000_000;
+
+/** The supersample factor for a frame of this size: at most 2x, and only as
+ *  much as the pixel budget allows. */
+function supersampleRatio(width: number, height: number): number {
+  const pixels = Math.max(1, width * height);
+  return Math.max(1, Math.min(2, Math.sqrt(FRAME_PIXEL_BUDGET / pixels)));
+}
 /** Fly-camera keys: WASD in the view plane, Q/E down and up, Shift to sprint. */
 const FLY_KEYS = new Set(["w", "a", "s", "d", "q", "e", "shift"]);
 const ACCENT = 0xf0a94a;
@@ -1661,7 +1674,14 @@ export function Viewport3D() {
 
   /** Frame size for a Rendered viewport frame. No hidden multipliers — what
    *  the selector shows is the size the engine renders. The 4096 cap scales
-   *  the whole frame down uniformly so the aspect never changes. */
+   *  the whole frame down uniformly so the aspect never changes.
+   *
+   *  The frame is also *supersampled*: the terrain's per-cell normals alias
+   *  into sparkles when the camera is close (the DEM has many cells per
+   *  screen pixel), and the browser's downscale averages them away. Measured
+   *  on the Bryce DEM at 1180x900: 11-52 sparkle pixels at one screen pixel
+   *  of detail, 0-1 at two. The extra pixels are capped by a budget so a
+   *  large viewport stays affordable. */
   const requestSize = useCallback(() => {
     const base =
       renderScale === "project"
@@ -1670,11 +1690,21 @@ export function Viewport3D() {
           ? { width: demDims[0], height: demDims[1] }
           : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
     const factor = renderScale === "project" || renderScale === "dem" ? 1 : Number(renderScale);
+    // "project" and "dem" are absolute sizes; the viewport-relative ones get
+    // the supersample on top.
+    const ratio =
+      renderScale === "project" || renderScale === "dem"
+        ? 1
+        : supersampleRatio(base.width * factor, base.height * factor);
     const cap = 4096;
-    const shrink = Math.min(1, cap / (base.width * factor), cap / (base.height * factor));
+    const shrink = Math.min(
+      1,
+      cap / (base.width * factor * ratio),
+      cap / (base.height * factor * ratio),
+    );
     return {
-      width: Math.max(64, Math.round(base.width * factor * shrink)),
-      height: Math.max(64, Math.round(base.height * factor * shrink)),
+      width: Math.max(64, Math.round(base.width * factor * ratio * shrink)),
+      height: Math.max(64, Math.round(base.height * factor * ratio * shrink)),
     };
   }, [demDims, renderScale, size.height, size.width, state?.project.render.height, state?.project.render.width]);
   // Only Rendered composes an engine frame. Solid and Material are the live

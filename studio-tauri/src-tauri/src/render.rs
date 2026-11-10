@@ -476,7 +476,7 @@ pub struct RenderRequest {
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
-    pub fog_height_falloff: f32,
+    pub fog_reach: f32,
     /// Bloom and vignette on the finished frame.
     pub bloom_enabled: bool,
     pub bloom_threshold: f32,
@@ -517,7 +517,7 @@ impl RenderRequest {
         self.water_slope_threshold = settings.water.slope_threshold;
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
-        self.fog_height_falloff = settings.fog.height_falloff;
+        self.fog_reach = settings.fog.reach;
         self.bloom_enabled = settings.bloom.enabled;
         self.bloom_threshold = settings.bloom.threshold;
         self.bloom_softness = settings.bloom.softness;
@@ -598,7 +598,7 @@ impl RenderRequest {
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
-                    "heightFalloff": self.fog_height_falloff,
+                    "reach": self.fog_reach,
                 },
                 "bloom": {
                     "enabled": self.bloom_enabled,
@@ -708,7 +708,7 @@ impl RenderRequest {
             water_slope_threshold: 0.18,
             fog_enabled: false,
             fog_density: 0.5,
-            fog_height_falloff: 0.02,
+            fog_reach: 0.5,
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -760,7 +760,7 @@ mod tests {
             water_slope_threshold: 0.18,
             fog_enabled: false,
             fog_density: 0.5,
-            fog_height_falloff: 0.02,
+            fog_reach: 0.5,
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -857,17 +857,14 @@ mod tests {
             fog: studio_core::FogSettings {
                 enabled: true,
                 density: 1.25,
-                height_falloff: 0.03,
+                reach: 0.6,
             },
             ..studio_core::RenderSettings::default()
         };
         let payload = request().with_settings(&settings).to_payload("final", None);
         assert_eq!(payload["quality"]["fog"]["enabled"], true);
         assert_eq!(payload["quality"]["fog"]["density"], f64::from(1.25_f32));
-        assert_eq!(
-            payload["quality"]["fog"]["heightFalloff"],
-            f64::from(0.03_f32)
-        );
+        assert_eq!(payload["quality"]["fog"]["reach"], f64::from(0.6_f32));
     }
 
     #[test]

@@ -458,10 +458,8 @@ impl Project {
         {
             return Err("fog density must be between 0 and 100".to_owned());
         }
-        if !self.render.fog.height_falloff.is_finite()
-            || !(0.0..=10.0).contains(&self.render.fog.height_falloff)
-        {
-            return Err("fog height falloff must be between 0 and 10".to_owned());
+        if !self.render.fog.reach.is_finite() || !(0.01..=1.0).contains(&self.render.fog.reach) {
+            return Err("fog reach must be between 0.01 and 1".to_owned());
         }
         if !self.render.bloom.threshold.is_finite()
             || !(0.0..=1.0).contains(&self.render.bloom.threshold)
@@ -655,9 +653,11 @@ pub struct FogSettings {
     /// Fog density; 0 is no fog.
     #[serde(default = "default_fog_density")]
     pub density: f32,
-    /// How fast the fog thins with altitude, per metre.
-    #[serde(default = "default_fog_height_falloff")]
-    pub height_falloff: f32,
+    /// How far up the terrain the fog climbs, as a fraction of its height
+    /// (0.5 = halfway up the mountain). The engine wants a falloff per
+    /// metre; the render service converts.
+    #[serde(default = "default_fog_reach")]
+    pub reach: f32,
 }
 
 impl Default for FogSettings {
@@ -665,7 +665,7 @@ impl Default for FogSettings {
         Self {
             enabled: false,
             density: default_fog_density(),
-            height_falloff: default_fog_height_falloff(),
+            reach: default_fog_reach(),
         }
     }
 }
@@ -873,8 +873,8 @@ fn default_fog_density() -> f32 {
     0.5
 }
 
-fn default_fog_height_falloff() -> f32 {
-    0.02
+fn default_fog_reach() -> f32 {
+    0.5
 }
 
 fn default_bloom_threshold() -> f32 {

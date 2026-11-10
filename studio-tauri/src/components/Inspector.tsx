@@ -675,19 +675,18 @@ export function AtmosphereSection() {
               onCommit={(density) => commit({ fog: { ...render.fog, density } })}
             />
             <NumberField
-              label="Height falloff"
-              value={render.fog.heightFalloff}
-              step={0.005}
-              min={0}
-              max={10}
-              onCommit={(heightFalloff) =>
-                commit({ fog: { ...render.fog, heightFalloff } })
-              }
+              label="Reach"
+              value={render.fog.reach}
+              step={0.05}
+              min={0.01}
+              max={1}
+              onCommit={(reach) => commit({ fog: { ...render.fog, reach } })}
             />
             <p className="hint">
               Height-based fog, applied after the lighting and before the
-              tone-map: it thins with altitude, so the valley keeps its haze
-              and the peaks stay clear.
+              tone-map. Reach is how far up the terrain the haze climbs, as a
+              fraction of its height — 0.5 is halfway up the mountain, so the
+              valley keeps its haze and the peaks stay clear.
             </p>
           </>
         )}
@@ -728,9 +727,12 @@ export function AtmosphereSection() {
             />
             <p className="hint">
               The engine derives the water mask from the DEM: ground below the
-              level that is flat enough to hold it. Level 0 picks the lowest
-              15% of the terrain automatically. The slope threshold is metres
-              of rise per DEM cell — steeper ground stays dry.
+              level that is flat enough to hold it. The level is an absolute
+              elevation in the DEM's own metres, so it has to sit inside the
+              terrain's range — 0 picks the lowest 15% automatically, and a
+              level below the terrain falls back to that too. The slope
+              threshold is metres of rise per DEM cell — steeper ground stays
+              dry.
             </p>
           </>
         )}

@@ -86,10 +86,7 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["water"]["enabled"], false);
     assert_eq!(value["render"]["water"]["level"], 0.0);
-    expect_keys(
-        &value["render"]["fog"],
-        &["enabled", "density", "heightFalloff"],
-    );
+    expect_keys(&value["render"]["fog"], &["enabled", "density", "reach"]);
     assert_eq!(value["render"]["fog"]["enabled"], false);
     expect_keys(
         &value["render"]["bloom"],

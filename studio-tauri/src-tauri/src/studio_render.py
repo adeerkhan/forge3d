@@ -188,18 +188,27 @@ class StudioRenderer:
         return cached
 
     def fog_settings(self, quality: Dict[str, Any]):
-        """The engine's height-based fog, or None when the project has none."""
+        """The engine's height-based fog, or None when the project has none.
+
+        The engine's `height_falloff` is per metre, so on a 450 m mountain a
+        per-metre falloff leaves no haze above the valley floor. The Studio
+        asks for a *reach*: the fraction of the terrain's height the fog
+        climbs, and converts it here.
+        """
         fog = quality.get("fog") or {}
         if not bool(fog.get("enabled", False)):
             return None
         from forge3d.terrain_params import FogSettings
 
+        low, high = self.range
+        span = max(1.0, (high - low) * self.scale)
+        reach = float(fog.get("reach", 0.5) or 0.5)
         # Height-based exponential fog, applied after the PBR pass and before
         # the tonemap. The base height is left to the engine: it computes it
         # from the terrain bounds.
         return FogSettings(
             density=float(fog.get("density", 0.5)),
-            height_falloff=float(fog.get("heightFalloff", 0.02)),
+            height_falloff=1.0 / max(reach * span, 1e-6),
         )
 
     def water(self, request: Dict[str, Any]):
@@ -226,8 +235,12 @@ class StudioRenderer:
             return None, None
         level = float(water.get("level", 0.0) or 0.0)
         slope = float(water.get("slopeThreshold", 0.02) or 0.0)
-        # 0 means auto: the engine's own default, the lowest 15%.
-        scaled_level = None if level == 0.0 else level * self.scale
+        # 0 means auto: the engine's own default, the lowest 15%. A level
+        # *below* the terrain means the same thing — there is no water down
+        # there, and a silent empty frame reads as a broken control. Fall back
+        # to auto rather than render nothing.
+        below = self.range[0]
+        scaled_level = None if level <= below else level * self.scale
         try:
             mask = derive_water_mask(
                 self.heights,

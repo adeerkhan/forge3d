@@ -210,12 +210,13 @@ def test_aether_refuses_parameters_the_shipped_bake_does_not_cover(sky_settings)
 
 
 class _WaterStub:
-    """The two attributes `water_mask` reads: the scaled heights and the
-    scale that produced them."""
+    """What the water and fog helpers read: the scaled heights, the scale that
+    produced them, and the DEM's elevation range."""
 
-    def __init__(self, heights, scale):
+    def __init__(self, heights, scale, range=(0.0, 100.0)):
         self.heights = heights
         self.scale = scale
+        self.range = range
 
 
 @pytest.fixture
@@ -352,15 +353,21 @@ def test_a_diagonal_chain_of_cells_is_not_a_lake():
 
 def test_fog_is_off_unless_the_project_asks_for_it():
     service = load_service()
-    assert service.StudioRenderer.fog_settings(None, {}) is None
-    assert service.StudioRenderer.fog_settings(None, {"fog": {"enabled": False}}) is None
+    stub = _WaterStub(heights=np.zeros((4, 4), dtype=np.float32), scale=1.0)
+    assert service.StudioRenderer.fog_settings(stub, {}) is None
+    assert service.StudioRenderer.fog_settings(stub, {"fog": {"enabled": False}}) is None
 
 
 def test_fog_carries_the_projects_density_and_falloff():
     service = load_service()
+    stub = _WaterStub(
+        heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(0.0, 450.0)
+    )
     settings = service.StudioRenderer.fog_settings(
-        None, {"fog": {"enabled": True, "density": 1.5, "heightFalloff": 0.04}}
+        stub, {"fog": {"enabled": True, "density": 1.5, "reach": 0.4}}
     )
     assert settings is not None
     assert settings.density == pytest.approx(1.5)
-    assert settings.height_falloff == pytest.approx(0.04)
+    # Reach is a fraction of the terrain's height; the engine wants a falloff
+    # per metre.
+    assert settings.height_falloff > 0.0

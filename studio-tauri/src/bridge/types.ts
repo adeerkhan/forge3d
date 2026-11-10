@@ -175,8 +175,8 @@ export interface FogSettings {
   enabled: boolean;
   /** Fog density; 0 is no fog. */
   density: number;
-  /** How fast the fog thins with altitude, per metre. */
-  heightFalloff: number;
+  /** How far up the terrain the fog climbs, as a fraction of its height. */
+  reach: number;
 }
 
 /** Bloom on the finished frame. Display-referred: the threshold is a display
