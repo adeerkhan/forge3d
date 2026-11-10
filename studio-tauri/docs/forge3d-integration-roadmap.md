@@ -156,11 +156,33 @@ All use §2. Nothing new is introduced beyond the settings below.
   engine's depth-graded blue, not a physical surface.
 - Check: schema contract, payload assertion, four service tests, round-trip.
 
-### 5.3 Clouds (0.5 day)
+### 5.3 Clouds (0.5 day) — **blocked, measured**
 - Settings: `clouds.enabled`, `coverage`, `density`, `shadowStrength`.
 - Service: `CloudSettings(enabled, shadows_enabled=…, coverage, density,
   shadow_strength, quality="medium")`.
-- Check: round-trip.
+- **A cloud shadow is not a post-process**, so the service-side route that
+  shipped bloom and vignette cannot deliver it.
+- The engine's cloud shadows are real — `ConcordiaFrame::configure_clouds`
+  reads `coverage`, `density` and `shadow_strength` and drives
+  `CloudShadowRenderer` — but they live in **`render_interactive`**, and
+  `render_terrain_pbr_pom` takes no `clouds` argument at all. Measured:
+  `CloudSettings(enabled, shadows_enabled, coverage=0.8, density=0.8,
+  shadow_strength=0.6)` on the request changes **0 pixels**.
+- `render_interactive` is itself **broken today**, for an unrelated reason:
+  its shader assembly does `replace_once(source, "let shadow_z = h_curved *
+  h_exag;", …)`, but the terrain shader now says `let shadow_z =
+  det_barrier((h_curved - 0.5) * h_range) * h_exag;` — the TERRA-DETERMINATA
+  rewrite changed the spelling. The path fails with `CONCORDIA shader contract:
+  expected one "let shadow_z = h_curved * h_exag;", found 0` before it renders
+  anything. The fix is in Rust (not a shader source, so no pinned-hash change),
+  but there may be more stale contracts behind it.
+- Adopting `render_interactive` for Studio would also move the render path
+  (shared-depth HDR + the CONCORDIA surface), which changes the measured
+  anchors — the HDRI sample hash `848cea2e6fdcc450` and the still/preview
+  fidelity work.
+- Trigger: someone needs clouds in a Studio render, and is willing to take the
+  engine-side fix (repair the interactive path's contract, then adopt
+  `render_interactive` with the anchors re-measured).
 
 ### 5.4 Post: bloom + lens vignette (0.5 day) — **done (service-side)**
 - Settings: `bloom.enabled`, `threshold`, `softness`, `intensity`; `vignette`

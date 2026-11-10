@@ -824,8 +824,13 @@ mod tests {
             .with_settings(&settings)
             .to_payload("preview", None);
         assert_eq!(payload["quality"]["water"]["enabled"], true);
-        assert_eq!(payload["quality"]["water"]["level"], 1650.0);
-        assert_eq!(payload["quality"]["water"]["slopeThreshold"], 0.05);
+        // The payload carries f32 values widened to f64, so the expected side
+        // is the f32 widened the same way.
+        assert_eq!(payload["quality"]["water"]["level"], f64::from(1650.0_f32));
+        assert_eq!(
+            payload["quality"]["water"]["slopeThreshold"],
+            f64::from(0.05_f32)
+        );
     }
 
     #[test]
@@ -842,10 +847,10 @@ mod tests {
         };
         let payload = request().with_settings(&settings).to_payload("final", None);
         assert_eq!(payload["quality"]["bloom"]["enabled"], true);
-        assert_eq!(payload["quality"]["bloom"]["threshold"], 0.6);
-        assert_eq!(payload["quality"]["bloom"]["softness"], 0.1);
-        assert_eq!(payload["quality"]["bloom"]["intensity"], 0.5);
-        assert_eq!(payload["quality"]["vignette"], 0.4);
+        assert_eq!(payload["quality"]["bloom"]["threshold"], f64::from(0.6_f32));
+        assert_eq!(payload["quality"]["bloom"]["softness"], f64::from(0.1_f32));
+        assert_eq!(payload["quality"]["bloom"]["intensity"], f64::from(0.5_f32));
+        assert_eq!(payload["quality"]["vignette"], f64::from(0.4_f32));
     }
 
     /// The fixture `studio-tauri/tests/fixtures/lighting-rig.json` is read by
