@@ -364,10 +364,12 @@ def test_fog_carries_the_projects_density_and_falloff():
         heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(0.0, 450.0)
     )
     settings = service.StudioRenderer.fog_settings(
-        stub, {"fog": {"enabled": True, "density": 1.5, "reach": 0.4}}
+        stub,
+        {"fog": {"enabled": True, "density": 1.5, "reach": 0.4, "inscatter": [1.0, 0.9, 0.8]}},
     )
     assert settings is not None
     assert settings.density == pytest.approx(1.5)
+    assert settings.inscatter == pytest.approx((1.0, 0.9, 0.8))
     # Reach is a fraction of the terrain's height; the engine wants a falloff
     # per metre.
     assert settings.height_falloff > 0.0

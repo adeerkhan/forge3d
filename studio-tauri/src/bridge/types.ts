@@ -177,6 +177,8 @@ export interface FogSettings {
   density: number;
   /** How far up the terrain the fog climbs, as a fraction of its height. */
   reach: number;
+  /** The colour the fog scatters, linear RGB 0..=1. White is neutral. */
+  inscatter: [number, number, number];
 }
 
 /** Bloom on the finished frame. Display-referred: the threshold is a display

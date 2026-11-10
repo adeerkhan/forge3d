@@ -466,6 +466,15 @@ impl Project {
         if !self.render.fog.reach.is_finite() || !(0.01..=1.0).contains(&self.render.fog.reach) {
             return Err("fog reach must be between 0.01 and 1".to_owned());
         }
+        if self
+            .render
+            .fog
+            .inscatter
+            .iter()
+            .any(|c| !c.is_finite() || !(0.0..=1.0).contains(c))
+        {
+            return Err("fog inscatter colour must be three values between 0 and 1".to_owned());
+        }
         if !self.render.bloom.threshold.is_finite()
             || !(0.0..=1.0).contains(&self.render.bloom.threshold)
         {
@@ -660,7 +669,7 @@ pub struct FogSettings {
     /// Apply the fog. Density 0 is the engine's own no-op.
     #[serde(default)]
     pub enabled: bool,
-    /// Fog density; 0 is no fog.
+    /// Fog density; 0 is no fog. 0.05 is a haze, 0.5 is a fog bank.
     #[serde(default = "default_fog_density")]
     pub density: f32,
     /// How far up the terrain the fog climbs, as a fraction of its height
@@ -668,6 +677,10 @@ pub struct FogSettings {
     /// metre; the render service converts.
     #[serde(default = "default_fog_reach")]
     pub reach: f32,
+    /// The colour the fog scatters into the view, linear RGB 0..=1. White is
+    /// the neutral default; a warm tint reads as dust, a cool one as mist.
+    #[serde(default = "default_fog_inscatter")]
+    pub inscatter: [f32; 3],
 }
 
 impl Default for FogSettings {
@@ -676,6 +689,7 @@ impl Default for FogSettings {
             enabled: false,
             density: default_fog_density(),
             reach: default_fog_reach(),
+            inscatter: default_fog_inscatter(),
         }
     }
 }
@@ -880,7 +894,12 @@ fn default_sky_exposure() -> f32 {
 }
 
 fn default_fog_density() -> f32 {
-    0.5
+    // 0.5 veiled 72% of a 922x795 frame; 0.05 is a haze you can see through.
+    0.05
+}
+
+fn default_fog_inscatter() -> [f32; 3] {
+    [1.0, 1.0, 1.0]
 }
 
 fn default_fog_reach() -> f32 {

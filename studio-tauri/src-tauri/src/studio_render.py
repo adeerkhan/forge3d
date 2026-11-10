@@ -206,9 +206,13 @@ class StudioRenderer:
         # Height-based exponential fog, applied after the PBR pass and before
         # the tonemap. The base height is left to the engine: it computes it
         # from the terrain bounds.
+        inscatter = fog.get("inscatter") or (1.0, 1.0, 1.0)
         return FogSettings(
-            density=float(fog.get("density", 0.5)),
+            density=float(fog.get("density", 0.05)),
             height_falloff=1.0 / max(reach * span, 1e-6),
+            # The colour the haze scatters into the view. White is neutral; it
+            # is what makes the fog read as air rather than as a white veil.
+            inscatter=tuple(float(c) for c in inscatter),
         )
 
     def water(self, request: Dict[str, Any]):

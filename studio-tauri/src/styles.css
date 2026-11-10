@@ -1317,8 +1317,14 @@ kbd {
   border-color: var(--accent);
 }
 
-/* Opens upward: the control sits at the bottom of the viewport. */
-.viewport-rendered__menu {
+/* Opens upward: the control sits at the bottom of the viewport, so a menu
+   below it would fall off the edge and be clipped by the viewport's
+   `overflow: hidden` — which is exactly what happened while this override sat
+   *before* `.add-menu__dropdown` in the file: same specificity, later wins, so
+   the dropdown's `top: calc(100% + 8px)` won and the menu opened downward and
+   unclickable. Scoping it to the bar makes the override win regardless of the
+   order, and `left: auto` stops the dropdown's `left: 0` from stretching it. */
+.viewport-rendered .viewport-rendered__menu {
   top: auto;
   bottom: calc(100% + 6px);
   right: 0;

@@ -478,6 +478,7 @@ pub struct RenderRequest {
     pub fog_enabled: bool,
     pub fog_density: f32,
     pub fog_reach: f32,
+    pub fog_inscatter: [f32; 3],
     /// Bloom and vignette on the finished frame.
     pub bloom_enabled: bool,
     pub bloom_threshold: f32,
@@ -520,6 +521,7 @@ impl RenderRequest {
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
+        self.fog_inscatter = settings.fog.inscatter;
         self.bloom_enabled = settings.bloom.enabled;
         self.bloom_threshold = settings.bloom.threshold;
         self.bloom_softness = settings.bloom.softness;
@@ -617,6 +619,7 @@ impl RenderRequest {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
                     "reach": self.fog_reach,
+                    "inscatter": self.fog_inscatter,
                 },
                 "bloom": {
                     "enabled": self.bloom_enabled,
@@ -726,8 +729,9 @@ impl RenderRequest {
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
             fog_enabled: false,
-            fog_density: 0.5,
+            fog_density: 0.05,
             fog_reach: 0.5,
+            fog_inscatter: [1.0, 1.0, 1.0],
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -781,6 +785,7 @@ mod tests {
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
+            fog_inscatter: [1.0, 1.0, 1.0],
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -894,6 +899,7 @@ mod tests {
                 enabled: true,
                 density: 1.25,
                 reach: 0.6,
+                inscatter: [1.0, 0.9, 0.8],
             },
             ..studio_core::RenderSettings::default()
         };
@@ -901,6 +907,13 @@ mod tests {
         assert_eq!(payload["quality"]["fog"]["enabled"], true);
         assert_eq!(payload["quality"]["fog"]["density"], f64::from(1.25_f32));
         assert_eq!(payload["quality"]["fog"]["reach"], f64::from(0.6_f32));
+        // The tint reaches the engine: it is what makes the haze read as air
+        // rather than as a white veil.
+        assert_eq!(payload["quality"]["fog"]["inscatter"][0], 1.0);
+        assert_eq!(
+            payload["quality"]["fog"]["inscatter"][2],
+            f64::from(0.8_f32)
+        );
     }
 
     #[test]
