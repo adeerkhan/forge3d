@@ -1064,6 +1064,68 @@ mod tests {
         assert!(!state.status().running);
     }
 
+    /// End-to-end proof that the settings added in 5.6 and 5.8 reach pixels
+    /// through the real payload — not just that the service's own tests pass.
+    /// Ignored by default like the frame test above:
+    /// `cargo test -p forge3d-studio-shell the_new_settings -- --ignored`.
+    #[test]
+    #[ignore = "spawns the engine Python session and the GPU"]
+    fn the_new_settings_reach_the_pixels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = root.join(".venv/bin/python");
+        let dem = root.join("assets/tif/Bryce_Canyon_1024.tif");
+        if !python.exists() || !dem.exists() {
+            eprintln!("skipping: this checkout has no .venv/engine DEM pair");
+            return;
+        }
+
+        let state = RenderState::new();
+        let frame = |quality: serde_json::Value| {
+            let payload = json!({
+                "width": 160,
+                "height": 120,
+                "camera": {"phiDeg": 310.0, "thetaDeg": 60.0, "radius": 6000.0, "target": [0, 0, 0], "fovDeg": 45.0},
+                "sun": {"azimuthDeg": 135.0, "elevationDeg": 12.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
+                "quality": quality,
+                "exposure": 1.35,
+                "iblIntensity": 1.0,
+                "environmentBackgroundIntensity": 1.0
+            });
+            state
+                .render(
+                    python.to_str().expect("utf-8 python path"),
+                    dem.to_str().expect("utf-8 dem path"),
+                    payload,
+                    FRAME_TIMEOUT,
+                )
+                .expect("one frame from the service")
+        };
+
+        let plain = frame(json!({"sky": false}));
+        // The same request twice is the same bytes, so any difference below
+        // belongs to the setting under test.
+        let again = frame(json!({"sky": false}));
+        assert_eq!(plain.png, again.png, "the service is deterministic");
+
+        let colormap = frame(json!({
+            "sky": false,
+            "colormap": "viridis",
+            "colormapStrength": 1.0
+        }));
+        assert_ne!(
+            plain.png, colormap.png,
+            "the colormap must reach the pixels"
+        );
+
+        let sun = frame(json!({
+            "sky": false,
+            "sunVisibility": {"enabled": true, "distance": 4000.0, "steps": 32}
+        }));
+        assert_ne!(plain.png, sun.png, "sun visibility must reach the pixels");
+
+        state.stop();
+    }
+
     #[test]
     fn reply_wait_returns_the_reply_without_a_poll_interval() {
         let state = RenderState::new();

@@ -353,6 +353,10 @@ All use §2. Nothing new is introduced beyond the settings below.
   command too), sun reach 100–20000 m, ray steps 16–64 (engine `< 64`), sky
   turbidity 1–10, sky exposure 0–4, shadow map 512–4096 (engine `<= 8192`),
   colormap strength 0–1, overlay opacity 0–1, fog density `>= 0`.
+- **The wiring is proven end to end**, not only in unit tests: an ignored GPU
+  test (`the_new_settings_reach_the_pixels`) renders one frame twice (identical
+  bytes), then with a colormap and with sun visibility (different bytes), so a
+  key-name drift between the Rust payload and the service fails a test.
 - **No client-side re-implementation.** Supersampling is `render_scale`; the
   class palette is `thematic.apply_palette`; the colormap is
   `Colormap1D`/`OverlayLayer.from_colormap1d`; the camera is
