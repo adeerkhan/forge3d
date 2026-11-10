@@ -454,6 +454,24 @@ impl Project {
         {
             return Err("water slope threshold must be between 0 and 1".to_owned());
         }
+        if !self.render.bloom.threshold.is_finite()
+            || !(0.0..=1.0).contains(&self.render.bloom.threshold)
+        {
+            return Err("bloom threshold must be between 0 and 1".to_owned());
+        }
+        if !self.render.bloom.softness.is_finite()
+            || !(0.0..=1.0).contains(&self.render.bloom.softness)
+        {
+            return Err("bloom softness must be between 0 and 1".to_owned());
+        }
+        if !self.render.bloom.intensity.is_finite()
+            || !(0.0..=2.0).contains(&self.render.bloom.intensity)
+        {
+            return Err("bloom intensity must be between 0 and 2".to_owned());
+        }
+        if !self.render.vignette.is_finite() || !(0.0..=1.0).contains(&self.render.vignette) {
+            return Err("vignette must be between 0 and 1".to_owned());
+        }
         self.timeline.validate()?;
 
         Ok(())
@@ -614,6 +632,42 @@ impl Default for WaterSettings {
     }
 }
 
+/// Bloom on the finished frame.
+///
+/// The engine's GPU bloom (the terrain bloom processor) and its vignette (in
+/// the viewer's terrain shader) live in render paths Studio does not use: the
+/// terrain path Studio renders through has neither, and both were measured to
+/// change nothing there. These are the same two effects applied to the finished
+/// frame instead — display-referred, so the threshold is a *display* brightness
+/// rather than an HDR radiance.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BloomSettings {
+    /// Glow the bright pixels.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Display brightness above which pixels glow, 0..=1.
+    #[serde(default = "default_bloom_threshold")]
+    pub threshold: f32,
+    /// Width of the threshold transition, 0..=1.
+    #[serde(default = "default_bloom_softness")]
+    pub softness: f32,
+    /// How much glow is added, 0..=2.
+    #[serde(default = "default_bloom_intensity")]
+    pub intensity: f32,
+}
+
+impl Default for BloomSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            threshold: default_bloom_threshold(),
+            softness: default_bloom_softness(),
+            intensity: default_bloom_intensity(),
+        }
+    }
+}
+
 /// Render output configuration — the Forge3D controls the pipeline exposes.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -689,6 +743,12 @@ pub struct RenderSettings {
     /// slope threshold rather than a mask.
     #[serde(default)]
     pub water: WaterSettings,
+    /// Bloom on the finished frame: the bright pixels glow.
+    #[serde(default)]
+    pub bloom: BloomSettings,
+    /// Vignette: corner darkening, 0..=1. 0 is no vignette.
+    #[serde(default)]
+    pub vignette: f32,
 }
 
 /// The analytic sky models the engine can draw as a backdrop.
@@ -768,6 +828,18 @@ fn default_sky_exposure() -> f32 {
     0.08
 }
 
+fn default_bloom_threshold() -> f32 {
+    0.8
+}
+
+fn default_bloom_softness() -> f32 {
+    0.2
+}
+
+fn default_bloom_intensity() -> f32 {
+    0.3
+}
+
 fn default_water_slope_threshold() -> f32 {
     // The engine's own water-and-clouds example uses 0.18; the library default
     // (0.02) is flat-only and leaves a puddle.
@@ -795,6 +867,8 @@ impl Default for RenderSettings {
             sky_ground_albedo: default_sky_ground_albedo(),
             sky_exposure: default_sky_exposure(),
             water: WaterSettings::default(),
+            bloom: BloomSettings::default(),
+            vignette: 0.0,
         }
     }
 }

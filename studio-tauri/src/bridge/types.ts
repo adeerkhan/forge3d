@@ -161,6 +161,22 @@ export interface RenderSettings {
   /** Water on the terrain: the level and the slope threshold the render
    *  service turns into the engine's water mask. */
   water: WaterSettings;
+  /** Bloom on the finished frame: the bright pixels glow. */
+  bloom: BloomSettings;
+  /** Vignette: corner darkening, 0..=1. */
+  vignette: number;
+}
+
+/** Bloom on the finished frame. Display-referred: the threshold is a display
+ *  brightness, not an HDR radiance. */
+export interface BloomSettings {
+  enabled: boolean;
+  /** Display brightness above which pixels glow, 0..=1. */
+  threshold: number;
+  /** Width of the threshold transition, 0..=1. */
+  softness: number;
+  /** How much glow is added, 0..=2. */
+  intensity: number;
 }
 
 /** Water on the terrain. The terrain path takes a mask, not a level: the

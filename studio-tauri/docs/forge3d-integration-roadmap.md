@@ -38,6 +38,8 @@ be a payload field: vector layers and meshes.
 | Captured camera keeps its own orientation (it used to be re-aimed at the world origin) | done |
 | 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
 | 5.2 water — level + slope threshold, mask derived with the engine's own `derive_water_mask` | done (optics deferred) |
+| 5.4 bloom + vignette — service-side post-process on the finished frame | done (engine-native needs a pinned-hash refresh) |
+| 5.3 clouds — the engine's cloud shadows exist, but only `render_interactive` consumes them | **not started** (needs the cloud pass in the terrain draw path) |
 | One lighting rig shared by preview and payload (fixture read by Rust and node) | done |
 | 8.0b — granted device features in the probe/status bar | done |
 | 5.1 sky & atmosphere — model, turbidity, ground albedo, exposure; AETHER gated on the shipped bake | done (backdrop-only by design) |
@@ -160,11 +162,31 @@ All use §2. Nothing new is introduced beyond the settings below.
   shadow_strength, quality="medium")`.
 - Check: round-trip.
 
-### 5.4 Post: bloom + lens vignette (0.5 day)
-- Settings: `bloom.enabled`, `threshold`, `softness`, `intensity`;
-  `vignette` 0–1 (`LensEffectsSettings.vignette_strength`).
+### 5.4 Post: bloom + lens vignette (0.5 day) — **done (service-side)**
+- Settings: `bloom.enabled`, `threshold`, `softness`, `intensity`; `vignette`
+  0–1. A `BloomSettings` group plus one scalar on `RenderSettings`.
+- **Not the engine's path.** The engine's GPU bloom (`TerrainBloomProcessor`)
+  and its vignette (in the viewer's terrain shader) live in render paths the
+  Studio does not use: the terrain path Studio renders through has neither, and
+  both were **measured to change 0 pixels** there. The engine-native wiring
+  would mean an HDR target in the terrain path and a change to
+  `terrain_pbr_pom.wgsl`, which is in `shader_sources::terrain_parts()` —
+  that refreshes `PINNED_TERRAIN_SOURCE_HASH` (owner approval) and moves the
+  determinism anchors.
+- Shipped instead as a **service-side post-process** on the finished frame,
+  next to the denoise: bloom is a bright-pass plus a separable box blur, the
+  vignette a smooth radial falloff. Both are *display-referred* — the terrain
+  shader has already tone-mapped the frame — so the bloom threshold is a
+  display brightness (0.8), not the engine's HDR 1.5.
+- Scope: the Rendered preview and the still show them; the Solid and Material
+  previews do not, like AOVs and denoise. AOV files are written from the raw
+  render, so they never carry the glow.
+- Measured on the Bryce DEM: bloom off + vignette 0 vs the dry frame is
+  **0 pixels changed** (byte-identical default); bloom on changes 760,908
+  channel samples and lifts the brightest pixel 171 → 225; a 0.9 vignette takes
+  the corner 159.7 → 16.7 and leaves the centre at 138.7.
 - Defer DoF, motion blur, TAA: costly and rarely wanted.
-- Check: round-trip.
+- Check: schema contract, payload assertion, six service tests.
 
 ### 5.5 Shadows (0.5 day) — **partly done**
 - Shipped: `shadowTechnique` (`pcf` | `pcss`) and `shadowResolution`

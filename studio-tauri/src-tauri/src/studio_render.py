@@ -521,6 +521,8 @@ class StudioRenderer:
                     "(install it with `pip install oidn` / `pip install pyoidn` next to the engine)" % (exc,)
                 ) from exc
 
+        rgb = apply_post_effects(rgb, quality)
+
         png = encode_png(rgb)
 
         output = request.get("output")
@@ -544,6 +546,97 @@ class StudioRenderer:
             "height": height,
             "png": base64.b64encode(png).decode("ascii"),
         }
+
+
+def _box_blur_axis(image: np.ndarray, radius: int, axis: int) -> np.ndarray:
+    """One separable box-blur pass along `axis`."""
+    n = image.shape[axis]
+    if radius < 1 or n == 0:
+        return image
+    pad = [(0, 0)] * image.ndim
+    pad[axis] = (radius + 1, radius)
+    padded = np.pad(image, pad, mode="edge")
+    zero = np.zeros_like(np.take(padded, [0], axis=axis))
+    cumulative = np.concatenate([zero, np.cumsum(padded, axis=axis)], axis=axis)
+    high = np.take(cumulative, np.arange(2 * radius + 1, n + 2 * radius + 1), axis=axis)
+    low = np.take(cumulative, np.arange(0, n), axis=axis)
+    return (high - low) / float(2 * radius + 1)
+
+
+def _box_blur(image: np.ndarray, radius: int) -> np.ndarray:
+    """A separable box blur. Three passes approximate a Gaussian closely
+    enough for a glow, and stay linear in the pixel count."""
+    out = image
+    for _ in range(3):
+        out = _box_blur_axis(out, radius, 0)
+        out = _box_blur_axis(out, radius, 1)
+    return out
+
+
+def apply_bloom(
+    image: np.ndarray,
+    threshold: float,
+    softness: float,
+    intensity: float,
+    radius: int,
+) -> np.ndarray:
+    """Glow the bright pixels of a display-referred frame.
+
+    The engine's GPU bloom works on HDR radiance (its own default threshold is
+    1.5, "HDR only"). The frame here is display-referred — the terrain shader
+    already tone-mapped it — so the threshold is a *display* brightness: 0.8
+    glows the highlights of an already-exposed image.
+    """
+    luma = image @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    if softness > 0.0:
+        weight = np.clip((luma - (threshold - softness)) / (2.0 * softness), 0.0, 1.0)
+    else:
+        weight = (luma > threshold).astype(np.float32)
+    glow = _box_blur(image * weight[:, :, None], radius)
+    return np.clip(image + glow * float(intensity), 0.0, 1.0)
+
+
+def apply_vignette(image: np.ndarray, strength: float) -> np.ndarray:
+    """Corner darkening: 0 leaves the frame alone, 1 blacks the corners."""
+    if strength <= 0.0:
+        return image
+    height, width = image.shape[:2]
+    y = (np.arange(height, dtype=np.float32) + 0.5) / height * 2.0 - 1.0
+    x = (np.arange(width, dtype=np.float32) + 0.5) / width * 2.0 - 1.0
+    radius = np.sqrt(x[None, :] ** 2 + y[:, None] ** 2) / np.sqrt(2.0)
+    falloff = np.clip((radius - 0.5) / 0.5, 0.0, 1.0)
+    falloff = falloff * falloff * (3.0 - 2.0 * falloff)
+    return image * (1.0 - float(strength) * falloff)[:, :, None]
+
+
+def apply_post_effects(rgb: np.ndarray, quality: Dict[str, Any]) -> np.ndarray:
+    """Bloom, then vignette, on the finished frame.
+
+    Both are display-referred: the terrain shader has already tone-mapped the
+    frame, so the engine's HDR bloom threshold has no meaning here. The
+    engine's own GPU bloom and vignette live in render paths this one does not
+    use — measured, they changed nothing there.
+    """
+    bloom = quality.get("bloom") or {}
+    vignette = float(quality.get("vignette", 0.0) or 0.0)
+    if not bool(bloom.get("enabled", False)) and vignette <= 0.0:
+        # Nothing to do: hand the frame straight back, byte for byte.
+        return rgb
+    image = rgb.astype(np.float32) / 255.0
+    if bool(bloom.get("enabled", False)):
+        height, width = image.shape[:2]
+        # The glow scales with the frame, so a 4K still glows like a preview.
+        radius = max(2, int(round(min(height, width) / 120.0)))
+        image = apply_bloom(
+            image,
+            float(bloom.get("threshold", 0.8)),
+            float(bloom.get("softness", 0.2)),
+            float(bloom.get("intensity", 0.3)),
+            radius,
+        )
+    if vignette > 0.0:
+        image = apply_vignette(image, vignette)
+    return np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
 
 
 def encode_png(rgb: np.ndarray) -> bytes:

@@ -271,3 +271,53 @@ def test_level_zero_is_the_engines_own_auto_default(water_mask):
     # Auto is the engine's 15th percentile, so most of the flat ground is wet.
     assert mask.mean() > 0.5
     assert mask[3, 3] == 0.0
+
+
+def test_bloom_leaves_a_flat_frame_alone():
+    """Below the threshold there is nothing to glow."""
+    service = load_service()
+    frame = np.full((16, 16, 3), 100, dtype=np.uint8)
+    out = service.apply_bloom(frame.astype(np.float32) / 255.0, 0.8, 0.2, 0.5, 2)
+    assert np.allclose(out, frame / 255.0, atol=1e-6)
+
+
+def test_bloom_spreads_a_bright_pixel_into_its_neighbours():
+    service = load_service()
+    frame = np.zeros((32, 32, 3), dtype=np.float32)
+    frame[16, 16] = 1.0
+    out = service.apply_bloom(frame, 0.5, 0.0, 1.0, 2)
+    assert out[16, 16, 0] > 0.0
+    # The glow reaches a neighbour, which is the whole point of bloom.
+    assert out[16, 17, 0] > 0.0
+    # ... and a pixel far away stays dark.
+    assert out[0, 0, 0] == 0.0
+
+
+def test_bloom_intensity_scales_the_glow():
+    service = load_service()
+    frame = np.zeros((32, 32, 3), dtype=np.float32)
+    frame[16, 16] = 1.0
+    weak = service.apply_bloom(frame, 0.5, 0.0, 0.2, 2)
+    strong = service.apply_bloom(frame, 0.5, 0.0, 1.0, 2)
+    assert strong[16, 17, 0] > weak[16, 17, 0]
+
+
+def test_vignette_darkens_the_corners_and_not_the_centre():
+    service = load_service()
+    frame = np.ones((64, 64, 3), dtype=np.float32)
+    out = service.apply_vignette(frame, 1.0)
+    assert out[32, 32, 0] == pytest.approx(1.0)   # the centre
+    assert out[0, 0, 0] < 0.2                      # the corner
+
+
+def test_vignette_zero_leaves_the_frame_alone():
+    service = load_service()
+    frame = np.ones((16, 16, 3), dtype=np.float32)
+    assert np.allclose(service.apply_vignette(frame, 0.0), frame)
+
+
+def test_post_effects_are_off_until_the_project_asks():
+    service = load_service()
+    frame = np.full((16, 16, 3), 128, dtype=np.uint8)
+    out = service.apply_post_effects(frame, {})
+    assert np.array_equal(out, frame)

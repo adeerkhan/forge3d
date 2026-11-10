@@ -73,6 +73,8 @@ fn project_document_key_shape_is_stable() {
             "skyGroundAlbedo",
             "skyExposure",
             "water",
+            "bloom",
+            "vignette",
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
@@ -83,6 +85,12 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["water"]["enabled"], false);
     assert_eq!(value["render"]["water"]["level"], 0.0);
+    expect_keys(
+        &value["render"]["bloom"],
+        &["enabled", "threshold", "softness", "intensity"],
+    );
+    assert_eq!(value["render"]["bloom"]["enabled"], false);
+    assert_eq!(value["render"]["vignette"], 0.0);
     // The default project uses the built-in studio sky.
     assert_eq!(value["render"]["environment"], serde_json::Value::Null);
 

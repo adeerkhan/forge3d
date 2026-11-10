@@ -601,6 +601,61 @@ export function RenderSettingsEditor() {
         </p>
       </Section>
 
+      <Section title="Post" id="render-post">
+        <Toggle
+          label="Bloom the highlights"
+          checked={render.bloom.enabled}
+          onChange={(enabled) => commit({ bloom: { ...render.bloom, enabled } })}
+        />
+        {render.bloom.enabled && (
+          <>
+            <NumberField
+              label="Threshold"
+              value={render.bloom.threshold}
+              step={0.05}
+              min={0}
+              max={1}
+              onCommit={(threshold) =>
+                commit({ bloom: { ...render.bloom, threshold } })
+              }
+            />
+            <NumberField
+              label="Softness"
+              value={render.bloom.softness}
+              step={0.05}
+              min={0}
+              max={1}
+              onCommit={(softness) =>
+                commit({ bloom: { ...render.bloom, softness } })
+              }
+            />
+            <NumberField
+              label="Intensity"
+              value={render.bloom.intensity}
+              step={0.05}
+              min={0}
+              max={2}
+              onCommit={(intensity) =>
+                commit({ bloom: { ...render.bloom, intensity } })
+              }
+            />
+          </>
+        )}
+        <NumberField
+          label="Vignette"
+          value={render.vignette}
+          step={0.05}
+          min={0}
+          max={1}
+          onCommit={(vignette) => commit({ vignette })}
+        />
+        <p className="hint">
+          Bloom and vignette are applied to the finished frame, after the
+          engine's tone-map. The Rendered preview and the still show them; the
+          Solid and Material previews do not — like AOVs and denoise.
+        </p>
+      </Section>
+
       <Section title="Stills" id="render-stills">
         <Toggle
           label="AOVs next to the still (albedo · normal · depth)"

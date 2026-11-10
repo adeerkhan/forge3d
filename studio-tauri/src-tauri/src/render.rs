@@ -473,6 +473,12 @@ pub struct RenderRequest {
     pub water_enabled: bool,
     pub water_level: f32,
     pub water_slope_threshold: f32,
+    /// Bloom and vignette on the finished frame.
+    pub bloom_enabled: bool,
+    pub bloom_threshold: f32,
+    pub bloom_softness: f32,
+    pub bloom_intensity: f32,
+    pub vignette: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -505,6 +511,11 @@ impl RenderRequest {
         self.water_enabled = settings.water.enabled;
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
+        self.bloom_enabled = settings.bloom.enabled;
+        self.bloom_threshold = settings.bloom.threshold;
+        self.bloom_softness = settings.bloom.softness;
+        self.bloom_intensity = settings.bloom.intensity;
+        self.vignette = settings.vignette;
         self
     }
 
@@ -577,6 +588,13 @@ impl RenderRequest {
                     "level": self.water_level,
                     "slopeThreshold": self.water_slope_threshold,
                 },
+                "bloom": {
+                    "enabled": self.bloom_enabled,
+                    "threshold": self.bloom_threshold,
+                    "softness": self.bloom_softness,
+                    "intensity": self.bloom_intensity,
+                },
+                "vignette": self.vignette,
             },
             "overlay": self.overlay,
             "exposure": self.exposure,
@@ -676,6 +694,11 @@ impl RenderRequest {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            bloom_enabled: false,
+            bloom_threshold: 0.8,
+            bloom_softness: 0.2,
+            bloom_intensity: 0.3,
+            vignette: 0.0,
         })
     }
 }
@@ -720,6 +743,11 @@ mod tests {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            bloom_enabled: false,
+            bloom_threshold: 0.8,
+            bloom_softness: 0.2,
+            bloom_intensity: 0.3,
+            vignette: 0.0,
         }
     }
 
@@ -798,6 +826,26 @@ mod tests {
         assert_eq!(payload["quality"]["water"]["enabled"], true);
         assert_eq!(payload["quality"]["water"]["level"], 1650.0);
         assert_eq!(payload["quality"]["water"]["slopeThreshold"], 0.05);
+    }
+
+    #[test]
+    fn payload_carries_the_bloom_and_vignette_settings() {
+        let settings = studio_core::RenderSettings {
+            bloom: studio_core::BloomSettings {
+                enabled: true,
+                threshold: 0.6,
+                softness: 0.1,
+                intensity: 0.5,
+            },
+            vignette: 0.4,
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request().with_settings(&settings).to_payload("final", None);
+        assert_eq!(payload["quality"]["bloom"]["enabled"], true);
+        assert_eq!(payload["quality"]["bloom"]["threshold"], 0.6);
+        assert_eq!(payload["quality"]["bloom"]["softness"], 0.1);
+        assert_eq!(payload["quality"]["bloom"]["intensity"], 0.5);
+        assert_eq!(payload["quality"]["vignette"], 0.4);
     }
 
     /// The fixture `studio-tauri/tests/fixtures/lighting-rig.json` is read by
