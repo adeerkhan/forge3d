@@ -572,6 +572,14 @@ impl RenderRequest {
                 // finals honour the project's settings. Shadows and sky follow
                 // the project in both.
                 "shadows": self.shadows,
+                // Supersampled by the engine: the terrain's per-cell normals
+                // alias into sparkles at close camera ranges, and the engine's
+                // own 2x render + blit removes them — measured 31 -> 2 sparkle
+                // pixels on a preview and 44 -> 0 on a 1920x1080 still, for
+                // +0.06 s, with the output (and the AOVs) still at the
+                // requested size. Previews and finals both do it, so the still
+                // matches the preview.
+                "renderScale": 2.0,
                 "pom": final_quality,
                 "sky": self.sky,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
@@ -848,6 +856,21 @@ mod tests {
         assert_eq!(
             payload["quality"]["water"]["slopeThreshold"],
             f64::from(0.05_f32)
+        );
+    }
+
+    #[test]
+    fn previews_and_finals_are_both_supersampled() {
+        // The terrain's per-cell normals alias into sparkles at close camera
+        // ranges; the engine's own 2x render + blit is the fix, and both the
+        // preview and the still do it so the still matches what was on screen.
+        assert_eq!(
+            request().to_payload("preview", None)["quality"]["renderScale"],
+            2.0
+        );
+        assert_eq!(
+            request().to_payload("final", None)["quality"]["renderScale"],
+            2.0
         );
     }
 

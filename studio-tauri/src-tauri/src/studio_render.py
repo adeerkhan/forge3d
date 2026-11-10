@@ -474,7 +474,7 @@ class StudioRenderer:
 
         settings = make_terrain_params_config(
             size_px=(width, height),
-            render_scale=1.0,
+            render_scale=float((request.get("quality") or {}).get("renderScale", 1.0)),
             msaa_samples=1,
             terrain_span=span,
             z_scale=float(request.get("zScale", 1.0)),
