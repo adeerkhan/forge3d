@@ -419,6 +419,8 @@ class StudioRenderer:
                 if whole.all() and 0 < distinct.size <= len(CLASSIFICATION_PALETTE):
                     from forge3d.thematic import apply_palette
 
+                    if bool(overlay.get("despeckle", False)):
+                        classes = despeckle_classes(classes)
                     rgba = apply_palette(classes, CLASSIFICATION_PALETTE)
                     rgba[~valid] = (0, 0, 0, 0)
                     return self.f3d.OverlayLayer.from_raster_rgba(
@@ -852,6 +854,63 @@ CLASSIFICATION_PALETTE = [
     (210, 120, 160),
     (120, 120, 120),
 ]
+
+#: A single-band classification's salt-and-pepper, with the gallery land-cover
+#: recipe's own numbers: a cell whose 3x3 block holds at most this many cells of
+#: its own class (the cell included) is a speck ...
+DESPECKLE_MAX_SUPPORT = 2
+#: ... and it takes the block's majority class when that class holds at least
+#: this many cells. Two passes.
+DESPECKLE_MIN_MAJORITY = 4
+DESPECKLE_PASSES = 2
+
+
+def despeckle_classes(classes, passes=DESPECKLE_PASSES):
+    """Absorb isolated class cells into their neighbours' majority.
+
+    The same 3x3 block rule the Swiss land-cover gallery applies to its
+    classification before colouring (`examples/swiss_terrain_landcover_viewer.py`),
+    counting the cell itself: a class with at most 2 cells in the block (the
+    cell alone, or with one neighbour) is a speck, and it takes the block's
+    majority when that majority holds at least 4 cells. Pixels below class 1
+    (nodata) are left alone, so the raster's mask survives.
+    """
+    cleaned = np.array(classes, copy=True)
+    height, width = cleaned.shape
+    present = [value for value in np.unique(cleaned) if value >= 1]
+    for _ in range(max(0, int(passes))):
+        same_count = np.zeros((height, width), dtype=np.uint8)
+        best_count = np.zeros((height, width), dtype=np.uint8)
+        best_class = np.full((height, width), -1, dtype=np.int32)
+        for value in present:
+            mask = cleaned == value
+            padded = np.pad(mask, 1, mode="constant", constant_values=False).astype(np.uint8)
+            count = (
+                padded[0:height, 0:width]
+                + padded[0:height, 1 : width + 1]
+                + padded[0:height, 2 : width + 2]
+                + padded[1 : height + 1, 0:width]
+                + padded[1 : height + 1, 1 : width + 1]
+                + padded[1 : height + 1, 2 : width + 2]
+                + padded[2 : height + 2, 0:width]
+                + padded[2 : height + 2, 1 : width + 1]
+                + padded[2 : height + 2, 2 : width + 2]
+            )
+            # `count` includes the cell itself, exactly like the gallery.
+            same_count[mask] = count[mask]
+            replace = count > best_count
+            best_count[replace] = count[replace]
+            best_class[replace] = value
+        replace = (
+            (cleaned >= 1)
+            & (same_count <= DESPECKLE_MAX_SUPPORT)
+            & (best_count >= DESPECKLE_MIN_MAJORITY)
+            & (best_class != cleaned)
+        )
+        if not np.any(replace):
+            break
+        cleaned[replace] = best_class[replace]
+    return cleaned
 
 #: The water surface's roughness. Higher is a softer, wider highlight.
 WATER_ROUGHNESS = 0.35

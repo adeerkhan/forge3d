@@ -89,6 +89,8 @@ fn the_bryce_starter_ships_with_the_naip_albedo() {
     assert_eq!(overlay.asset, albedo.id);
     assert!((overlay.opacity - 0.82).abs() < f32::EPSILON);
     assert!(overlay.preserve_colors);
+    // An orthophoto is not a class raster: despeckle starts off.
+    assert!(!overlay.despeckle);
     project
         .validate()
         .expect("terrain starter with albedo is valid");

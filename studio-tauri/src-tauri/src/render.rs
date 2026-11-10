@@ -501,6 +501,8 @@ pub struct OverlayRequest {
     pub path: String,
     pub opacity: f32,
     pub preserve_colors: bool,
+    /// Despeckle a single-band classification before paletting it.
+    pub despeckle: bool,
 }
 
 impl RenderRequest {
@@ -724,6 +726,7 @@ impl RenderRequest {
                 path: overlay.path.clone(),
                 opacity: overlay.opacity,
                 preserve_colors: overlay.preserve_colors,
+                despeckle: overlay.despeckle,
             }),
             exposure: 1.35,
             shadows: true,
@@ -922,6 +925,20 @@ mod tests {
             request().to_payload("final", None)["quality"]["renderScale"],
             2.0
         );
+    }
+
+    #[test]
+    fn payload_carries_the_overlay_despeckle() {
+        let mut payload = request();
+        payload.overlay = Some(OverlayRequest {
+            path: "/data/land_cover.tif".to_owned(),
+            opacity: 0.82,
+            preserve_colors: true,
+            despeckle: true,
+        });
+        let value = payload.to_payload("preview", None);
+        assert_eq!(value["overlay"]["despeckle"], true);
+        assert_eq!(value["overlay"]["preserveColors"], true);
     }
 
     #[test]

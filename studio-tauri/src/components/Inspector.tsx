@@ -1208,6 +1208,19 @@ function TerrainEditor({
             />
           </label>
         )}
+        {terrain.overlay && (
+          <Toggle
+            label="Despeckle the classes"
+            checked={terrain.overlay.despeckle}
+            onChange={(despeckle) =>
+              void actions.apply({
+                type: "setTerrainOverlay",
+                id: object.id,
+                overlay: { ...terrain.overlay!, despeckle },
+              })
+            }
+          />
+        )}
         <div className="inline-actions">
           <button
             type="button"
@@ -1233,6 +1246,14 @@ function TerrainEditor({
           Forge3D renderer consumes; the engine has no other material
           override for terrain.
         </p>
+        {terrain.overlay && (
+          <p className="hint">
+            Despeckle applies to a single-band class raster (class IDs, painted
+            through the land-cover palette): it absorbs a cell whose class has
+            at most two cells in its 3 × 3 block into the block's majority. An
+            RGB raster passes through untouched.
+          </p>
+        )}
       </Section>
 
       <p className="hint">

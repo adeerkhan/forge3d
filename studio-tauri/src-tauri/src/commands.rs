@@ -702,6 +702,9 @@ pub fn set_terrain_overlay(
                 asset: asset.id,
                 opacity,
                 preserve_colors: true,
+                // Inert until the raster is a class raster; the Inspector
+                // toggles it on the terrain object afterwards.
+                despeckle: false,
             })
         }
     };

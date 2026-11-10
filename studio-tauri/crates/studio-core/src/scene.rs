@@ -395,6 +395,13 @@ pub struct TerrainOverlay {
     /// Composite source colours after lighting (categorical palettes survive).
     #[serde(default = "default_true")]
     pub preserve_colors: bool,
+    /// Clean up a single-band *classification* raster before it is paletted:
+    /// a cell whose own class has at most two same-class neighbours takes the
+    /// neighbouring majority when that majority has at least four. The gallery
+    /// land-cover recipe's despeckle, for the salt-and-pepper a classifier
+    /// leaves behind. Inert on an RGB raster.
+    #[serde(default)]
+    pub despeckle: bool,
 }
 
 fn default_opacity() -> f32 {

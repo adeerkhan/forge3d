@@ -206,6 +206,9 @@ pub struct TerrainOverlayHandoff {
     pub name: String,
     pub opacity: f32,
     pub preserve_colors: bool,
+    /// Despeckle a single-band classification before paletting it.
+    #[serde(default)]
+    pub despeckle: bool,
 }
 
 /// Sun direction in the viewer's terms (`lit_sun`).
@@ -477,6 +480,7 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
                     name: asset.name.clone(),
                     opacity: overlay.opacity,
                     preserve_colors: overlay.preserve_colors,
+                    despeckle: overlay.despeckle,
                 })
         }),
     })

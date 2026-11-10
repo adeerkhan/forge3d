@@ -313,6 +313,23 @@ All use §2. Nothing new is introduced beyond the settings below.
   would draw, but on cliffs too, so it is not shipped.
 - Check: schema contract + fixture, payload assertion, one service test.
 
+### 5.9 Despeckle a class overlay (0.25 day) — **done**
+- `TerrainOverlay.despeckle` (serde-default `false`) → `overlay.despeckle` in the
+  render request. The service runs the gallery land-cover recipe's own 3×3
+  rule on a **single-band class raster** before paletting it: a class holding
+  at most 2 cells of a 3×3 block (the cell included) is a speck, and it takes
+  the block's majority when that majority holds at least 4 cells. Two passes.
+  Class 0 (nodata) is never moved, so the raster's mask survives. An RGB
+  raster is untouched — a drape is imagery, not classes.
+- Measured on a synthetic 600² class raster (trees/crops/snow plus 6%
+  salt-and-pepper), Swiss DEM at 640×400: off → on changes **55,383** of
+  768,000 channel samples (mean 2.17), and the still goes from a speckled
+  drape to clean class fields.
+- The Inspector shows the toggle with the overlay; the hint says what it does
+  and that an RGB raster ignores it.
+- Check: schema/default test (phase4), payload assertion, service test on the
+  rule (a lone cell absorbed, a 3×3 block kept, a clean raster unchanged).
+
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.

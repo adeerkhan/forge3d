@@ -179,6 +179,7 @@ impl Project {
                 asset: id,
                 opacity: raster.opacity.clamp(0.0, 1.0),
                 preserve_colors: true,
+                despeckle: false,
             });
         }
         project.assets.push(asset);

@@ -458,3 +458,19 @@ def test_sun_visibility_is_off_unless_asked_and_maps_the_rays():
     # One hard ray: the engine's soft mode moved 490 of 256,000 samples.
     assert settings.mode == "hard"
     assert settings.samples == 1
+
+
+def test_despeckle_absorbs_isolated_classes_and_keeps_blocks():
+    """The gallery land-cover recipe's 3x3 rule: a cell whose own class holds
+    at most 2 cells of its block joins the block's majority (>= 4 cells)."""
+    service = load_service()
+    classes = np.full((9, 9), 2, dtype=np.int32)
+    classes[4, 4] = 7  # one speck of class 7 in class 2
+    classes[0:3, 0:3] = 5  # a 3x3 block of class 5 is real, not a speck
+    cleaned = service.despeckle_classes(classes)
+    assert cleaned[4, 4] == 2, "an isolated cell must take its neighbours' class"
+    assert (cleaned[0:3, 0:3] == 5).all(), "a 3x3 block is not a speck"
+    # 81 cells: 9 stay class 5, so 72 are class 2.
+    assert (cleaned == 2).sum() == 72
+    # Nothing happens on a clean raster.
+    assert np.array_equal(service.despeckle_classes(np.full((5, 5), 3)), np.full((5, 5), 3))
