@@ -914,9 +914,10 @@ export function Viewport3D() {
       // applied later, so this frame has to be drawn on its own.
       runtime.needsRender = true;
     });
-    // Rendered mode follows the camera. Viewport frames cost ~190 ms (the SSAO
-    // pass, which alone costs ~4.8 s, is reserved for final stills), so this is
-    // throttled live rendering rather than one frame per drag.
+    // Rendered mode follows the camera. A viewport frame is throttled to one
+    // per 120 ms (the SSAO pass, which alone costs ~4.8 s, is reserved for
+    // final stills), and the session keeps only the newest pending request, so
+    // a drag does not queue frames it cannot finish.
     let lastRenderRequest = 0;
     orbit.addEventListener("change", () => {
       if (!modeRef.current) return;
@@ -1758,13 +1759,16 @@ export function Viewport3D() {
     wasRendered.current = renderedMode;
   }, [renderedMode]);
 
-  // Entering Rendered mode renders once at the current viewport size; orbiting
-  // in this mode does not re-render (each frame costs seconds), so the toolbar
-  // offers an explicit re-render.
+  // Entering Rendered mode renders once at the current viewport size, and a
+  // change of that size renders again: a window resize otherwise leaves a frame
+  // at the old size covering the new viewport. Orbiting re-renders through the
+  // orbit handler, which the session coalesces ("newest wins").
   const renderedOnce = useRef(false);
+  const renderedSize = useRef<{ width: number; height: number } | null>(null);
   useEffect(() => {
     if (!renderedMode) {
       renderedOnce.current = false;
+      renderedSize.current = null;
       return;
     }
     if (render.error) {
@@ -1772,9 +1776,14 @@ export function Viewport3D() {
       renderedOnce.current = false;
       return;
     }
-    if (renderedOnce.current || render.busy) return;
-    renderedOnce.current = true;
     const target = requestSizeRef.current();
+    const resized =
+      renderedSize.current === null ||
+      renderedSize.current.width !== target.width ||
+      renderedSize.current.height !== target.height;
+    if (render.busy || (renderedOnce.current && !resized)) return;
+    renderedOnce.current = true;
+    renderedSize.current = target;
     void actions.renderViewport(target.width, target.height, "preview");
   }, [actions, render.busy, renderedMode, render.error, size.height, size.width]);
 
