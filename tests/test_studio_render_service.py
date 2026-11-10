@@ -219,23 +219,23 @@ class _WaterStub:
 
 
 @pytest.fixture
-def water_mask():
+def water():
     service = load_service()
-    return service.StudioRenderer.water_mask
+    return service.StudioRenderer.water
 
 
-def test_water_is_off_unless_the_project_asks_for_it(water_mask):
+def test_water_is_off_unless_the_project_asks_for_it(water):
     """No mask means no water: the terrain path shades the DEM as land."""
     stub = _WaterStub(heights=np.zeros((4, 4), dtype=np.float32), scale=1.0)
-    assert water_mask(stub, {}) is None
-    assert water_mask(stub, {"quality": {"water": {"enabled": False}}}) is None
+    assert water(stub, {}) == (None, None)
+    assert water(stub, {"quality": {"water": {"enabled": False}}}) == (None, None)
 
 
-def test_the_mask_floods_low_flat_ground_and_leaves_cliffs_dry(water_mask):
+def test_the_mask_floods_low_flat_ground_and_leaves_cliffs_dry(water):
     heights = np.zeros((4, 4), dtype=np.float32)
     heights[2, 2] = 10.0  # one cliff in the middle
     stub = _WaterStub(heights=heights, scale=1.0)
-    mask = water_mask(
+    mask, settings = water(
         stub,
         {"quality": {"water": {"enabled": True, "level": 0.0, "slopeThreshold": 0.02}}},
     )
@@ -243,15 +243,20 @@ def test_the_mask_floods_low_flat_ground_and_leaves_cliffs_dry(water_mask):
     assert mask.dtype == np.float32
     assert mask[0, 0] == 1.0  # flat and low: water
     assert mask[2, 2] == 0.0  # the cliff: dry
+    # The water gets its own surface: the physical path, so the sun's
+    # highlight is a band and not a field of per-cell glints.
+    assert settings is not None
+    assert settings.optics is not None
+    assert settings.optics.mode == "physical"
 
 
-def test_the_level_is_scaled_into_the_renderers_units(water_mask):
+def test_the_level_is_scaled_into_the_renderers_units(water):
     """The project speaks DEM metres; the renderer works in scaled heights."""
     heights = np.full((3, 3), 80.0, dtype=np.float32)
     stub = _WaterStub(heights=heights, scale=0.5)
     # 100 m in the DEM is 50 m in the scaled heights the renderer sees, so
     # ground at 80 m stays dry.
-    mask = water_mask(
+    mask, _settings = water(
         stub,
         {"quality": {"water": {"enabled": True, "level": 100.0, "slopeThreshold": 1.0}}},
     )
@@ -259,11 +264,11 @@ def test_the_level_is_scaled_into_the_renderers_units(water_mask):
     assert mask[1, 1] == 0.0
 
 
-def test_level_zero_is_the_engines_own_auto_default(water_mask):
+def test_level_zero_is_the_engines_own_auto_default(water):
     heights = np.zeros((4, 4), dtype=np.float32)
     heights[3, 3] = 100.0
     stub = _WaterStub(heights=heights, scale=1.0)
-    mask = water_mask(
+    mask, _settings = water(
         stub,
         {"quality": {"water": {"enabled": True, "level": 0.0, "slopeThreshold": 1.0}}},
     )
@@ -321,3 +326,25 @@ def test_post_effects_are_off_until_the_project_asks():
     frame = np.full((16, 16, 3), 128, dtype=np.uint8)
     out = service.apply_post_effects(frame, {})
     assert np.array_equal(out, frame)
+
+
+def test_isolated_water_cells_are_dropped_and_a_lake_is_kept():
+    """A blob of one cell is a speckle; a lake is not."""
+    service = load_service()
+    mask = np.zeros((16, 16), dtype=bool)
+    mask[2, 2] = True                      # a single cell
+    mask[8:14, 8:14] = True                # a real body
+    kept = service._keep_water_blobs(mask, service.MIN_WATER_BLOB)
+    assert kept[2, 2] == False
+    assert kept[10, 10] == True
+    assert int(kept.sum()) == 36
+
+
+def test_a_diagonal_chain_of_cells_is_not_a_lake():
+    """Four-connected blobs: a diagonal chain must not add up to a body."""
+    service = load_service()
+    mask = np.zeros((16, 16), dtype=bool)
+    for i in range(10):
+        mask[i, i] = True
+    kept = service._keep_water_blobs(mask, service.MIN_WATER_BLOB)
+    assert int(kept.sum()) == 0
