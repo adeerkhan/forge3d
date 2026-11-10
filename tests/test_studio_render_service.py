@@ -348,3 +348,19 @@ def test_a_diagonal_chain_of_cells_is_not_a_lake():
         mask[i, i] = True
     kept = service._keep_water_blobs(mask, service.MIN_WATER_BLOB)
     assert int(kept.sum()) == 0
+
+
+def test_fog_is_off_unless_the_project_asks_for_it():
+    service = load_service()
+    assert service.StudioRenderer.fog_settings(None, {}) is None
+    assert service.StudioRenderer.fog_settings(None, {"fog": {"enabled": False}}) is None
+
+
+def test_fog_carries_the_projects_density_and_falloff():
+    service = load_service()
+    settings = service.StudioRenderer.fog_settings(
+        None, {"fog": {"enabled": True, "density": 1.5, "heightFalloff": 0.04}}
+    )
+    assert settings is not None
+    assert settings.density == pytest.approx(1.5)
+    assert settings.height_falloff == pytest.approx(0.04)

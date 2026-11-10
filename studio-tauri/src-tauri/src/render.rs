@@ -473,6 +473,10 @@ pub struct RenderRequest {
     pub water_enabled: bool,
     pub water_level: f32,
     pub water_slope_threshold: f32,
+    /// Atmospheric fog on the terrain.
+    pub fog_enabled: bool,
+    pub fog_density: f32,
+    pub fog_height_falloff: f32,
     /// Bloom and vignette on the finished frame.
     pub bloom_enabled: bool,
     pub bloom_threshold: f32,
@@ -511,6 +515,9 @@ impl RenderRequest {
         self.water_enabled = settings.water.enabled;
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
+        self.fog_enabled = settings.fog.enabled;
+        self.fog_density = settings.fog.density;
+        self.fog_height_falloff = settings.fog.height_falloff;
         self.bloom_enabled = settings.bloom.enabled;
         self.bloom_threshold = settings.bloom.threshold;
         self.bloom_softness = settings.bloom.softness;
@@ -587,6 +594,11 @@ impl RenderRequest {
                     "enabled": self.water_enabled,
                     "level": self.water_level,
                     "slopeThreshold": self.water_slope_threshold,
+                },
+                "fog": {
+                    "enabled": self.fog_enabled,
+                    "density": self.fog_density,
+                    "heightFalloff": self.fog_height_falloff,
                 },
                 "bloom": {
                     "enabled": self.bloom_enabled,
@@ -694,6 +706,9 @@ impl RenderRequest {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            fog_enabled: false,
+            fog_density: 0.5,
+            fog_height_falloff: 0.02,
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -743,6 +758,9 @@ mod tests {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            fog_enabled: false,
+            fog_density: 0.5,
+            fog_height_falloff: 0.02,
             bloom_enabled: false,
             bloom_threshold: 0.8,
             bloom_softness: 0.2,
@@ -830,6 +848,25 @@ mod tests {
         assert_eq!(
             payload["quality"]["water"]["slopeThreshold"],
             f64::from(0.05_f32)
+        );
+    }
+
+    #[test]
+    fn payload_carries_the_fog_settings() {
+        let settings = studio_core::RenderSettings {
+            fog: studio_core::FogSettings {
+                enabled: true,
+                density: 1.25,
+                height_falloff: 0.03,
+            },
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request().with_settings(&settings).to_payload("final", None);
+        assert_eq!(payload["quality"]["fog"]["enabled"], true);
+        assert_eq!(payload["quality"]["fog"]["density"], f64::from(1.25_f32));
+        assert_eq!(
+            payload["quality"]["fog"]["heightFalloff"],
+            f64::from(0.03_f32)
         );
     }
 

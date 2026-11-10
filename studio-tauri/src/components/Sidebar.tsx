@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useSession } from "../state/session-context";
 import { Timeline } from "./Timeline";
 import {
+  CloudIcon,
   CubeIcon,
   KeyframeIcon,
   MountainIcon,
@@ -10,6 +11,7 @@ import {
   SunIcon,
 } from "./icons";
 import {
+  AtmosphereSection,
   EnvironmentSettings,
   LightRig,
   ObjectProperties,
@@ -27,7 +29,7 @@ import {
  * object are different questions, and a 1000px scroll mixes them.
  */
 
-type PropsTab = "render" | "scene" | "light" | "object" | "animation";
+type PropsTab = "render" | "scene" | "light" | "atmosphere" | "object" | "animation";
 
 const TABS: {
   id: PropsTab;
@@ -52,6 +54,12 @@ const TABS: {
     label: "Lighting",
     Icon: SunIcon,
     title: "Lighting: the sun, solar placement and the environment",
+  },
+  {
+    id: "atmosphere",
+    label: "Atmosphere",
+    Icon: CloudIcon,
+    title: "Atmosphere: the weather on the terrain — fog and water",
   },
   {
     id: "object",
@@ -131,6 +139,7 @@ export function SettingsSidebar() {
                   <EnvironmentSettings />
                 </>
               )}
+              {tab === "atmosphere" && <AtmosphereSection />}
               {tab === "object" && <ObjectProperties />}
               {tab === "animation" && <Timeline />}
             </>

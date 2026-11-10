@@ -73,6 +73,7 @@ fn project_document_key_shape_is_stable() {
             "skyGroundAlbedo",
             "skyExposure",
             "water",
+            "fog",
             "bloom",
             "vignette",
         ],
@@ -85,6 +86,11 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["water"]["enabled"], false);
     assert_eq!(value["render"]["water"]["level"], 0.0);
+    expect_keys(
+        &value["render"]["fog"],
+        &["enabled", "density", "heightFalloff"],
+    );
+    assert_eq!(value["render"]["fog"]["enabled"], false);
     expect_keys(
         &value["render"]["bloom"],
         &["enabled", "threshold", "softness", "intensity"],

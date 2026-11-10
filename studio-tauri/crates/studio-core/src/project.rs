@@ -454,6 +454,15 @@ impl Project {
         {
             return Err("water slope threshold must be between 0 and 1".to_owned());
         }
+        if !self.render.fog.density.is_finite() || !(0.0..=100.0).contains(&self.render.fog.density)
+        {
+            return Err("fog density must be between 0 and 100".to_owned());
+        }
+        if !self.render.fog.height_falloff.is_finite()
+            || !(0.0..=10.0).contains(&self.render.fog.height_falloff)
+        {
+            return Err("fog height falloff must be between 0 and 10".to_owned());
+        }
         if !self.render.bloom.threshold.is_finite()
             || !(0.0..=1.0).contains(&self.render.bloom.threshold)
         {
@@ -632,6 +641,35 @@ impl Default for WaterSettings {
     }
 }
 
+/// Atmospheric fog on the terrain.
+///
+/// The engine applies height-based exponential fog after the PBR pass and
+/// before the tonemap: `density` is its strength and `height_falloff` how
+/// fast it thins with altitude.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FogSettings {
+    /// Apply the fog. Density 0 is the engine's own no-op.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Fog density; 0 is no fog.
+    #[serde(default = "default_fog_density")]
+    pub density: f32,
+    /// How fast the fog thins with altitude, per metre.
+    #[serde(default = "default_fog_height_falloff")]
+    pub height_falloff: f32,
+}
+
+impl Default for FogSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            density: default_fog_density(),
+            height_falloff: default_fog_height_falloff(),
+        }
+    }
+}
+
 /// Bloom on the finished frame.
 ///
 /// The engine's GPU bloom (the terrain bloom processor) and its vignette (in
@@ -743,6 +781,9 @@ pub struct RenderSettings {
     /// slope threshold rather than a mask.
     #[serde(default)]
     pub water: WaterSettings,
+    /// Atmospheric fog on the terrain.
+    #[serde(default)]
+    pub fog: FogSettings,
     /// Bloom on the finished frame: the bright pixels glow.
     #[serde(default)]
     pub bloom: BloomSettings,
@@ -828,6 +869,14 @@ fn default_sky_exposure() -> f32 {
     0.08
 }
 
+fn default_fog_density() -> f32 {
+    0.5
+}
+
+fn default_fog_height_falloff() -> f32 {
+    0.02
+}
+
 fn default_bloom_threshold() -> f32 {
     0.8
 }
@@ -867,6 +916,7 @@ impl Default for RenderSettings {
             sky_ground_albedo: default_sky_ground_albedo(),
             sky_exposure: default_sky_exposure(),
             water: WaterSettings::default(),
+            fog: FogSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,
         }

@@ -187,6 +187,21 @@ class StudioRenderer:
                 self._ibl_cache.pop(next(iter(self._ibl_cache)))
         return cached
 
+    def fog_settings(self, quality: Dict[str, Any]):
+        """The engine's height-based fog, or None when the project has none."""
+        fog = quality.get("fog") or {}
+        if not bool(fog.get("enabled", False)):
+            return None
+        from forge3d.terrain_params import FogSettings
+
+        # Height-based exponential fog, applied after the PBR pass and before
+        # the tonemap. The base height is left to the engine: it computes it
+        # from the terrain bounds.
+        return FogSettings(
+            density=float(fog.get("density", 0.5)),
+            height_falloff=float(fog.get("heightFalloff", 0.02)),
+        )
+
     def water(self, request: Dict[str, Any]):
         """The engine's water mask and settings for the project's water settings.
 
@@ -442,6 +457,7 @@ class StudioRenderer:
 
         sky_settings = self.sky_settings(request, quality, environment)
         water_mask, water_settings = self.water(request)
+        fog_settings = self.fog_settings(quality)
 
         settings = make_terrain_params_config(
             size_px=(width, height),
@@ -503,6 +519,7 @@ class StudioRenderer:
                 format="png",
             ),
             sky=sky_settings,
+            fog=fog_settings,
             water=water_settings,
         )
         settings.shadows.enabled = bool(quality.get("shadows", True))

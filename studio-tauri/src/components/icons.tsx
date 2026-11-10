@@ -148,6 +148,12 @@ export const MountainIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const CloudIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M7 18h9a4 4 0 0 0 .6-7.96A5.5 5.5 0 0 0 6 11.5 3.25 3.25 0 0 0 7 18z" />
+  </Icon>
+);
+
 export const KeyframeIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M3 12h5M16 12h5" />

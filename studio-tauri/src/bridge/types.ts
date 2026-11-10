@@ -161,10 +161,22 @@ export interface RenderSettings {
   /** Water on the terrain: the level and the slope threshold the render
    *  service turns into the engine's water mask. */
   water: WaterSettings;
+  /** Atmospheric fog on the terrain. */
+  fog: FogSettings;
   /** Bloom on the finished frame: the bright pixels glow. */
   bloom: BloomSettings;
   /** Vignette: corner darkening, 0..=1. */
   vignette: number;
+}
+
+/** Atmospheric fog on the terrain: the engine applies height-based
+ *  exponential fog after the PBR pass and before the tonemap. */
+export interface FogSettings {
+  enabled: boolean;
+  /** Fog density; 0 is no fog. */
+  density: number;
+  /** How fast the fog thins with altitude, per metre. */
+  heightFalloff: number;
 }
 
 /** Bloom on the finished frame. Display-referred: the threshold is a display

@@ -27,6 +27,11 @@
         "enabled": false,
         "level": 0.0,
         "slopeThreshold": 0.18
+      },
+      "fog": {
+        "enabled": false,
+        "density": 0.5,
+        "heightFalloff": 0.02
       }
     }
   },
