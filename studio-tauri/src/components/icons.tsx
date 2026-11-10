@@ -148,9 +148,23 @@ export const MountainIcon = (props: IconProps) => (
   </Icon>
 );
 
+export const KeyframeIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M3 12h5M16 12h5" />
+    <path d="M12 6l4 6-4 6-4-6z" />
+  </Icon>
+);
+
 export const CursorIcon = (props: IconProps) => (
   <Icon {...props}>
     <path d="M5 3l6.5 16 2.2-6.1L20 10.5 5 3z" />
+  </Icon>
+);
+
+export const FlyIcon = (props: IconProps) => (
+  <Icon {...props}>
+    <path d="M22 2L11 13" />
+    <path d="M22 2l-7 20-4-9-9-4z" />
   </Icon>
 );
 

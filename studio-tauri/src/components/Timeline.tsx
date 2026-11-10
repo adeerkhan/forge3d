@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 
-import type { Channel, ChannelKeys, Interpolation, SceneObject } from "../bridge/types";
+import type {
+  Channel,
+  ChannelKeys,
+  Interpolation,
+  Project,
+  SceneObject,
+} from "../bridge/types";
 import { useSession } from "../state/session-context";
+import { viewStore } from "../viewport/viewStore";
 import { NumberField } from "./fields";
 import { frameStepMs, nextPlayheadFrame, tickClock } from "../state/playback";
 
@@ -49,18 +56,42 @@ function currentValue(object: SceneObject, channel: Channel): number | null {
   }
 }
 
+/** The camera a path is recorded onto: the selection if it is one, else the
+ *  active camera, else the first camera in the scene. */
+function recordTarget(project: Project): SceneObject | null {
+  const selected =
+    project.selection.length === 1
+      ? project.scene.objects.find((object) => object.id === project.selection[0])
+      : undefined;
+  if (selected?.kind.type === "camera") return selected;
+  const active = project.scene.objects.find(
+    (object) => object.id === project.scene.activeCamera,
+  );
+  if (active?.kind.type === "camera") return active;
+  return project.scene.objects.find((object) => object.kind.type === "camera") ?? null;
+}
+
+/** Frames between sampled path keys. Four frames is 6 keys/s at 24 fps. */
+const RECORD_KEY_INTERVAL = 4;
+
 /**
- * The animation timeline (Phase 6): playback, scrubbing, keyframing, and
- * frame-sequence export.
+ * The animation timeline: playback, scrubbing, keyframing, camera-path
+ * recording and frame-sequence export.
  *
  * Playback and export share one evaluation function in studio-core — this
  * component only ever *asks* for a frame (`setPlayhead`) or asks the shell to
  * render one (`exportFrames`), so what you scrub is what renders.
+ *
+ * Recording reads the viewport's live camera (`viewStore.cameraTransform`) and
+ * commits the whole path as one `setChannelKeys` command, so a take is a single
+ * undo step instead of one per key.
  */
 export function Timeline() {
-  const { state, actions, exporting, setTimelineOpen } = useSession();
+  const { state, actions, exporting, flyMode, setFlyMode } = useSession();
   const [playing, setPlaying] = useState(false);
+  const [recording, setRecording] = useState(false);
   const [interpolation, setInterpolation] = useState<Interpolation>("linear");
+  const [recordNote, setRecordNote] = useState<string | null>(null);
 
   const project = state?.project;
   const timeline = project?.timeline;
@@ -74,24 +105,82 @@ export function Timeline() {
   const length = timeline?.length ?? 96;
   const frameRate = timeline?.frameRate ?? 24;
 
-  // Playback: advance one frame per 1/frameRate seconds, wrapping at the end.
-  // Each step is a setPlayhead IPC — the same evaluation the export uses.
-  //
-  // The effect depends on `playing` ONLY. `timeline` and `actions` get a new
-  // identity on every snapshot, so depending on them restarted the loop (and
-  // reset its clock) on every frame the playhead produced: the accumulator
-  // never reached one frame's worth of time and playback froze. The clock
-  // arithmetic lives in `state/playback.ts`, pinned by its own test.
   const playheadRef = useRef(frame);
   playheadRef.current = frame;
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
+  const stateRef = useRef(state);
+  stateRef.current = state;
   const settingsRef = useRef({ frameRate, length });
   settingsRef.current = { frameRate, length };
+  const recordingRef = useRef(false);
+  recordingRef.current = recording;
+  /** Sampled keys for the take in progress, keyed by channel. */
+  const recordedRef = useRef(new Map<Channel, ChannelKeys["keys"]>());
+  const recordCameraRef = useRef<string | null>(null);
   /** A scrub during playback restarts the loop's counter from the new value. */
   const resync = useRef<number | null>(null);
+
+  const stopRecording = useCallback(() => {
+    setRecording(false);
+    setFlyMode(false);
+    const cameraId = recordCameraRef.current;
+    const recorded = recordedRef.current;
+    recordCameraRef.current = null;
+    if (!cameraId || recorded.size === 0) return;
+    const current = stateRef.current?.project;
+    if (!current) return;
+    const existing =
+      current.timeline.tracks.find((track) => track.objectId === cameraId)?.channels ?? [];
+    const channels: ChannelKeys[] = [...recorded.entries()].map(([channel, keys]) => ({
+      channel,
+      keys: [...keys].sort((a, b) => a.frame - b.frame),
+    }));
+    // Channels the take did not touch keep their keys.
+    for (const entry of existing) {
+      if (!recorded.has(entry.channel)) channels.push(entry);
+    }
+    void actionsRef.current.apply({ type: "setChannelKeys", id: cameraId, channels });
+  }, [setFlyMode]);
+
+  const startRecording = useCallback(() => {
+    const current = stateRef.current?.project;
+    const camera = current ? recordTarget(current) : null;
+    if (!current || !camera || camera.kind.type !== "camera") {
+      setRecordNote("Recording a path needs a camera object — add one from the viewport Add menu.");
+      return;
+    }
+    recordedRef.current = new Map();
+    recordCameraRef.current = camera.id;
+    setRecordNote(null);
+    setPlaying(false);
+    setFlyMode(true);
+    setRecording(true);
+    // The pose the take starts from is a key too.
+    const transform = viewStore.cameraTransform;
+    if (transform) {
+      const keys = recordedRef.current;
+      const put = (channel: Channel, value: number) =>
+        keys.set(channel, [{ frame: Math.round(current.timeline.currentFrame), value, interpolation: "linear" }]);
+      put("translationX", transform.translation.x);
+      put("translationY", transform.translation.y);
+      put("translationZ", transform.translation.z);
+      put("rotationX", transform.rotationDeg.x);
+      put("rotationY", transform.rotationDeg.y);
+      put("rotationZ", transform.rotationDeg.z);
+    }
+  }, [setFlyMode]);
+
+  // Playback: advance one frame per 1/frameRate seconds, wrapping at the end.
+  // Each step is a setPlayhead IPC — the same evaluation the export uses.
+  //
+  // The effect depends on `playing`/`recording` ONLY. `timeline` and `actions`
+  // get a new identity on every snapshot, so depending on them restarted the
+  // loop (and reset its clock) on every frame the playhead produced: the
+  // accumulator never reached one frame's worth of time and playback froze. The
+  // clock arithmetic lives in `state/playback.ts`, pinned by its own test.
   useEffect(() => {
-    if (!playing) return;
+    if (!playing && !recording) return;
     let handle = 0;
     let last = performance.now();
     let rest = 0;
@@ -114,6 +203,27 @@ export function Timeline() {
       inFlight = true;
       void actionsRef.current.setPlayhead(next).finally(() => {
         inFlight = false;
+        if (!recordingRef.current) return;
+        // Sample the viewport's live camera, not the evaluated object: flying
+        // is what the take is made of.
+        const transform = viewStore.cameraTransform;
+        const cameraId = recordCameraRef.current;
+        if (transform && cameraId && next % RECORD_KEY_INTERVAL === 0) {
+          const keys = recordedRef.current;
+          const put = (channel: Channel, value: number) => {
+            const list = keys.get(channel) ?? [];
+            list.push({ frame: next, value, interpolation: "linear" });
+            keys.set(channel, list);
+          };
+          put("translationX", transform.translation.x);
+          put("translationY", transform.translation.y);
+          put("translationZ", transform.translation.z);
+          put("rotationX", transform.rotationDeg.x);
+          put("rotationY", transform.rotationDeg.y);
+          put("rotationZ", transform.rotationDeg.z);
+        }
+        // The take fills the timeline: stop instead of wrapping and re-recording.
+        if (next >= settingsRef.current.length) stopRecording();
       });
     };
     handle = requestAnimationFrame(tick);
@@ -121,12 +231,15 @@ export function Timeline() {
       cancelAnimationFrame(handle);
       resync.current = null;
     };
-  }, [playing]);
+  }, [playing, recording, stopRecording]);
 
-  // Stop playback when the project closes.
+  // Stop playback and recording when the project closes.
   useEffect(() => {
-    if (!state) setPlaying(false);
-  }, [state]);
+    if (!state) {
+      setPlaying(false);
+      stopRecording();
+    }
+  }, [state, stopRecording]);
 
   const scrub = useCallback(
     (next: number) => {
@@ -187,7 +300,11 @@ export function Timeline() {
   const keyFrames = [
     ...new Set((track?.channels ?? []).flatMap((entry) => entry.keys.map((key) => key.frame))),
   ].sort((a, b) => a - b);
-  const busy = exporting !== null;
+  const busy = exporting !== null || recording;
+  const camera = recordTarget(state.project);
+  const recordingTitle = camera
+    ? `Record the viewport camera onto "${camera.name}" while you fly (WASD, drag to look)`
+    : "Recording a path needs a camera object";
 
   return (
     <div className="timeline">
@@ -196,34 +313,36 @@ export function Timeline() {
           type="button"
           className="timeline__play"
           aria-label={playing ? "Stop playback" : "Start playback"}
-          disabled={busy}
+          disabled={busy || recording}
           onClick={() => setPlaying((value) => !value)}
         >
           {playing ? "■" : "▶"}
         </button>
-        <input
-          className="timeline__scrub"
-          type="range"
-          min={0}
-          max={length}
-          step={1}
-          value={Math.round(frame)}
-          disabled={busy}
-          onChange={(event) => scrub(Number(event.target.value))}
-          aria-label="Playhead"
-        />
         <span className="timeline__frame mono">
           {Math.round(frame)} / {length}
         </span>
         <button
           type="button"
-          className="text-button"
-          title="Hide the timeline (T)"
-          onClick={() => setTimelineOpen(false)}
+          className={`button button--record${recording ? " is-recording" : ""}`}
+          disabled={exporting !== null || !camera}
+          title={recordingTitle}
+          onClick={() => (recording ? stopRecording() : startRecording())}
         >
-          Hide
+          {recording ? "Stop take" : "Record path"}
         </button>
       </div>
+
+      <input
+        className="timeline__scrub"
+        type="range"
+        min={0}
+        max={length}
+        step={1}
+        value={Math.round(frame)}
+        disabled={busy || recording}
+        onChange={(event) => scrub(Number(event.target.value))}
+        aria-label="Playhead"
+      />
 
       {keyFrames.length > 0 && (
         <div className="timeline__keys" aria-hidden="true">
@@ -295,7 +414,7 @@ export function Timeline() {
           type="button"
           className="button button--primary"
           disabled={busy}
-          title={`Render frames 0..${length} at ${project.render.width}×${project.render.height} into a chosen folder`}
+          title={`Render frames 0..${length} at ${state.project.render.width}×${state.project.render.height} into a chosen folder`}
           onClick={() => void pickAndExport()}
         >
           {exporting ? `Exporting ${exporting.done}/${exporting.total}…` : "Export frames…"}
@@ -307,11 +426,13 @@ export function Timeline() {
         )}
       </div>
 
+      {recordNote && <p className="hint hint--warn">{recordNote}</p>}
       <p className="hint">
-        Playback and Export evaluate the same timeline in studio-core, so the
-        sequence matches what you scrub. Keying captures the selected object's
-        current values at the playhead; terrain cannot be animated (its
-        transform is georeferenced).
+        {recording
+          ? `Recording onto "${camera?.name}" — fly with W A S D and Q E, drag to look. The take fills the timeline.`
+          : flyMode
+            ? "Fly mode is on: W A S D to move, Q E for down and up, drag to look."
+            : "Playback and Export evaluate the same timeline in studio-core, so the sequence matches what you scrub. Keying captures the selected object's current values at the playhead; terrain cannot be animated (its transform is georeferenced)."}
       </p>
     </div>
   );

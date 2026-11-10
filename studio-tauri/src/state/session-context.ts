@@ -36,9 +36,9 @@ export interface SessionApi {
   /** Look through the scene's active camera instead of the free view. */
   cameraView: boolean;
   setCameraView(enabled: boolean): void;
-  /** Animation timeline visibility (hidden by default). */
-  timelineOpen: boolean;
-  setTimelineOpen(open: boolean): void;
+  /** Fly camera: WASD moves the viewport camera, drag looks around. */
+  flyMode: boolean;
+  setFlyMode(enabled: boolean): void;
   /** Forge3D engine discovery (renderer + probe). */
   engine: EngineStatus | null;
   /** Heightfield resolution used by the Solid terrain preview. */

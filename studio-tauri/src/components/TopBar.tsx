@@ -8,10 +8,12 @@ import {
   SaveIcon,
   UndoIcon,
 } from "./icons";
+import { AboutDialog } from "./AboutDialog";
 
 export function TopBar() {
-  const { state, actions, busy, timelineOpen, setTimelineOpen } = useSession();
+  const { state, actions, busy } = useSession();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -106,6 +108,17 @@ export function TopBar() {
             <button
               type="button"
               role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                setAboutOpen(true);
+              }}
+            >
+              About Forge3D Studio
+            </button>
+            <div className="menu__separator" />
+            <button
+              type="button"
+              role="menuitem"
               disabled={!state}
               onClick={() => {
                 setMenuOpen(false);
@@ -154,20 +167,6 @@ export function TopBar() {
         </button>
         <button
           type="button"
-          className="button"
-          disabled={!state}
-          aria-pressed={timelineOpen}
-          title={
-            timelineOpen
-              ? "Hide the animation timeline (T)"
-              : "Show the animation timeline (T)"
-          }
-          onClick={() => setTimelineOpen(!timelineOpen)}
-        >
-          Timeline
-        </button>
-        <button
-          type="button"
           className="button button--render"
           disabled={!state || busy}
           title="Render a full-resolution still — choose where to save it"
@@ -185,6 +184,8 @@ export function TopBar() {
           <SaveIcon size={14} /> Save
         </button>
       </div>
+
+      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
     </header>
   );
 }

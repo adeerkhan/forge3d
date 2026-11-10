@@ -7,14 +7,13 @@ import { RecoveryBanner } from "./components/RecoveryBanner";
 import { RenderQueue } from "./components/RenderQueue";
 import { SceneTree } from "./components/SceneTree";
 import { StatusBar } from "./components/StatusBar";
-import { Timeline } from "./components/Timeline";
 import { TopBar } from "./components/TopBar";
 import { Viewport3D } from "./viewport/Viewport3D";
 import { CloseIcon } from "./components/icons";
 import { useSession } from "./state/session-context";
 
 export default function App() {
-  const { state, error, notice, actions, timelineOpen } = useSession();
+  const { state, error, notice, actions } = useSession();
   // Properties sidebar visibility (N). UI state, like the timeline.
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -44,7 +43,6 @@ export default function App() {
                 <SettingsSidebar />
               </aside>
             )}
-            {timelineOpen && <Timeline />}
           </>
         ) : (
           <>
@@ -89,8 +87,8 @@ function useKeyboardShortcuts({
     setTool,
     cameraView,
     setCameraView,
-    timelineOpen,
-    setTimelineOpen,
+    flyMode,
+    setFlyMode,
   } = useSession();
 
   useEffect(() => {
@@ -114,17 +112,17 @@ function useKeyboardShortcuts({
 
       if (!mod) {
         if (event.key === "Escape") {
-          if (cameraView) setCameraView(false);
+          if (flyMode) setFlyMode(false);
+          else if (cameraView) setCameraView(false);
           else void actions.select([]);
           return;
         }
+        // WASD and QE belong to the fly camera; the tool and action shortcuts
+        // would otherwise steal them mid-flight.
+        if (flyMode) return;
         if (event.key === "0") {
           // Blender's camera-view toggle; numpad 0 reports the same key.
           setCameraView(!cameraView);
-          return;
-        }
-        if (key === "t") {
-          setTimelineOpen(!timelineOpen);
           return;
         }
         if (key === "n") {
@@ -194,8 +192,8 @@ function useKeyboardShortcuts({
     cameraView,
     setCameraView,
     setTool,
-    timelineOpen,
-    setTimelineOpen,
+    flyMode,
+    setFlyMode,
     sidebarOpen,
     setSidebarOpen,
   ]);

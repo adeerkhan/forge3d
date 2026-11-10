@@ -62,8 +62,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [tool, setTool] = useState<Tool>("select");
   const [space, setSpace] = useState<ToolSpace>("world");
   const [cameraView, setCameraView] = useState(false);
-  /** Animation timeline visibility. UI state, not project state. */
-  const [timelineOpen, setTimelineOpen] = useState(false);
+  /** Fly camera. UI state, not project state. */
+  const [flyMode, setFlyMode] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [terrainResolution, setTerrainResolution] = useState(96);
   const [presets, setPresets] = useState<ScenePreset[]>([]);
@@ -1065,8 +1065,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     setSpace,
     cameraView,
     setCameraView,
-    timelineOpen,
-    setTimelineOpen,
+    flyMode,
+    setFlyMode,
     engine,
     render,
     exporting,

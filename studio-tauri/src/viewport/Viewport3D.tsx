@@ -529,6 +529,23 @@ function readTransform(object: THREE.Object3D): Transform {
 }
 
 /**
+ * A camera as the scene transform the renderer expects.
+ *
+ * The camera's own orientation: the studio transform's forward is -Z, the same
+ * axis a three.js camera looks down, and `applyTransform` writes the Euler back
+ * in the same ZYX order — so the round-trip is exact. Aiming at a fixed point
+ * instead would silently pitch the captured camera towards it.
+ */
+function cameraTransform(camera: THREE.PerspectiveCamera): Transform {
+  const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "ZYX");
+  return {
+    translation: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+    rotationDeg: { x: euler.x / DEG, y: euler.y / DEG, z: euler.z / DEG },
+    scale: { x: 1, y: 1, z: 1 },
+  };
+}
+
+/**
  * Remove a group's contents. Only geometry this crate created is disposed:
  * imported glTF scenes share geometry and materials with the asset cache, and
  * disposing them would break every other object using the same file. The one
@@ -573,6 +590,7 @@ export function Viewport3D() {
     cameraView,
     render,
     terrainResolution,
+    flyMode,
     setCameraView,
   } = useSession();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -599,6 +617,13 @@ export function Viewport3D() {
     fov: number;
   } | null>(null);
   const inCameraView = useRef(false);
+  /** Fly-camera state: held keys, an in-progress look drag, and the current
+   *  yaw/pitch (OrbitControls owns the orientation until fly mode starts). */
+  const flyKeys = useRef(new Set<string>());
+  const flyLook = useRef<{ x: number; y: number } | null>(null);
+  const flyAngles = useRef({ yaw: 0, pitch: 0 });
+  const flyModeRef = useRef(flyMode);
+  flyModeRef.current = flyMode;
 
   const textureCache = useRef(new Map<string, Promise<THREE.Texture>>());
   const loadTexture = useCallback((path: string): Promise<THREE.Texture> => {
@@ -914,16 +939,36 @@ export function Viewport3D() {
       });
     });
 
-    // Click (not drag) selects; dragging orbits the viewport.
+    // Click (not drag) selects; dragging orbits the viewport, or looks around
+    // in fly mode.
     let pressed: { x: number; y: number } | null = null;
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
 
     const onPointerDown = (event: PointerEvent) => {
       pressed = { x: event.clientX, y: event.clientY };
+      if (flyModeRef.current && event.button === 0) {
+        flyLook.current = { x: event.clientX, y: event.clientY };
+      }
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      const look = flyLook.current;
+      if (!look) return;
+      flyAngles.current.yaw -= (event.clientX - look.x) * 0.0032;
+      flyAngles.current.pitch = Math.max(
+        -1.55,
+        Math.min(1.55, flyAngles.current.pitch - (event.clientY - look.y) * 0.0032),
+      );
+      flyLook.current = { x: event.clientX, y: event.clientY };
+      camera.quaternion.setFromEuler(
+        new THREE.Euler(flyAngles.current.pitch, flyAngles.current.yaw, 0, "YXZ"),
+      );
+      runtime.needsRender = true;
     };
 
     const onPointerUp = (event: PointerEvent) => {
+      flyLook.current = null;
       if (!pressed) return;
       const travelled = Math.hypot(event.clientX - pressed.x, event.clientY - pressed.y);
       pressed = null;
@@ -959,7 +1004,29 @@ export function Viewport3D() {
     };
 
     canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
+
+    // Fly camera: WASD in the view plane, Q/E down and up, Shift to go faster.
+    const FLY_KEYS = new Set(["w", "a", "s", "d", "q", "e", "shift"]);
+    const onFlyKeyDown = (event: KeyboardEvent) => {
+      if (!flyModeRef.current) return;
+      const key = event.key.toLowerCase();
+      if (!FLY_KEYS.has(key)) return;
+      flyKeys.current.add(key);
+      runtime.needsRender = true;
+      event.preventDefault();
+    };
+    const onFlyKeyUp = (event: KeyboardEvent) => {
+      flyKeys.current.delete(event.key.toLowerCase());
+    };
+    const onWindowBlur = () => {
+      flyKeys.current.clear();
+      flyLook.current = null;
+    };
+    window.addEventListener("keydown", onFlyKeyDown);
+    window.addEventListener("keyup", onFlyKeyUp);
+    window.addEventListener("blur", onWindowBlur);
 
     /**
      * Publish the Solid camera in the renderer's frame every frame, so a
@@ -998,17 +1065,43 @@ export function Viewport3D() {
       });
     };
 
+    /**
+     * Publish the viewport camera as a scene transform. The timeline's path
+     * recorder reads it while a take is running, so what gets keyed is exactly
+     * what is on screen — the camera's own orientation, not an orbit aim.
+     */
+    const publishCameraTransform = () => {
+      viewStore.cameraTransform = cameraTransform(camera);
+    };
+
     let frame = 0;
     let lastQuaternion: Quaternion = [0, 0, 0, 1];
-    const tick = () => {
+    let lastTick = performance.now();
+    const tick = (now: number = performance.now()) => {
       frame = requestAnimationFrame(tick);
+      const dt = Math.min(0.1, (now - lastTick) / 1000);
+      lastTick = now;
       // OrbitControls.update() ends with `camera.lookAt(target)`, which would
       // overwrite the camera-view quaternion every frame. While looking through
-      // the project camera, the model owns the view. Its return value also
-      // tells us whether the camera actually moved (damping keeps it true
-      // until the motion settles) — an idle viewport then costs no draw.
-      const moved = inCameraView.current ? false : orbit.update();
+      // the project camera (or flying), the model owns the view. Its return
+      // value also tells us whether the camera actually moved (damping keeps it
+      // true until the motion settles) — an idle viewport then costs no draw.
+      const flying = flyModeRef.current;
+      const moved = inCameraView.current || flying ? false : orbit.update();
+      if (flying && flyKeys.current.size > 0) {
+        const speed = (flyKeys.current.has("shift") ? 14 : 5) * dt;
+        const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        if (flyKeys.current.has("w")) camera.position.addScaledVector(forward, speed);
+        if (flyKeys.current.has("s")) camera.position.addScaledVector(forward, -speed);
+        if (flyKeys.current.has("a")) camera.position.addScaledVector(right, -speed);
+        if (flyKeys.current.has("d")) camera.position.addScaledVector(right, speed);
+        if (flyKeys.current.has("e")) camera.position.y += speed;
+        if (flyKeys.current.has("q")) camera.position.y -= speed;
+        runtime.needsRender = true;
+      }
       updateViewStore();
+      publishCameraTransform();
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
       if (
@@ -1042,7 +1135,11 @@ export function Viewport3D() {
       cancelAnimationFrame(frame);
       observer.disconnect();
       canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
+      window.removeEventListener("keydown", onFlyKeyDown);
+      window.removeEventListener("keyup", onFlyKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
       gizmo.detach();
       gizmo.dispose();
       orbit.dispose();
@@ -1244,7 +1341,9 @@ export function Viewport3D() {
         (object) => object.id === project.scene.activeCamera && object.kind.type === "camera",
       ) ?? project.scene.objects.find((object) => object.kind.type === "camera");
 
-    if (cameraView) {
+    // Fly mode owns the camera while it is on: applying the camera object's
+    // transform here would snap the view back on every project edit.
+    if (cameraView && !flyMode) {
       if (activeCamera && activeCamera.kind.type === "camera") {
         const transform = activeCamera.transform;
         runtime.camera.up.set(0, 1, 0);
@@ -1361,7 +1460,7 @@ export function Viewport3D() {
     }
     // Everything above mutated the scene; draw once on the next tick.
     runtime.needsRender = true;
-  }, [cameraView, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
+  }, [cameraView, flyMode, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
 
   // A project HDRI replaces the studio sky for Material and Rendered. The
   // viewport decodes and pre-filters it here (Rendered receives the path and
@@ -1474,8 +1573,30 @@ export function Viewport3D() {
     }
   }, [cameraView]);
 
+  // Fly mode: free look, no orbit target. Leaving it hands the camera back to
+  // OrbitControls, aimed ahead so orbiting continues from where you stopped.
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    if (!runtime) return;
+    if (!flyMode) {
+      runtime.orbit.enabled = true;
+      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(runtime.camera.quaternion);
+      runtime.orbit.target.copy(runtime.camera.position).addScaledVector(forward, 10);
+      runtime.orbit.update();
+      runtime.needsRender = true;
+      return;
+    }
+    // Camera view and fly mode cannot both own the camera.
+    if (cameraView) setCameraView(false);
+    runtime.orbit.enabled = false;
+    flyKeys.current.clear();
+    const euler = new THREE.Euler().setFromQuaternion(runtime.camera.quaternion, "YXZ");
+    flyAngles.current = { yaw: euler.y, pitch: euler.x };
+    runtime.needsRender = true;
+  }, [flyMode, cameraView, setCameraView]);
+
   const viewAlong = useCallback((axis: Axis) => {
-    if (cameraView) return;
+    if (cameraView || flyModeRef.current) return;
     const runtime = runtimeRef.current;
     if (!runtime) return;
     const direction =
@@ -1574,28 +1695,7 @@ export function Viewport3D() {
   /** The solid camera as a scene transform, aimed at the terrain centre. */
   const cameraTransformFromView = useCallback((): Transform | null => {
     const runtime = runtimeRef.current;
-    if (!runtime) return null;
-    // `Object3D.lookAt` aims +Z at the target; only cameras and lights aim -Z.
-    // Using a plain Object3D made the captured camera face away from the scene,
-    // which is why camera view went black.
-    const aim = new THREE.PerspectiveCamera();
-    aim.position.copy(runtime.camera.position);
-    aim.up.set(0, 1, 0);
-    aim.lookAt(0, 0, 0);
-    const euler = new THREE.Euler().setFromQuaternion(aim.quaternion, "ZYX");
-    return {
-      translation: {
-        x: runtime.camera.position.x,
-        y: runtime.camera.position.y,
-        z: runtime.camera.position.z,
-      },
-      rotationDeg: {
-        x: euler.x / DEG,
-        y: euler.y / DEG,
-        z: euler.z / DEG,
-      },
-      scale: { x: 1, y: 1, z: 1 },
-    };
+    return runtime ? cameraTransform(runtime.camera) : null;
   }, []);
 
   /**
@@ -1623,8 +1723,9 @@ export function Viewport3D() {
       transform,
     });
     await actionsRef.current.apply({ type: "setActiveCamera", id: active.id });
-    // Numpad 1 should also put the viewport into camera mode.
-    setCameraViewRef.current(true);
+    // Numpad 1 should also put the viewport into camera mode — unless fly mode
+    // owns the camera.
+    if (!flyModeRef.current) setCameraViewRef.current(true);
     setProblem(null);
     actionsRef.current.notify(`Camera "${active.name}" set from this view`);
   }, [cameraTransformFromView]);

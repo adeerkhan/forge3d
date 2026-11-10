@@ -6,6 +6,7 @@ import {
   CameraIcon,
   CopyIcon,
   CursorIcon,
+  FlyIcon,
   ImportIcon,
   MoveIcon,
   PlusIcon,
@@ -39,6 +40,8 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
     cameraView,
     setCameraView,
     render,
+    flyMode,
+    setFlyMode,
   } = useSession();
   const [addOpen, setAddOpen] = useState(false);
   const addRef = useRef<HTMLDivElement>(null);
@@ -232,6 +235,18 @@ export function ViewportToolbar({ onRender }: { onRender: () => void }) {
         onClick={() => setCameraView(!cameraView)}
       >
         <CameraIcon size={15} />
+      </button>
+
+      <span className="toolbar-divider" />
+
+      <button
+        type="button"
+        className={`tool-button ${flyMode ? "is-active" : ""}`}
+        title="Fly camera — W A S D to move, Q E for down and up, drag to look"
+        aria-pressed={flyMode}
+        onClick={() => setFlyMode(!flyMode)}
+      >
+        <FlyIcon size={15} />
       </button>
     </div>
   );

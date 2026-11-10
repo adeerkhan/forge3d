@@ -1,8 +1,10 @@
 import { useState } from "react";
 
 import { useSession } from "../state/session-context";
+import { Timeline } from "./Timeline";
 import {
   CubeIcon,
+  KeyframeIcon,
   MountainIcon,
   SlidersIcon,
   SunIcon,
@@ -25,7 +27,7 @@ import {
  * object are different questions, and a 1000px scroll mixes them.
  */
 
-type PropsTab = "render" | "scene" | "light" | "object";
+type PropsTab = "render" | "scene" | "light" | "object" | "animation";
 
 const TABS: {
   id: PropsTab;
@@ -56,6 +58,12 @@ const TABS: {
     label: "Object",
     Icon: CubeIcon,
     title: "Object: the selected object's transform, material and settings",
+  },
+  {
+    id: "animation",
+    label: "Animation",
+    Icon: KeyframeIcon,
+    title: "Animation: the timeline, keyframes, camera-path recording and export",
   },
 ];
 
@@ -124,6 +132,7 @@ export function SettingsSidebar() {
                 </>
               )}
               {tab === "object" && <ObjectProperties />}
+              {tab === "animation" && <Timeline />}
             </>
           )}
           {tab === "object" && (

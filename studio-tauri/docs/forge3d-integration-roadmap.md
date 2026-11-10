@@ -32,6 +32,10 @@ be a payload field: vector layers and meshes.
 | Engine backend/adapter in the probe (first half of 8.0) | done |
 | HDRI/sky axis fix (Z-up terrain → Y-up environment frame for the sky pass) | done |
 | Properties sidebar (Render / Scene / Lighting / Object tabs, N, remembered sections) | done |
+| Animation tab (Render / Scene / Lighting / Object / **Animation**) — the timeline moved out of the bottom strip into the sidebar | done |
+| About Forge3D Studio (File menu): shell version, engine + adapter, device features, license, keyboard shortcuts | done |
+| Fly camera (W A S D, Q E, drag-look, Shift to sprint) and camera-path recording onto the timeline | done |
+| Captured camera keeps its own orientation (it used to be re-aimed at the world origin) | done |
 | 5.5 shadows — filter (PCF/PCSS) and map size wired model → payload → engine | done (softness/intensity are inert in the terrain path; not exposed) |
 | One lighting rig shared by preview and payload (fixture read by Rust and node) | done |
 | 8.0b — granted device features in the probe/status bar | done |
