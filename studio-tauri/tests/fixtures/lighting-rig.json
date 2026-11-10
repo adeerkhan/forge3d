@@ -26,7 +26,8 @@
       "water": {
         "enabled": false,
         "level": 0.0,
-        "slopeThreshold": 0.18
+        "slopeThreshold": 0.18,
+        "roughness": 0.35
       },
       "fog": {
         "enabled": false,

@@ -473,6 +473,7 @@ pub struct RenderRequest {
     pub water_enabled: bool,
     pub water_level: f32,
     pub water_slope_threshold: f32,
+    pub water_roughness: f32,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -515,6 +516,7 @@ impl RenderRequest {
         self.water_enabled = settings.water.enabled;
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
+        self.water_roughness = settings.water.roughness;
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -567,7 +569,7 @@ impl RenderRequest {
                 "color": self.sun_color,
             },
             "quality": {
-                "samples": 1,
+
                 // Quality presets: interactive previews skip POM and any AO;
                 // finals honour the project's settings. Shadows and sky follow
                 // the project in both.
@@ -579,8 +581,15 @@ impl RenderRequest {
                 // +0.06 s, with the output (and the AOVs) still at the
                 // requested size. Previews and finals both do it, so the still
                 // matches the preview.
-                "renderScale": 2.0,
-                "pom": final_quality,
+                // ... but only up to a pixel budget: a "4x viewport" request
+                // is already 4x the pixels, and 2x on top of that is 8x
+                // internally, which the GPU will refuse or crawl through.
+                "renderScale": if u64::from(self.width) * u64::from(self.height) <= 4_000_000 {
+                    2.0
+                } else {
+                    1.0
+                },
+
                 "sky": self.sky,
                 "ambientOcclusion": final_quality && self.ambient_occlusion,
                 "heightAo": final_quality && self.ambient_occlusion,
@@ -602,6 +611,7 @@ impl RenderRequest {
                     "enabled": self.water_enabled,
                     "level": self.water_level,
                     "slopeThreshold": self.water_slope_threshold,
+                    "roughness": self.water_roughness,
                 },
                 "fog": {
                     "enabled": self.fog_enabled,
@@ -714,6 +724,7 @@ impl RenderRequest {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            water_roughness: 0.35,
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -766,6 +777,7 @@ mod tests {
             water_enabled: false,
             water_level: 0.0,
             water_slope_threshold: 0.18,
+            water_roughness: 0.35,
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -788,10 +800,9 @@ mod tests {
         assert_eq!(payload["output"], "/out/frame.png");
 
         // The built-in sky is requested by *not* sending a path, and a preview
-        // frame skips POM and AO while a final honours them.
+        // frame skips AO while a final honours it.
         let preview = request().to_payload("preview", None);
         assert!(preview["environment"].is_null());
-        assert_eq!(preview["quality"]["pom"], false);
         assert_eq!(preview["quality"]["ambientOcclusion"], false);
         assert_eq!(preview["quality"]["aov"]["albedo"], false);
         assert_eq!(preview["quality"]["denoise"], false);
@@ -843,6 +854,7 @@ mod tests {
                 enabled: true,
                 level: 1650.0,
                 slope_threshold: 0.05,
+                roughness: 0.2,
             },
             ..studio_core::RenderSettings::default()
         };
@@ -857,6 +869,7 @@ mod tests {
             payload["quality"]["water"]["slopeThreshold"],
             f64::from(0.05_f32)
         );
+        assert_eq!(payload["quality"]["water"]["roughness"], f64::from(0.2_f32));
     }
 
     #[test]

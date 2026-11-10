@@ -235,6 +235,7 @@ class StudioRenderer:
             return None, None
         level = float(water.get("level", 0.0) or 0.0)
         slope = float(water.get("slopeThreshold", 0.02) or 0.0)
+        roughness = float(water.get("roughness", WATER_ROUGHNESS) or WATER_ROUGHNESS)
         # 0 means auto: the engine's own default, the lowest 15%. A level
         # *below* the terrain means the same thing — there is no water down
         # there, and a silent empty frame reads as a broken control. Fall back
@@ -280,7 +281,7 @@ class StudioRenderer:
             # measured: 302 sparkle pixels in a 1180x330 frame, 2 with it.
             optics=WaterOpticsSettings(
                 mode="physical",
-                roughness=WATER_ROUGHNESS,
+                roughness=roughness,
                 surface_height=surface_height,
                 surface_normals=surface_normals,
             ),
@@ -417,7 +418,6 @@ class StudioRenderer:
             AovSettings,
             DetailSettings,
             HeightAoSettings,
-            PomSettings,
             SkySettings,
             make_terrain_params_config,
         )
@@ -519,7 +519,6 @@ class StudioRenderer:
             # other feature combined is ~150 ms. Viewport frames therefore skip
             # it, and only a final still pays for it.
             ao_weight=0.6 if quality.get("ambientOcclusion") else 0.0,
-            pom=PomSettings(bool(quality.get("pom", True)), "Occlusion", 0.3, 8, 32, 4, False, False),
             detail=DetailSettings(enabled=False),
             height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
             aov=AovSettings(

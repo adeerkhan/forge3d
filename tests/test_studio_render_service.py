@@ -371,3 +371,27 @@ def test_fog_carries_the_projects_density_and_falloff():
     # Reach is a fraction of the terrain's height; the engine wants a falloff
     # per metre.
     assert settings.height_falloff > 0.0
+
+
+def test_the_water_roughness_reaches_the_optics(water):
+    """The roughness is the knob that widens the sun's highlight; it must
+    reach the engine, not stay a constant in the service."""
+    stub = _WaterStub(
+        heights=np.zeros((8, 8), dtype=np.float32), scale=1.0, range=(0.0, 100.0)
+    )
+    _mask, settings = water(
+        stub,
+        {
+            "quality": {
+                "water": {
+                    "enabled": True,
+                    "level": 0.0,
+                    "slopeThreshold": 1.0,
+                    "roughness": 0.7,
+                }
+            }
+        },
+    )
+    assert settings is not None
+    assert settings.optics is not None
+    assert settings.optics.roughness == pytest.approx(0.7)

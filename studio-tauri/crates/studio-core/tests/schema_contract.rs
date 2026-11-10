@@ -82,7 +82,7 @@ fn project_document_key_shape_is_stable() {
     // Water is off until the project asks for it; the engine derives the mask.
     expect_keys(
         &value["render"]["water"],
-        &["enabled", "level", "slopeThreshold"],
+        &["enabled", "level", "slopeThreshold", "roughness"],
     );
     assert_eq!(value["render"]["water"]["enabled"], false);
     assert_eq!(value["render"]["water"]["level"], 0.0);

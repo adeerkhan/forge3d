@@ -725,6 +725,16 @@ export function AtmosphereSection() {
                 commit({ water: { ...render.water, slopeThreshold } })
               }
             />
+            <NumberField
+              label="Roughness"
+              value={render.water.roughness}
+              step={0.05}
+              min={0}
+              max={1}
+              onCommit={(roughness) =>
+                commit({ water: { ...render.water, roughness } })
+              }
+            />
             <p className="hint">
               The engine derives the water mask from the DEM: ground below the
               level that is flat enough to hold it. The level is an absolute

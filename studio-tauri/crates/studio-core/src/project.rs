@@ -449,6 +449,11 @@ impl Project {
         if !self.render.water.level.is_finite() {
             return Err("water level must be a finite elevation".to_owned());
         }
+        if !self.render.water.roughness.is_finite()
+            || !(0.0..=1.0).contains(&self.render.water.roughness)
+        {
+            return Err("water roughness must be between 0 and 1".to_owned());
+        }
         if !self.render.water.slope_threshold.is_finite()
             || !(0.0..=1.0).contains(&self.render.water.slope_threshold)
         {
@@ -627,6 +632,10 @@ pub struct WaterSettings {
     /// Ground steeper than this (metres of rise per DEM cell) stays dry.
     #[serde(default = "default_water_slope_threshold")]
     pub slope_threshold: f32,
+    /// The water surface's roughness. Higher is a softer, wider sun highlight;
+    /// a mirror-calm lake is near 0, a choppy one higher.
+    #[serde(default = "default_water_roughness")]
+    pub roughness: f32,
 }
 
 impl Default for WaterSettings {
@@ -635,6 +644,7 @@ impl Default for WaterSettings {
             enabled: false,
             level: 0.0,
             slope_threshold: default_water_slope_threshold(),
+            roughness: default_water_roughness(),
         }
     }
 }
@@ -887,6 +897,10 @@ fn default_bloom_softness() -> f32 {
 
 fn default_bloom_intensity() -> f32 {
     0.3
+}
+
+fn default_water_roughness() -> f32 {
+    0.35
 }
 
 fn default_water_slope_threshold() -> f32 {

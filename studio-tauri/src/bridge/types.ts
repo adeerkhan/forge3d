@@ -202,6 +202,8 @@ export interface WaterSettings {
   level: number;
   /** Metres of rise per DEM cell; steeper ground stays dry. */
   slopeThreshold: number;
+  /** The water surface's roughness: higher is a softer, wider sun highlight. */
+  roughness: number;
 }
 
 export type SkyModel = "hosek" | "preetham" | "aether";
