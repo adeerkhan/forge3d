@@ -168,6 +168,14 @@ All use §2. Nothing new is introduced beyond the settings below.
   engine's depth-graded blue, not a physical surface.
 - Check: schema contract, payload assertion, four service tests, round-trip.
 
+**Fog tint is conditional, and the UI says so.** The shader scatters the sky
+colour whenever the sky pass is on — `select(fog_uniforms.fog_inscatter.rgb,
+sky_color, sky_enabled)` — so the R/G/B tint is inert with the sky on
+(measured 0 samples) and live with it off (30,127 samples on a 480×300 frame).
+The tint fields now appear only when the sky background is off, with a hint
+saying where the haze colour comes from otherwise; the density and reach dials
+work in both states (reach 0.5 → 0.15 changed 92,457 samples).
+
 ### 5.3 Clouds (0.5 day) — **blocked, measured**
 - Settings: `clouds.enabled`, `coverage`, `density`, `shadowStrength`.
 - Service: `CloudSettings(enabled, shadows_enabled=…, coverage, density,

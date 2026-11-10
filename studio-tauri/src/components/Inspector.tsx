@@ -706,33 +706,48 @@ export function AtmosphereSection() {
               max={1}
               onCommit={(reach) => commit({ fog: { ...render.fog, reach } })}
             />
-            <div className="pair">
-              {(["R", "G", "B"] as const).map((channel, index) => (
-                <NumberField
-                  key={channel}
-                  label={channel}
-                  value={render.fog.inscatter[index]}
-                  step={0.05}
-                  min={0}
-                  max={1}
-                  onCommit={(value) => {
-                    const inscatter = [...render.fog.inscatter] as [
-                      number,
-                      number,
-                      number,
-                    ];
-                    inscatter[index] = value;
-                    commit({ fog: { ...render.fog, inscatter } });
-                  }}
-                />
-              ))}
-            </div>
+            {/* The engine scatters the sky's colour when the sky pass is on
+                (`select(fog_inscatter, sky_color, sky_enabled)`), so a tint
+                would be a control that changes nothing in the default state:
+                measured 0 samples with the sky on, 30,127 with it off. */}
+            {render.sky ? (
+              <p className="hint">
+                The haze takes its colour from the analytic sky. Turn the sky
+                background off (Lighting → Sky) to tint the fog itself.
+              </p>
+            ) : (
+              <>
+                <div className="pair">
+                  {(["R", "G", "B"] as const).map((channel, index) => (
+                    <NumberField
+                      key={channel}
+                      label={channel}
+                      value={render.fog.inscatter[index]}
+                      step={0.05}
+                      min={0}
+                      max={1}
+                      onCommit={(value) => {
+                        const inscatter = [...render.fog.inscatter] as [
+                          number,
+                          number,
+                          number,
+                        ];
+                        inscatter[index] = value;
+                        commit({ fog: { ...render.fog, inscatter } });
+                      }}
+                    />
+                  ))}
+                </div>
+                <p className="hint">
+                  Inscatter is the colour the haze scatters: white reads as
+                  neutral mist, a warm tint as dust, a cool one as sea air.
+                </p>
+              </>
+            )}
             <p className="hint">
               Height-based fog, applied after the lighting and before the
               tone-map. Reach is how far up the terrain the haze climbs, as a
               fraction of its height — 0.5 is halfway up the mountain.
-              Inscatter is the colour the haze scatters: white reads as
-              neutral mist, a warm tint as dust, a cool one as sea air.
             </p>
           </>
         )}
