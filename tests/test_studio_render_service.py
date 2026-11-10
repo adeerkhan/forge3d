@@ -474,3 +474,18 @@ def test_despeckle_absorbs_isolated_classes_and_keeps_blocks():
     assert (cleaned == 2).sum() == 72
     # Nothing happens on a clean raster.
     assert np.array_equal(service.despeckle_classes(np.full((5, 5), 3)), np.full((5, 5), 3))
+
+
+def test_the_legend_is_the_engines_and_needs_a_colormap():
+    """`forge3d.legend.Legend` draws the bar and ticks with packaged text; the
+    compositor only runs when a colormap is selected."""
+    service = load_service()
+    frame = np.full((120, 200, 3), 40, dtype=np.uint8)
+    assert np.array_equal(
+        service.compose_legend(frame, "viridis", (0.0, 4000.0)).shape, frame.shape
+    )
+    drawn = service.compose_legend(frame, "viridis", (0.0, 4000.0))
+    assert drawn.shape == frame.shape
+    # The legend lands bottom-right and leaves the top-left untouched.
+    assert (drawn[:60, :100] == frame[:60, :100]).all()
+    assert not (drawn[60:, 100:] == frame[60:, 100:]).all()

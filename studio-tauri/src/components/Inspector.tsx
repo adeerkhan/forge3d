@@ -1136,16 +1136,27 @@ function TerrainEditor({
             }
           />
           {renderSettings.render.colormap && (
-            <NumberField
-              label="Colormap strength"
-              value={renderSettings.render.colormapStrength}
-              step={0.05}
-              min={0}
-              max={1}
-              onCommit={(colormapStrength) =>
-                renderSettings.commit({ colormapStrength })
-              }
-            />
+            <>
+              <NumberField
+                label="Colormap strength"
+                value={renderSettings.render.colormapStrength}
+                step={0.05}
+                min={0}
+                max={1}
+                onCommit={(colormapStrength) =>
+                  renderSettings.commit({ colormapStrength })
+                }
+              />
+              <Toggle
+                label="Elevation legend"
+                checked={renderSettings.render.legend}
+                onChange={(legend) => renderSettings.commit({ legend })}
+              />
+              <span className="hint">
+                The engine's own legend (gradient bar, ticks in metres) in the
+                frame's corner, scaled with the still.
+              </span>
+            </>
           )}
         </>
       )}

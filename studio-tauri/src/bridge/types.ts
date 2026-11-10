@@ -173,6 +173,8 @@ export interface RenderSettings {
   colormap: string;
   /** How strongly the colormap covers the terrain material, 0..=1. */
   colormapStrength: number;
+  /** Draw the elevation legend in the frame's corner (needs a colormap). */
+  legend: boolean;
   /** Atmospheric fog on the terrain. */
   fog: FogSettings;
   /** Bloom on the finished frame: the bright pixels glow. */

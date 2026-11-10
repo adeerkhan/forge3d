@@ -714,6 +714,9 @@ class StudioRenderer:
                 ) from exc
 
         rgb = apply_post_effects(rgb, quality)
+        legend_name = str(quality.get("colormap") or "").strip()
+        if bool(quality.get("legend", False)) and legend_name:
+            rgb = compose_legend(rgb, legend_name, self.range)
 
         png = encode_png(rgb)
 
@@ -799,6 +802,71 @@ def apply_vignette(image: np.ndarray, strength: float) -> np.ndarray:
     falloff = np.clip((radius - 0.5) / 0.5, 0.0, 1.0)
     falloff = falloff * falloff * (3.0 - 2.0 * falloff)
     return image * (1.0 - float(strength) * falloff)[:, :, None]
+
+
+def compose_legend(
+    rgb: np.ndarray,
+    colormap_name: str,
+    domain: Tuple[float, float],
+) -> np.ndarray:
+    """Draw the engine's elevation legend in the frame's bottom-right corner.
+
+    `forge3d.legend.Legend` renders the gradient bar, ticks and labels with the
+    engine's own packaged text — the same object the engine's cartography uses.
+    The domain is the DEM's metres, so the ticks read as elevation even though
+    the shader works in scaled heights.
+
+    Sizes follow the frame, and the whole legend shrinks until it fits: a
+    viewport preview gets a compact bar, a 4K still a full one with a title.
+    A frame too small for any readable legend gets none rather than a smudge.
+    """
+    from forge3d import get_colormap
+    from forge3d.legend import Legend, LegendConfig
+
+    token = colormap_name if ":" in colormap_name else f"forge3d:{colormap_name}"
+    colormap = get_colormap(token)
+    height, width = rgb.shape[:2]
+    base = max(0.25, min(width, height) / 600.0)
+    legend = None
+    scale = base
+    for step in range(5):
+        scale = base * (0.72**step)
+        compact = scale < 0.6
+        config = LegendConfig(
+            orientation="vertical",
+            bar_width=max(10, int(round(22 * scale))),
+            bar_height=max(48, int(round(220 * scale))),
+            tick_count=5,
+            label_suffix=" m",
+            label_format="{:.0f}",
+            font_size=max(9, int(round(14 * scale))),
+            title=None if compact else "Elevation",
+            title_font_size=max(11, int(round(16 * scale))),
+            # A card, not a floating label: a legend has to read on dark
+            # terrain and on snow.
+            background=(255, 255, 255, 235),
+        )
+        candidate = np.asarray(Legend.from_colormap(colormap, domain, config).render())
+        margin = max(6, int(round(16 * scale)))
+        if candidate.ndim != 3 or candidate.shape[2] != 4 or candidate.size == 0:
+            continue
+        if candidate.shape[0] + 2 * margin <= height and candidate.shape[1] + 2 * margin <= width:
+            legend = candidate
+            break
+    if legend is None:
+        return rgb
+    legend_h, legend_w = legend.shape[:2]
+    margin = max(6, int(round(16 * scale)))
+    y0 = height - margin - legend_h
+    x0 = width - margin - legend_w
+    patch = rgb[y0 : y0 + legend_h, x0 : x0 + legend_w].astype(np.float32)
+    alpha = legend[..., 3:4].astype(np.float32) / 255.0
+    out = patch * (1.0 - alpha) + legend[..., :3].astype(np.float32) * alpha
+    frame = rgb.copy()
+    frame[y0 : y0 + legend_h, x0 : x0 + legend_w] = np.clip(np.rint(out), 0, 255).astype(
+        np.uint8
+    )
+    return frame
 
 
 def apply_post_effects(rgb: np.ndarray, quality: Dict[str, Any]) -> np.ndarray:

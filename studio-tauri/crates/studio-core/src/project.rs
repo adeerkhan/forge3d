@@ -837,6 +837,11 @@ pub struct RenderSettings {
     /// How strongly the colormap covers the terrain material, 0..=1.
     #[serde(default = "default_colormap_strength")]
     pub colormap_strength: f32,
+    /// Draw the elevation legend (the engine's `Legend`: gradient bar, ticks
+    /// in metres, label) in the frame's corner. Only meaningful with a
+    /// colormap selected; inert without one.
+    #[serde(default)]
+    pub legend: bool,
     /// Atmospheric fog on the terrain.
     #[serde(default)]
     pub fog: FogSettings,
@@ -997,6 +1002,7 @@ impl Default for RenderSettings {
             water: WaterSettings::default(),
             colormap: String::new(),
             colormap_strength: default_colormap_strength(),
+            legend: false,
             fog: FogSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,

@@ -481,6 +481,8 @@ pub struct RenderRequest {
     /// Elevation colormap for the terrain; empty means none.
     pub colormap: String,
     pub colormap_strength: f32,
+    /// Draw the engine's elevation legend in the frame's corner.
+    pub legend: bool,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -531,6 +533,7 @@ impl RenderRequest {
         self.water_roughness = settings.water.roughness;
         self.colormap = settings.colormap.clone();
         self.colormap_strength = settings.colormap_strength;
+        self.legend = settings.legend;
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -635,6 +638,7 @@ impl RenderRequest {
                 },
                 "colormap": self.colormap,
                 "colormapStrength": self.colormap_strength,
+                "legend": self.legend,
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
@@ -752,6 +756,7 @@ impl RenderRequest {
             water_roughness: 0.35,
             colormap: String::new(),
             colormap_strength: 1.0,
+            legend: false,
             fog_enabled: false,
             fog_density: 0.05,
             fog_reach: 0.5,
@@ -810,6 +815,7 @@ mod tests {
             water_roughness: 0.35,
             colormap: String::new(),
             colormap_strength: 1.0,
+            legend: false,
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -948,6 +954,18 @@ mod tests {
         assert_eq!(payload["quality"]["sunVisibility"]["enabled"], true);
         assert_eq!(payload["quality"]["sunVisibility"]["distance"], 5000.0);
         assert_eq!(payload["quality"]["sunVisibility"]["steps"], 48);
+    }
+
+    #[test]
+    fn payload_carries_the_legend() {
+        let settings = studio_core::RenderSettings {
+            colormap: "viridis".to_owned(),
+            legend: true,
+            ..studio_core::RenderSettings::default()
+        };
+        let payload = request().with_settings(&settings).to_payload("final", None);
+        assert_eq!(payload["quality"]["colormap"], "viridis");
+        assert_eq!(payload["quality"]["legend"], true);
     }
 
     #[test]

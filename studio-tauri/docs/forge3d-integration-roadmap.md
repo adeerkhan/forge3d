@@ -51,7 +51,8 @@ be a payload field: vector layers and meshes.
 | Tonemap operators/LUT, SSAO/SSGI/SSR, planar reflections | **inert on this path, measured 0** (see 5.8) |
 | Ambient occlusion control | **removed** — 0 pixels changed, 2.0 s per frame (5.10) |
 | Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
-| Cartography: legend, map plate | **not built** (needs a class scheme the project does not have) |
+| 5.12 elevation legend — the engine's `Legend` in the frame's corner | done (needs a colormap) |
+| Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
 
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
@@ -395,6 +396,28 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   consumer for on this path, and each case says why in code: bloom/vignette
   (needs an HDR target and a pinned-shader change), the water blob filter and
   the class despeckle (raster rules, not renderer mechanisms).
+
+### 5.12 Elevation legend (0.25 day) — **done**
+- `RenderSettings.legend` (serde-default `false`) → `quality.legend`. When a
+  colormap is selected, the service composes the engine's own
+  `forge3d.legend.Legend` (gradient bar, five ticks in the DEM's metres, title)
+  into the frame's bottom-right corner with an alpha blend: the same object the
+  engine's cartography uses, drawn with its packaged text.
+- The legend scales with the frame (a viewport preview gets a compact bar
+  without the title, a 4K still the full card) and shrinks until it fits; a
+  frame too small for a readable legend gets none rather than a smudge.
+- Measured on the Swiss DEM (922×795, colormaps on): legend off → on changes
+  138,501 of 2,198,970 channel samples, **all of them inside the legend patch**
+  (68,844 there, 0 elsewhere); a 480×300 preview changes 31,179 of 432,000.
+- The toggle lives beside the colormap strength, and only appears with a
+  colormap — the legend explains a ramp, so without one there is nothing to
+  label.
+- **Not shipped: the map plate.** `forge3d.map_plate.MapPlate` (title, legend,
+  scale bar, insets, north arrow) calls `_check_pro_access("Map plate
+  composition")`, so it raises `LicenseError` without a Pro licence — and a
+  categorical legend still needs a class scheme the project does not store.
+- Check: schema contract + fixture, payload assertion, service test (the
+  compositor leaves the top-left untouched and the shape unchanged).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

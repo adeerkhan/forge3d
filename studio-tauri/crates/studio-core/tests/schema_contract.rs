@@ -77,6 +77,7 @@ fn project_document_key_shape_is_stable() {
             "water",
             "colormap",
             "colormapStrength",
+            "legend",
             "fog",
             "bloom",
             "vignette",
@@ -84,6 +85,7 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
     // Terrain self-shadowing is off by default and its rays reach 2 km.
+    assert_eq!(value["render"]["legend"], false);
     assert_eq!(value["render"]["sunVisibility"], false);
     assert_eq!(value["render"]["sunVisibilityDistance"], 2000.0);
     assert_eq!(value["render"]["sunVisibilitySteps"], 32);

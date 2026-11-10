@@ -76,8 +76,13 @@ operators and LUT, SSAO/SSGI/SSR, planar water reflections — all 0 changed
 samples on this path. Clouds wait on the interactive path's stale shader
 contract.
 
-Not built: a legend and the map plate (they need a class scheme the project
-does not have — guessing one would be the exact dishonesty this page forbids).
+Added later: an **elevation legend** — the engine's own `Legend` (gradient bar,
+ticks in metres) composed into the frame's corner with the colormap.
+
+Not built: the **map plate**. It exists in the engine, but
+`forge3d.map_plate.MapPlate` calls `_check_pro_access`, so it raises without a
+Pro licence; and a *categorical* legend still needs a class scheme the project
+does not store. Guessing one would be the dishonesty this page forbids.
 
 ## Definition of done
 
