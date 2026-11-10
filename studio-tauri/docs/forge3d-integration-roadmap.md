@@ -49,6 +49,7 @@ be a payload field: vector layers and meshes.
 | 5.9 despeckle — the land-cover gallery's 3×3 class rule on class overlays | done |
 | Material layers (snow/rock/wetness) | **blocked, measured** (`vs_main` writes a constant `world_normal`; slope ≈ 0) |
 | Tonemap operators/LUT, SSAO/SSGI/SSR, planar reflections | **inert on this path, measured 0** (see 5.8) |
+| Ambient occlusion control | **removed** — 0 pixels changed, 2.0 s per frame (5.10) |
 | Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
 | Cartography: legend, map plate | **not built** (needs a class scheme the project does not have) |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -308,12 +309,13 @@ All use §2. Nothing new is introduced beyond the settings below.
   `softness` 0.1 vs 0.5 moved 491 — a sub-pixel edge — so the service sends one
   hard ray. `resolution_scale` 0.5 moved 231 samples against 1.0, so the pass
   runs full-resolution.
-- Not final-gated (unlike SSAO): one ray march per pixel is cheap enough for
-  the Rendered viewport, so the shadows are visible while authoring.
+- Not final-gated: one ray march per pixel is cheap enough for the Rendered
+  viewport, so the shadows are visible while authoring.
 - Measured inert on this path, all 0 samples: `ScreenSpaceSettings` SSAO,
   SSGI and SSR; `ReflectionSettings` (planar water reflections); every
   `TonemapSettings` operator (`reinhard`, `reinhard_extended`, `aces`,
-  `uncharted2`, `exposure`) and white balance. The material-layer system is
+  `uncharted2`, `exposure`) and white balance. The **existing** ambient
+  occlusion control was in the same class and is deleted (see 5.10). The material-layer system is
   **blocked**: `vs_main` writes a constant `world_normal` (`(0,0,1)`), so the
   layer slope is ~0 — a rock layer at 0.001° changes 160,785 samples but at 1°
   changes **0**, even from a grazing camera (98,488 → 0). Altitude-driven snow
@@ -337,7 +339,22 @@ All use §2. Nothing new is introduced beyond the settings below.
 - Check: schema/default test (phase4), payload assertion, service test on the
   rule (a lone cell absorbed, a 3×3 block kept, a clean raster unchanged).
 
-### 5.10 The release audit, run after 5.9 — **green, one range fixed**
+### 5.10 Ambient occlusion — **removed (dead, and expensive)**
+- The `ambientOcclusion` checkbox (labelled "final, ~5 s") was shipped when the
+  still used the engine's *stylized* shading model. Studio's still now uses
+  `lambert_physical`, and that branch applies `shadow_visibility` and the sun
+  visibility but **no AO at all** (`terrain_pbr_shadows_...`: "Do not apply the
+  stylized shadow or AO floors").
+- Measured on the Bryce DEM (640×400, `render_scale` 2): off → on changes **0**
+  of 768,000 channel samples, twice in a row (the two runs are byte-identical),
+  while the frame goes from 22–23 ms to 1,987–2,017 ms. An expensive no-op.
+- Deleted end to end: the field on `RenderSettings`, the request/payload keys,
+  the service's `ao_weight`/`heightAo`, the Inspector section, and the wire
+  fixture. Loading an existing project that still carries the key is fine —
+  serde ignores the unknown field — and it renders exactly what it rendered
+  before, two seconds faster.
+
+### 5.11 The release audit, run after 5.10 — **green, one range fixed**
 - **Every `RenderSettings` field reaches the payload.** 26 fields; each is read
   in `with_settings`/`to_payload` or, for `width`/`height`, is the request's
   frame size.
@@ -377,7 +394,7 @@ from the same frame and **fails loudly** when the runtime is missing
 (`pip install oidn` / `pip install pyoidn`); two checkboxes in the render
 section (no panel); sidecar names the actual renderer and flags. Previews
 and viewport frames skip both entirely. AOV files are written for sequence
-frames too (they are final renders), like `ambientOcclusion` today.
+frames too (they are final renders).
 **Check (done):** schema contract + wire shape + round-trip tests, payload
 assertions (final vs preview), `npm test` all green; GPU-verified albedo/
 normal/depth AOVs written correctly and the denoise-missing failure path.

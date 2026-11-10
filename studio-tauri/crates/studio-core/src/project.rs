@@ -757,10 +757,6 @@ pub struct RenderSettings {
     /// PCF sun shadows.
     #[serde(default = "default_true")]
     pub shadows: bool,
-    /// Screen-space ambient occlusion. Costs ~4.8 s per frame, so it is a
-    /// deliberate choice for finals rather than the interactive default.
-    #[serde(default)]
-    pub ambient_occlusion: bool,
     /// Render the sky background in Rendered frames.
     #[serde(default = "default_true")]
     pub sky: bool,
@@ -983,7 +979,6 @@ impl Default for RenderSettings {
             height: 1080,
             exposure: default_exposure(),
             shadows: true,
-            ambient_occlusion: false,
             sky: true,
             ibl_intensity: default_ibl_intensity(),
             environment: None,

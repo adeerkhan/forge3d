@@ -442,7 +442,6 @@ pub struct RenderRequest {
     pub overlay: Option<OverlayRequest>,
     pub exposure: f64,
     pub shadows: bool,
-    pub ambient_occlusion: bool,
     /// Render the sky background; the project can turn it off for Rendered.
     pub sky: bool,
     /// Environment/IBL intensity multiplier (0 = environment light off).
@@ -509,7 +508,6 @@ impl RenderRequest {
     pub fn with_settings(mut self, settings: &studio_core::RenderSettings) -> Self {
         self.exposure = f64::from(settings.exposure);
         self.shadows = settings.shadows;
-        self.ambient_occlusion = settings.ambient_occlusion;
         self.sky = settings.sky;
         self.ibl_intensity = f64::from(settings.ibl_intensity);
         self.environment_background_intensity =
@@ -608,8 +606,6 @@ impl RenderRequest {
                 },
 
                 "sky": self.sky,
-                "ambientOcclusion": final_quality && self.ambient_occlusion,
-                "heightAo": final_quality && self.ambient_occlusion,
                 // Final stills (and the frames of a sequence) may ask for AOVs
                 // and an OIDN pass; previews never pay for either.
                 "aov": {
@@ -656,7 +652,6 @@ impl RenderRequest {
             "overlay": self.overlay,
             "exposure": self.exposure,
             "shadows": self.shadows,
-            "ambientOcclusion": self.ambient_occlusion,
             "iblIntensity": self.ibl_intensity,
             "environment": self.environment,
             "environmentBackgroundIntensity": self.environment_background_intensity,
@@ -730,7 +725,6 @@ impl RenderRequest {
             }),
             exposure: 1.35,
             shadows: true,
-            ambient_occlusion: false,
             sky: true,
             ibl_intensity: 1.0,
             environment: handoff
@@ -793,7 +787,6 @@ mod tests {
             overlay: None,
             exposure: 1.35,
             shadows: true,
-            ambient_occlusion: false,
             sky: true,
             ibl_intensity: 1.0,
             environment: None,
@@ -839,11 +832,10 @@ mod tests {
         assert_eq!(payload["environmentBackgroundIntensity"], 1.0);
         assert_eq!(payload["output"], "/out/frame.png");
 
-        // The built-in sky is requested by *not* sending a path, and a preview
-        // frame skips AO while a final honours it.
+        // The built-in sky is requested by *not* sending a path.
         let preview = request().to_payload("preview", None);
         assert!(preview["environment"].is_null());
-        assert_eq!(preview["quality"]["ambientOcclusion"], false);
+        assert!(preview["quality"].get("ambientOcclusion").is_none());
         assert_eq!(preview["quality"]["aov"]["albedo"], false);
         assert_eq!(preview["quality"]["denoise"], false);
     }

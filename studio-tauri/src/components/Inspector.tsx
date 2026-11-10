@@ -577,18 +577,6 @@ export function RenderSettingsEditor() {
         )}
       </Section>
 
-      <Section title="Quality" id="render-quality">
-        <Toggle
-          label="Ambient occlusion (final, ~5 s)"
-          checked={render.ambientOcclusion}
-          onChange={(ambientOcclusion) => commit({ ambientOcclusion })}
-        />
-        <p className="hint">
-          SSAO is final-only: it costs seconds per frame, and nobody watches a
-          preview's occlusion pass.
-        </p>
-      </Section>
-
       <Section title="Post" id="render-post">
         <Toggle
           label="Bloom the highlights"

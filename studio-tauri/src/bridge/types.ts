@@ -131,7 +131,6 @@ export interface RenderSettings {
   height: number;
   exposure: number;
   shadows: boolean;
-  ambientOcclusion: boolean;
   /** Sky background in Rendered preview and still frames. */
   sky: boolean;
   /** Environment/IBL intensity multiplier; 0 turns the environment light off. */

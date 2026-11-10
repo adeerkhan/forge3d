@@ -532,7 +532,6 @@ class StudioRenderer:
         from forge3d.terrain_params import (
             AovSettings,
             DetailSettings,
-            HeightAoSettings,
             SkySettings,
             make_terrain_params_config,
         )
@@ -645,12 +644,7 @@ class StudioRenderer:
             ibl_enabled=True,
             ibl_intensity=float(request.get("iblIntensity", 1.0)),
             exposure=float(request.get("exposure", 1.35)),
-            # The SSAO pass costs ~4.8 s per frame by itself (measured); every
-            # other feature combined is ~150 ms. Viewport frames therefore skip
-            # it, and only a final still pays for it.
-            ao_weight=0.6 if quality.get("ambientOcclusion") else 0.0,
             detail=DetailSettings(enabled=False),
-            height_ao=HeightAoSettings(enabled=bool(quality.get("heightAo", False))),
             aov=AovSettings(
                 enabled=want_aov or want_denoise,
                 # Denoise gets albedo/normal guidance from the same frame —
