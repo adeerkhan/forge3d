@@ -175,6 +175,10 @@ export interface RenderSettings {
   colormapStrength: number;
   /** Draw the elevation legend in the frame's corner (needs a colormap). */
   legend: boolean;
+  /** Export a map plate next to the still: cut out on white, titled, legend. */
+  plate: boolean;
+  /** The plate's title; "" means the DEM's file name. */
+  plateTitle: string;
   /** Atmospheric fog on the terrain. */
   fog: FogSettings;
   /** Bloom on the finished frame: the bright pixels glow. */

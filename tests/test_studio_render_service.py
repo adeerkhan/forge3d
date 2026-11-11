@@ -534,3 +534,31 @@ def test_the_overlay_rgba_is_decoded_once_per_file(tmp_path):
     # A different despeckle is a different decode.
     service.StudioRenderer.build_overlay(stub, {**overlay, "despeckle": True})
     assert len(calls) == 2
+
+
+def test_compose_plate_cuts_out_on_depth_and_lays_the_subject_on_white():
+    """The plate's cut-out is the renderer's depth buffer, not a colour key:
+    a dark valley (depth > 0) must survive against the white page."""
+    service = load_service()
+    frame = np.zeros((40, 60, 3), dtype=np.uint8)
+    frame[:, :] = (20, 24, 30)  # background: dark, but never used
+    frame[10:30, 15:45] = (120, 90, 60)  # the "subject"
+    depth = np.zeros((40, 60), dtype=np.uint8)
+    depth[10:30, 15:45] = 29
+    plate = service.compose_plate(
+        frame, depth, title="Land cover", legend=None, caption="Studio - dem"
+    )
+    assert plate.ndim == 3 and plate.shape[2] == 3
+    # The page is white outside the subject.
+    assert tuple(plate[0, 0]) == (255, 255, 255)
+    # The subject keeps its own pixels and its own size inside the page: the
+    # plate crops to the depth mask, it does not resample the frame.
+    subject = (plate == np.array([120, 90, 60], dtype=np.uint8)).all(axis=2)
+    rows = np.flatnonzero(subject.any(axis=1))
+    cols = np.flatnonzero(subject.any(axis=0))
+    assert rows.size > 0 and cols.size > 0
+    assert (rows[-1] - rows[0] + 1, cols[-1] - cols[0] + 1) == (20, 30)
+    # Without a mask (background frames) the frame comes back untouched.
+    empty = np.zeros((8, 8), dtype=np.uint8)
+    same = service.compose_plate(np.zeros((8, 8, 3), dtype=np.uint8), empty, title="x")
+    assert same.shape == (8, 8, 3)

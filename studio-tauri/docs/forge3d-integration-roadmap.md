@@ -54,6 +54,7 @@ be a payload field: vector layers and meshes.
 | 5.12 elevation legend — the engine's `Legend` in the frame's corner | done (needs a colormap) |
 | 5.14 overlay texture follows the source (4096 texels) | done |
 | 5.16 the elevation ramp in the Material preview (engine stops) | done |
+| 5.17 map plate export (white page, depth cut-out, title, legend) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -501,6 +502,31 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   the mesh both read `forge3d.get_colormap`, and a node test pins the
   interpolation, the clamp, the strength mix and the display encoding.
 - Check: `colormap.test.ts` in `npm test`, `tsc`, the vite build.
+
+### 5.17 Map plate export (0.5 day) — **done**
+- The gallery's Swiss image is not a viewer feature: its white page, title,
+  categorical legend, caption and cut-out come from the example's own
+  `compose_snapshot` (PIL). Only `forge3d.MapPlate` is Pro-gated, so a plate is
+  a legitimate shell-side composite — and it is the single thing that made the
+  gallery look like a printed map instead of a terrain floating in a sky.
+- `RenderSettings.plate` + `plateTitle` → `quality.plate` (finals only, and
+  asking for one asks for the depth AOV). The service cuts the frame out with
+  the **renderer's depth buffer** (`aov.depth`, background pixels carry zero
+  depth — never a colour key, so a dark valley survives), crops to that
+  silhouette, lays it on white under the title, an elevation legend when a
+  colormap is set, and a caption, and writes `<still>_plate.png`.
+- The page follows the gallery's layout: title centred on top, legend top-left,
+  subject scaled into the middle, caption along the bottom; the type is the
+  engine's packaged Noto Sans Latin, not PIL's bitmap default.
+- Measured (Swiss DEM, 1200², whole country at 5.246, hillshade on, land cover
+  draped): the plate is a 968×951 page with the country cut out at its land
+  cover border — the frame itself is a full rectangle, so the cut-out is what
+  turns it into a map. Without a depth mask the service returns the frame
+  unchanged rather than inventing a silhouette.
+- Not yet on the plate: the **categorical** legend (the class palette is known
+  but the names live in the gallery recipe), and a scale bar/north arrow.
+- Check: payload test (final-only, depth AOV, preview off), service test (crop
+  to the mask, white page, subject pixels preserved, no mask = no plate).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

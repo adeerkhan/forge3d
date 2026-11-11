@@ -837,6 +837,15 @@ pub struct RenderSettings {
     /// How strongly the colormap covers the terrain material, 0..=1.
     #[serde(default = "default_colormap_strength")]
     pub colormap_strength: f32,
+    /// Export a map plate next to the still: the rendered terrain cut out on a
+    /// white page (the renderer's depth buffer is the cut-out) with a title and
+    /// an elevation legend. Final stills only, like the AOVs it borrows the
+    /// depth pass from.
+    #[serde(default)]
+    pub plate: bool,
+    /// The plate's title. Empty means the DEM's file name.
+    #[serde(default)]
+    pub plate_title: String,
     /// Draw the elevation legend (the engine's `Legend`: gradient bar, ticks
     /// in metres, label) in the frame's corner. Only meaningful with a
     /// colormap selected; inert without one.
@@ -1003,6 +1012,8 @@ impl Default for RenderSettings {
             colormap: String::new(),
             colormap_strength: default_colormap_strength(),
             legend: false,
+            plate: false,
+            plate_title: String::new(),
             fog: FogSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,

@@ -35,6 +35,8 @@
       "colormap": "",
       "colormapStrength": 1.0,
       "legend": false,
+      "plate": false,
+      "plateTitle": "",
       "fog": {
         "enabled": false,
         "density": 0.05,

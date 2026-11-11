@@ -596,6 +596,12 @@ class StudioRenderer:
         # Viewport previews send neither, so the interactive path is unchanged.
         aov = quality.get("aov") or {}
         aov_flags = {channel: bool(aov.get(channel)) for channel in ("albedo", "normal", "depth")}
+        plate_enabled = bool(quality.get("plate", False))
+        if plate_enabled:
+            # The plate's cut-out is the renderer's own depth: background
+            # pixels carry zero depth, so a dark valley cannot be mistaken for
+            # the page.
+            aov_flags["depth"] = True
         want_aov = any(aov_flags.values())
         want_denoise = bool(quality.get("denoise"))
         overlay = request.get("overlay") or None
@@ -762,6 +768,30 @@ class StudioRenderer:
         if bool(quality.get("legend", False)) and legend_name:
             rgb = compose_legend(rgb, legend_name, self.range)
 
+        plate_rgb = None
+        if (
+            plate_enabled
+            and aov_frame is not None
+            and getattr(aov_frame, "has_depth", False)
+        ):
+            depth = np.asarray(aov_frame.depth())
+            title = str(quality.get("plateTitle") or "").strip()
+            if not title:
+                title = Path(self.dem_path).stem.replace("_", " ").title()
+            legend = None
+            if legend_name:
+                try:
+                    legend = plate_legend(legend_name, self.range)
+                except Exception:  # noqa: BLE001 - the plate still has its title
+                    legend = None
+            plate_rgb = compose_plate(
+                rgb,
+                depth,
+                title=title,
+                legend=legend,
+                caption="Forge3D Studio - %s" % Path(self.dem_path).stem,
+            )
+
         png = encode_png(rgb)
 
         output = request.get("output")
@@ -778,6 +808,9 @@ class StudioRenderer:
                     aov_frame.save_normal(str(stem) + "_normal.png")
                 if aov_flags["depth"]:
                     aov_frame.save_depth(str(stem) + "_depth.png")
+            if plate_rgb is not None:
+                stem = Path(output).with_suffix("")
+                Path(str(stem) + "_plate.png").write_bytes(encode_png(plate_rgb))
             Path(output).write_bytes(png)
 
         return {
@@ -846,6 +879,121 @@ def apply_vignette(image: np.ndarray, strength: float) -> np.ndarray:
     falloff = np.clip((radius - 0.5) / 0.5, 0.0, 1.0)
     falloff = falloff * falloff * (3.0 - 2.0 * falloff)
     return image * (1.0 - float(strength) * falloff)[:, :, None]
+
+
+#: The engine's packaged label font (its own asset, used by labels/export).
+PLATE_FONT_CANDIDATES = (
+    ("data", "fonts", "NotoSansLatin-subset.ttf"),
+    ("assets", "fonts", "NotoSansLatin-subset.ttf"),
+)
+
+
+def plate_font(size: int):
+    """The engine's packaged Latin font at `size`, or PIL's bitmap fallback."""
+    from PIL import ImageFont
+
+    import forge3d as f3d
+
+    root = Path(getattr(f3d, "__file__", "")).resolve().parent
+    for parts in PLATE_FONT_CANDIDATES:
+        candidate = root.joinpath(*parts)
+        if candidate.exists():
+            return ImageFont.truetype(str(candidate), size)
+    fallback = Path("assets/fonts/NotoSansLatin-subset.ttf")
+    if fallback.exists():
+        return ImageFont.truetype(str(fallback), size)
+    return ImageFont.load_default()
+
+
+def plate_legend(colormap_name: str, domain):
+    """The elevation legend drawn for a plate's white page."""
+    from forge3d import get_colormap
+    from forge3d.legend import Legend, LegendConfig
+
+    token = colormap_name if ":" in colormap_name else f"forge3d:{colormap_name}"
+    low, high = domain
+    span = max(1.0, float(high) - float(low))
+    scale = max(0.5, min(3.0, 900.0 / span * 0.35))  # keep the card a sensible size
+    config = LegendConfig(
+        orientation="vertical",
+        bar_width=max(16, int(round(22 * scale))),
+        bar_height=max(120, int(round(220 * scale))),
+        tick_count=5,
+        label_suffix=" m",
+        label_format="{:.0f}",
+        font_size=max(12, int(round(14 * scale))),
+        title="Elevation",
+        title_font_size=max(13, int(round(16 * scale))),
+        background=(255, 255, 255, 0),
+    )
+    return np.asarray(Legend.from_colormap(get_colormap(token), (float(low), float(high)), config).render())
+
+
+def compose_plate(
+    rgb: np.ndarray,
+    mask: np.ndarray,
+    *,
+    title: str,
+    legend: "np.ndarray | None" = None,
+    caption: str = "",
+) -> np.ndarray:
+    """A map plate: the rendered terrain cut out and laid on a white page.
+
+    The cut-out uses the frame's **depth** buffer (the renderer's own data:
+    background pixels carry zero depth), never a colour threshold, so a dark
+    valley is not mistaken for background. The layout follows the gallery's
+    land-cover snapshot: title centred on top, legend top-left, caption along
+    the bottom, the subject cropped to its silhouette and scaled to fit.
+    """
+    from PIL import Image, ImageDraw
+
+    depth = np.asarray(mask)
+    if depth.ndim == 3:
+        depth = depth[..., 0]
+    subject_mask = depth > 0
+    rows = np.flatnonzero(subject_mask.any(axis=1))
+    cols = np.flatnonzero(subject_mask.any(axis=0))
+    if rows.size == 0 or cols.size == 0:
+        return rgb
+    top, bottom = int(rows[0]), int(rows[-1]) + 1
+    left, right = int(cols[0]), int(cols[-1]) + 1
+    subject = rgb[top:bottom, left:right]
+    alpha = (subject_mask[top:bottom, left:right].astype(np.uint8)) * 255
+    subject_rgba = np.dstack([subject, alpha])
+
+    width = subject.shape[1]
+    height = subject.shape[0]
+    margin = max(24, width // 28)
+    title_size = max(22, width // 24)
+    caption_size = max(11, width // 80)
+    font_title = plate_font(title_size)
+    font_caption = plate_font(caption_size)
+
+    page_w = width + margin * 2
+    header = int(title_size * 2.1) + margin
+    legend_w = legend.shape[1] if legend is not None else 0
+    legend_h = legend.shape[0] if legend is not None else 0
+    if legend is not None:
+        header = max(header, legend_h + int(title_size * 1.6) + margin)
+    footer = int(caption_size * 2.4) + margin // 2
+    page_h = header + height + footer
+
+    page = Image.new("RGBA", (page_w, page_h), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(page)
+    draw.text((page_w // 2, margin // 2), title, fill=(38, 38, 42), font=font_title, anchor="ma")
+    if legend is not None:
+        legend_img = Image.fromarray(np.ascontiguousarray(legend), "RGBA")
+        page.alpha_composite(legend_img, dest=(margin, int(title_size * 1.5) + margin // 2))
+    page.alpha_composite(Image.fromarray(np.ascontiguousarray(subject_rgba), "RGBA"), dest=(margin, header))
+    if caption:
+        draw.text(
+            (page_w // 2, page_h - footer + margin // 4),
+            caption,
+            fill=(82, 82, 88),
+            font=font_caption,
+            anchor="ma",
+        )
+    return np.asarray(page.convert("RGB"))
 
 
 def compose_legend(

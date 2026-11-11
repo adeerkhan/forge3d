@@ -635,6 +635,24 @@ export function RenderSettingsEditor() {
 
       <Section title="Stills" id="render-stills">
         <Toggle
+          label="Map plate (white page, title, legend)"
+          checked={render.plate}
+          onChange={(plate) => commit({ plate })}
+        />
+        {render.plate && (
+          <TextField
+            label="Plate title (empty uses the DEM name)"
+            value={render.plateTitle}
+            onCommit={(plateTitle) => commit({ plateTitle })}
+          />
+        )}
+        <p className="hint">
+          A plate is a separate file next to the still
+          (<span className="mono">_plate.png</span>): the terrain cut out with
+          the renderer's depth buffer, laid on a white page under the title,
+          with the elevation legend when a colormap is set. Finals only.
+        </p>
+        <Toggle
           label="AOVs next to the still (albedo · normal · depth)"
           checked={render.stillAov.albedo || render.stillAov.normal || render.stillAov.depth}
           onChange={(value) =>

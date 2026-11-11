@@ -483,6 +483,10 @@ pub struct RenderRequest {
     pub colormap_strength: f32,
     /// Draw the engine's elevation legend in the frame's corner.
     pub legend: bool,
+    /// Export a map plate next to the still (white page, title, legend) and
+    /// the depth mask its cut-out needs.
+    pub plate: bool,
+    pub plate_title: String,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -534,6 +538,8 @@ impl RenderRequest {
         self.colormap = settings.colormap.clone();
         self.colormap_strength = settings.colormap_strength;
         self.legend = settings.legend;
+        self.plate = settings.plate;
+        self.plate_title = settings.plate_title.clone();
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -617,7 +623,7 @@ impl RenderRequest {
                 "aov": {
                     "albedo": final_quality && self.aov_albedo,
                     "normal": final_quality && self.aov_normal,
-                    "depth": final_quality && self.aov_depth,
+                    "depth": final_quality && (self.aov_depth || self.plate),
                 },
                 "denoise": final_quality && self.still_denoise,
                 "shadowTechnique": self.shadow_technique,
@@ -642,6 +648,10 @@ impl RenderRequest {
                 "colormap": self.colormap,
                 "colormapStrength": self.colormap_strength,
                 "legend": self.legend,
+                // A plate is a final artifact: its cut-out is the depth buffer,
+                // so asking for one asks for that AOV too.
+                "plate": final_quality && self.plate,
+                "plateTitle": self.plate_title,
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
@@ -760,6 +770,8 @@ impl RenderRequest {
             colormap: String::new(),
             colormap_strength: 1.0,
             legend: false,
+            plate: false,
+            plate_title: String::new(),
             fog_enabled: false,
             fog_density: 0.05,
             fog_reach: 0.5,
@@ -819,6 +831,8 @@ mod tests {
             colormap: String::new(),
             colormap_strength: 1.0,
             legend: false,
+            plate: false,
+            plate_title: String::new(),
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -975,6 +989,27 @@ mod tests {
         assert_eq!(payload["quality"]["sunVisibility"]["enabled"], true);
         assert_eq!(payload["quality"]["sunVisibility"]["distance"], 5000.0);
         assert_eq!(payload["quality"]["sunVisibility"]["steps"], 48);
+    }
+
+    #[test]
+    fn payload_plates_only_finals_and_borrows_the_depth_pass() {
+        let settings = studio_core::RenderSettings {
+            plate: true,
+            plate_title: "Land cover".to_owned(),
+            ..studio_core::RenderSettings::default()
+        };
+        let final_ = request().with_settings(&settings).to_payload("final", None);
+        assert_eq!(final_["quality"]["plate"], true);
+        assert_eq!(final_["quality"]["plateTitle"], "Land cover");
+        // The cut-out is the renderer's depth buffer: asking for a plate asks
+        // for that AOV even when the project's own AOV boxes are off.
+        assert_eq!(final_["quality"]["aov"]["depth"], true);
+
+        let preview = request()
+            .with_settings(&settings)
+            .to_payload("preview", None);
+        assert_eq!(preview["quality"]["plate"], false);
+        assert_eq!(preview["quality"]["aov"]["depth"], false);
     }
 
     #[test]
