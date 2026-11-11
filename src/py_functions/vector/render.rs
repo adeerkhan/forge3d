@@ -131,10 +131,15 @@ pub(super) fn upload_vector_scene(
             .map_err(vector_runtime_err)?;
     }
 
+    // A polyline becomes one *instance* per segment, so the draw call has to
+    // count instances, not polylines: a densified path (one segment per
+    // instance) would otherwise draw only its first few segments.
+    let mut line_instances = 0usize;
     if !poly_defs.is_empty() {
         let instances = line_renderer
             .pack_polylines(poly_defs)
             .map_err(vector_runtime_err)?;
+        line_instances = instances.len();
         line_renderer
             .upload_lines(&device, &queue, &instances)
             .map_err(vector_runtime_err)?;
@@ -146,7 +151,7 @@ pub(super) fn upload_vector_scene(
         point_renderer,
         line_renderer,
         point_count: point_defs.len() as u32,
-        line_count: poly_defs.len() as u32,
+        line_count: line_instances as u32,
     })
 }
 
