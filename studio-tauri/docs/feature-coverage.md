@@ -28,7 +28,7 @@ Two rules govern the table:
 | 11 | Colormaps, sun visibility, vertical scale, despeckle | done |
 | 12 | Map plate, map furniture, categorical legend | done |
 | 13 | The map look (one button), the release audit as a CI gate | done |
-| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | **next** |
+| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped, lines only (labels/furniture blocked on the label plan) |
 | 15 | Convergence on `MapScene` as the scene model | design increment, trigger-gated |
 
 Studio exposes **68 controls** over 28 render settings, the scene model
@@ -125,7 +125,8 @@ labels, buildings, 3D Tiles, furniture, graticules and bundles; Studio has its
 own model and its own service. Every cartographic feature added to Studio's
 own model is a second implementation. The convergence is the only way the
 cartographic tier grows without doubling. *Trigger:* the first vector layer
-landing (phase 14).
+landed (phase 14, shipped); labels are the first work that needs the engine's
+recipe-bound label plan, so the trigger is now live.
 
 **Phase 16 — the preview matches the still.** The preview's shadows, the
 hillshade and the plate's crop in the viewport, so authoring shows the output.

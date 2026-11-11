@@ -677,20 +677,6 @@ def test_the_vector_reader_rejects_a_file_it_cannot_read():
         service.read_vector_lines("definitely-not-a-vector.tif")
 
 
-def test_the_ground_scale_is_metres_per_pixel():
-    """The vector width is a real width in metres; the rasterizer wants pixels,
-    so the two are converted with the frame's ground scale."""
-    service = load_service()
-    # A camera 10,000 m away (in the renderer's units), a 45 degree field of
-    # view and a 1,000x1,000 frame: the frame is about 8,284 m wide.
-    scale = service.ground_scale_metres_per_pixel(10_000.0, 45.0, 1000, 1000, 1.0)
-    assert 8.0 < scale < 8.5, scale
-    # A scaled world (the service's country-scale budget) divides the metres.
-    scaled = service.ground_scale_metres_per_pixel(10_000.0, 45.0, 1000, 1000, 0.5)
-    assert scaled == pytest.approx(scale * 2.0)
-    assert service.ground_scale_metres_per_pixel(0.0, 45.0, 1000, 1000, 1.0) == 0.0
-
-
 def test_the_vector_legend_names_the_layer():
     service = load_service()
     legend = service.plate_vector_legend((0.9, 0.29, 0.1, 1.0), "luxembourg_rail.gpkg")

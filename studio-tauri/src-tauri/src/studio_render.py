@@ -855,21 +855,13 @@ class StudioRenderer:
                     "the vector file is in EPSG:%s and the DEM in EPSG:%s; "
                     "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
                 )
-            # The width is the feature's real width in metres; the rasterizer
-            # works in pixels, so it is converted with the frame's ground scale
-            # (and never falls below one pixel, or a country-wide view would
-            # lose the network entirely).
-            metres_per_pixel = ground_scale_metres_per_pixel(
-                radius,
-                float(camera.get("fovDeg", 45.0) or 45.0),
-                width,
-                height,
-                self.scale,
-            )
-            width_metres = float(vector.get("width", 40.0))
-            stroke_px = 1.0
-            if metres_per_pixel > 0.0 and width_metres > 0.0:
-                stroke_px = max(1.0, width_metres / metres_per_pixel)
+            # The width is a cartographic symbol width in pixels: a real rail
+            # is sub-pixel at a country-scale framing (62 m per pixel on a
+            # 65 km DEM at 900 px), so a physical width could not change the
+            # picture at all. The rasterizer's own floor is one pixel: 0.5 and
+            # 1.0 px render identically (0 changed samples, measured), so the
+            # layer's range starts at 1 rather than offering an inert half.
+            stroke_px = max(1.0, float(vector.get("widthPx", 2.0) or 2.0))
             vector_overlay = vector_overlay_rgba(
                 params,
                 self.heights,
@@ -1491,22 +1483,6 @@ def _sample_height(heights, u: float, v: float) -> float:
     top = float(heights[y0, x0]) * (1.0 - tx) + float(heights[y0, x1]) * tx
     bottom = float(heights[y1, x0]) * (1.0 - tx) + float(heights[y1, x1]) * tx
     return top * (1.0 - ty) + bottom * ty
-
-
-def ground_scale_metres_per_pixel(radius: float, fov_deg: float, width: int, height: int, scale: float) -> float:
-    """How many metres one pixel of the frame covers.
-
-    The camera's radius is in the renderer's scaled units (the DEM's metres
-    times the service's scale), so the visible width in metres is
-    `2 * radius * tan(fov/2) * aspect / scale`.
-    """
-    import math
-
-    if radius <= 0.0 or width <= 0 or height <= 0 or scale <= 0.0:
-        return 0.0
-    aspect = float(width) / float(height)
-    visible = 2.0 * radius * math.tan(math.radians(fov_deg) * 0.5) * aspect
-    return visible / (scale * float(width))
 
 
 def vector_overlay_rgba(

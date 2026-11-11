@@ -91,8 +91,8 @@ export interface TerrainVectorLayer {
   asset: string;
   /** RGBA in 0..=1. */
   colour: [number, number, number, number];
-  /** The line's width in the DEM's metres. */
-  widthMetres: number;
+  /** The line's symbol width in pixels. */
+  widthPx: number;
 }
 
 export interface TerrainOverlay {

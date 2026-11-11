@@ -509,7 +509,7 @@ pub struct RenderRequest {
 pub struct VectorRequest {
     pub path: String,
     pub colour: [f32; 4],
-    pub width_metres: f32,
+    pub width_px: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -756,7 +756,7 @@ impl RenderRequest {
             vector: terrain.vector.as_ref().map(|vector| VectorRequest {
                 path: vector.path.clone(),
                 colour: vector.colour,
-                width_metres: vector.width_metres,
+                width_px: vector.width_px,
             }),
             exposure: 1.35,
             shadows: true,
@@ -985,11 +985,11 @@ mod tests {
         payload.vector = Some(VectorRequest {
             path: "/data/luxembourg_rail.gpkg".to_owned(),
             colour: [0.9, 0.29, 0.1, 1.0],
-            width_metres: 40.0,
+            width_px: 3.0,
         });
         let value = payload.to_payload("preview", None);
         assert_eq!(value["vector"]["path"], "/data/luxembourg_rail.gpkg");
-        assert_eq!(value["vector"]["widthMetres"], 40.0);
+        assert_eq!(value["vector"]["widthPx"], 3.0);
         assert!((value["vector"]["colour"][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
         // No layer, no key content: the service must see an explicit null.
         assert!(request().to_payload("preview", None)["vector"].is_null());
@@ -1268,7 +1268,7 @@ mod tests {
         let with_rails = frame(json!({
             "path": rail.to_str().expect("utf-8 rail path"),
             "colour": [0.9, 0.29, 0.1, 1.0],
-            "widthMetres": 40.0
+            "widthPx": 3.0
         }));
         assert_ne!(
             plain.png, with_rails.png,

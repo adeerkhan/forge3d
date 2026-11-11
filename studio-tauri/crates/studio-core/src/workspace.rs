@@ -312,8 +312,8 @@ pub struct TerrainVectorHandoff {
     pub name: String,
     /// The line colour, RGBA in 0..=1.
     pub colour: [f32; 4],
-    /// The line's width in the DEM's metres.
-    pub width_metres: f32,
+    /// The line's symbol width in pixels.
+    pub width_px: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -607,7 +607,7 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
                     path: asset.path.clone(),
                     name: asset.name.clone(),
                     colour: vector.colour,
-                    width_metres: vector.width_metres,
+                    width_px: vector.width_px,
                 })
         }),
     })

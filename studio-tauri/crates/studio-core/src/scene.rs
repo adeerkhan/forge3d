@@ -390,8 +390,12 @@ pub struct TerrainObject {
 /// A vector layer drawn on the terrain.
 ///
 /// The lines come from the asset (a GeoPackage or GeoJSON); the colour and the
-/// width are the studio's: the width is the feature's real width in the DEM's
-/// metres, converted to pixels with the frame's ground scale at render time.
+/// width are the studio's. The width is a cartographic **symbol width in
+/// pixels**: a real rail is a few metres wide, which is sub-pixel at any
+/// country-scale framing (62 m per pixel on a 65 km DEM at 900 px), so a
+/// physical width could never change the picture. A symbol width does, at
+/// every zoom. The rasterizer's own floor is one pixel (0.5 px and 1 px render
+/// identically — 0 changed samples, measured), so the range starts at 1.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainVectorLayer {
@@ -399,9 +403,9 @@ pub struct TerrainVectorLayer {
     /// The line colour, RGBA in 0..=1.
     #[serde(default = "default_vector_colour")]
     pub colour: [f32; 4],
-    /// The line's width in the DEM's metres.
+    /// The line's symbol width in pixels.
     #[serde(default = "default_vector_width")]
-    pub width_metres: f32,
+    pub width_px: f32,
 }
 
 fn default_vector_colour() -> [f32; 4] {
@@ -409,7 +413,7 @@ fn default_vector_colour() -> [f32; 4] {
 }
 
 fn default_vector_width() -> f32 {
-    40.0
+    2.0
 }
 
 /// A raster draped over the terrain, e.g. land cover or an orthophoto.
@@ -448,8 +452,8 @@ impl TerrainVectorLayer {
         {
             return Err("vector colour channels must be between 0 and 1".to_owned());
         }
-        if !self.width_metres.is_finite() || !(0.1..=1_000.0).contains(&self.width_metres) {
-            return Err("vector width must be between 0.1 and 1000 m".to_owned());
+        if !self.width_px.is_finite() || !(1.0..=20.0).contains(&self.width_px) {
+            return Err("vector width must be between 1 and 20 pixels".to_owned());
         }
         Ok(())
     }

@@ -1348,15 +1348,15 @@ export function MapSection() {
         {terrain.vector && (
           <>
             <NumberField
-              label="Width (m)"
-              value={terrain.vector.widthMetres}
-              step={5}
-              min={0.1}
-              max={1000}
-              onCommit={(widthMetres) =>
+              label="Width (px)"
+              value={terrain.vector.widthPx}
+              step={1}
+              min={1}
+              max={20}
+              onCommit={(widthPx) =>
                 void actions.setTerrainVectorStyle(
                   terrain.vector!.colour,
-                  widthMetres,
+                  widthPx,
                 )
               }
             />
@@ -1379,7 +1379,7 @@ export function MapSection() {
                     colour[index] = value;
                     void actions.setTerrainVectorStyle(
                       colour,
-                      terrain.vector!.widthMetres,
+                      terrain.vector!.widthPx,
                     );
                   }}
                 />
@@ -1408,9 +1408,9 @@ export function MapSection() {
         <p className="hint">
           Lines from a GeoPackage or GeoJSON (rail, rivers, boundaries), draped
           on the terrain by the engine's own camera projection and drawn with
-          the engine's anti-aliased vector rasterizer. The width is the
-          feature's real width in metres, so the network reads the same at a
-          country scale and up close.
+          the engine's anti-aliased vector rasterizer. The width is a symbol
+          width in pixels: a real rail is sub-pixel at a country scale, so a
+          physical width could not change the picture.
         </p>
       </Section>
 

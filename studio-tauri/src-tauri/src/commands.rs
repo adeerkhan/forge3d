@@ -742,7 +742,7 @@ pub fn set_terrain_vector(
     state: State<'_, AppState>,
     path: Option<String>,
     colour: Option<Vec<f32>>,
-    width_metres: Option<f32>,
+    width_px: Option<f32>,
 ) -> Result<SessionState, String> {
     let mut session = lock(&state)?;
     let snapshot = session
@@ -791,7 +791,7 @@ pub fn set_terrain_vector(
             Some(studio_core::scene::TerrainVectorLayer {
                 asset: asset.id,
                 colour,
-                width_metres: width_metres.unwrap_or(40.0).clamp(0.1, 1_000.0),
+                width_px: width_px.unwrap_or(2.0).clamp(1.0, 20.0),
             })
         }
     };

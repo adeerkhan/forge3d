@@ -626,26 +626,43 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   loudly instead of landing in the wrong place. The Luxembourg rail file
   (2,035 features, 780 km of track, EPSG:4326) matches its DEM, so nothing is
   reprojected.
-- **The lines land on the ground** and the width is the feature's real width in
-  metres, converted to pixels with the frame's ground scale (never below one
-  pixel). Measured on the Luxembourg DEM (900×700, 40 m rails): radius
-  97,500 m → 15,496 changed samples; 60,000 m → 24,397; 40,000 m → 30,448. The
-  plate shows the network with the "Vector layer" legend entry, the north arrow
-  and the scale bar.
+- **The lines land on the ground**, at the frame's own scale. Measured on the
+  Luxembourg DEM (900×700): radius 97,500 m → 15,496 changed samples; 60,000 m
+  → 24,397 (the earlier figure with the OIT bug unfixed); 40,000 m → 30,448.
+  The plate shows the network with the "Vector layer" legend entry, the north
+  arrow and the scale bar.
 - **An engine bug fell out of the measurement**: the OIT bridge packed one
   instance per *segment* but drew one per *polyline*, so a densified path lost
   all but its first few segments (1,610 samples instead of 24,397). Fixed in
   `src/py_functions/vector/render.rs`; the shell also hands over one polyline
   per segment, which is MapScene's own payload convention.
-- The layer is a terrain field (`TerrainVectorLayer`: asset, RGBA colour, width
-  in metres), one undoable command (`SetTerrainVector`), a payload key
-  (`vector`) and a Map-tab section.
+- **The width is a symbol width in pixels, not metres — measured, not
+  assumed.** The first cut was the feature's real width in the DEM's metres,
+  converted with the frame's ground scale. It is inert: at 900 px across a
+  65 km DEM one pixel spans 62 m, and a rail is a few metres wide, so 40 m and
+  10 m rails render **identically — 0 changed samples, mean difference 0.0**
+  (the conversion's one-pixel floor was doing all the work). A cartographic
+  symbol width is the honest unit: **1–20 px, default 2**, because the
+  rasterizer's own floor is one pixel — 0.5 px and 1 px render identically
+  (0 changed samples, mean 0.0), so the control starts at 1 instead of
+  offering an inert half. Measured at 900×700 / 60 km: width 2 → 6 px changes
+  40,875 samples (mean 1.197); 1 → 2 px changes 21,103 (mean 0.327); orange →
+  blue changes 32,952 (mean 2.17); no layer → layer changes 32,928 (mean
+  1.14). The superseded metres field and the ground-scale helper are gone
+  rather than kept beside the pixel width.
+- The layer is a terrain field (`TerrainVectorLayer`: asset, RGBA colour,
+  symbol width in pixels), one undoable command (`SetTerrainVector`), a payload
+  key (`vector`) and a Map-tab section.
 - **Still lacking** (14.5): labels, furniture, polygons and a legend for the
   *vector* attributes; the layer is lines only, one layer, drawn over the
-  terrain rather than occluded by its ridges.
-- Check: the reader (a real GeoPackage), the ground scale, the vector legend,
-  the stacked plate legends, the command's undo and its range rejections, the
-  payload and wire shape.
+  terrain rather than occluded by its ridges. Labels are blocked on the
+  engine's label plan, which is recipe-bound: the compositor takes MapScene's
+  compiled glyph batches, so adopting it is the Phase 15 convergence, and
+  laying out glyphs again in the shell would be a second implementation.
+- Check: the reader (a real GeoPackage), the vector legend, the stacked plate
+  legends, the command's undo and its pixel-width range rejections, the
+  payload and wire shape, and an end-to-end engine test that the layer reaches
+  the pixels (`the_vector_layer_reaches_the_pixels`).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

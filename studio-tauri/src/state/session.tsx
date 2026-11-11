@@ -566,7 +566,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const path = typeof picked === "string" ? picked : null;
       if (!path) return;
       setBusy(true);
-      setState(await bridge.setTerrainVector(path, [0.9, 0.29, 0.1, 1.0], 40));
+      setState(await bridge.setTerrainVector(path, [0.9, 0.29, 0.1, 1.0], 2));
       flash("Vector layer attached");
     } catch (cause) {
       fail(cause);
@@ -588,7 +588,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [fail, flash]);
 
   const setTerrainVectorStyle = useCallback(
-    async (colour: [number, number, number, number], widthMetres: number) => {
+    async (colour: [number, number, number, number], widthPx: number) => {
       const project = state?.project;
       const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
       if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.vector) {
@@ -597,7 +597,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       await applyCommand({
         type: "setTerrainVector",
         id: terrain.id,
-        layer: { ...terrain.kind.vector, colour, widthMetres },
+        layer: { ...terrain.kind.vector, colour, widthPx },
       });
     },
     [applyCommand, state],

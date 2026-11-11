@@ -62,7 +62,7 @@ fn attaching_a_vector_layer_is_one_undoable_command() {
     let layer = TerrainVectorLayer {
         asset: asset.id,
         colour: [0.9, 0.29, 0.1, 1.0],
-        width_metres: 40.0,
+        width_px: 3.0,
     };
     editor
         .apply(Command::SetTerrainVector {
@@ -81,7 +81,7 @@ fn attaching_a_vector_layer_is_one_undoable_command() {
         })
         .expect("the layer is on the terrain");
     assert_eq!(stored.asset, asset.id);
-    assert_eq!(stored.width_metres, 40.0);
+    assert_eq!(stored.width_px, 3.0);
 
     editor.undo().expect("undo is available");
     assert!(
@@ -106,18 +106,18 @@ fn the_renderer_refuses_a_colour_or_width_it_cannot_take() {
         TerrainVectorLayer {
             asset: asset.id,
             colour: [1.4, 0.2, 0.1, 1.0],
-            width_metres: 40.0,
+            width_px: 3.0,
         },
         // A width outside the 0.1..=1000 m the rasterizer is asked for.
         TerrainVectorLayer {
             asset: asset.id,
             colour: [0.9, 0.29, 0.1, 1.0],
-            width_metres: 0.0,
+            width_px: 0.5,
         },
         TerrainVectorLayer {
             asset: asset.id,
             colour: [0.9, 0.29, 0.1, 1.0],
-            width_metres: 5_000.0,
+            width_px: 50.0,
         },
     ] {
         let error = editor
@@ -140,7 +140,7 @@ fn a_vector_layer_needs_a_registered_asset() {
             layer: Some(TerrainVectorLayer {
                 asset: ids::new_id(),
                 colour: [0.9, 0.29, 0.1, 1.0],
-                width_metres: 40.0,
+                width_px: 3.0,
             }),
         })
         .expect_err("an unregistered asset must be refused")
