@@ -58,6 +58,7 @@ be a payload field: vector layers and meshes.
 | 5.18 the map look, in one undoable button | done |
 | 5.19 plate furniture: scale bar and north arrow | done |
 | 5.20 the categorical legend (class maps snap back to the palette) | done |
+| 5.21 the interactive path's stale shader contract | repaired (measured; not a swap) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -585,6 +586,26 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   Swiss land cover snaps to classes 1–8 (plus the grey spare).
 - Check: service tests for the snap (palette colours snap, a grey image does
   not, nodata stays nodata) and for the legend's shape; 36 service tests green.
+
+### 5.21 The interactive path's stale shader contract — **repaired (measured)**
+- `render_interactive` (the shared-depth HDR pipeline behind clouds, vector
+  batches, labels and points) was dead on arrival: CONCORDIA assembles the
+  terrain shader by replacing five known fragments, and the TERRA-DETERMINATA
+  rewrite changed one of them. The contract named `let shadow_z = h_curved *
+  h_exag;`; the shader now says `let shadow_z = det_barrier((h_curved - 0.5) *
+  h_range) * h_exag;`, so the count was 0 and the assembly failed.
+- The repair names the *current* spelling and keeps CONCORDIA's own
+  domain-centred, range-scaled shadow height. Measured after the repair (the
+  extension rebuilt locally with `--features extension-module`):
+  `render_interactive` renders a 320×240 frame where it previously raised.
+- **But it is not a drop-in.** The interactive path is a different pipeline: on
+  the same scene it differs from Studio's current path in **221,837 of
+  230,400** channel samples (mean 33.18). Adopting it would move every
+  measured anchor and change every picture. And clouds still draw nothing
+  through it (0 changed samples) with the settings alone.
+- So the contract fix unblocks a *capability*, not a swap: the interactive path
+  is now available for measurement (and for MapScene, which already calls it),
+  but Studio's stills stay on the mesh path until the difference is understood.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
