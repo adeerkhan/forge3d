@@ -25,6 +25,7 @@ import {
 } from "./assets";
 import { viewStore } from "./viewStore";
 import { lightingRig } from "./lighting";
+import { rampColor } from "./colormap";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
 
 const DEG = Math.PI / 180;
@@ -104,6 +105,8 @@ interface ShadingRecord {
   clayMaterial?: THREE.Material | THREE.Material[];
   /** Terrain only: decoded albedo drape. */
   drape?: THREE.Texture | null;
+  /** Terrain only: the mesh carries per-vertex elevation-ramp colours. */
+  ramp?: boolean;
 }
 
 /** Clamp half-float RGBA data to 8-bit linear values for a safe backdrop. */
@@ -231,16 +234,23 @@ function setSolidShading(root: THREE.Object3D, solid: boolean): void {
  */
 function applyTerrainShading(mesh: THREE.Mesh, solid: boolean): void {
   const material = mesh.material as THREE.MeshStandardMaterial;
-  const { drape = null } = mesh.userData as ShadingRecord;
+  const { drape = null, ramp = false } = mesh.userData as ShadingRecord;
+  // Material shows the cartography: a draped raster when one is attached,
+  // otherwise the elevation ramp when a colormap is chosen. Solid is clay.
   const draped = !solid && drape !== null;
+  const ramped = !solid && !draped && ramp;
   const map = draped ? drape : null;
-  const colour = draped ? 0xffffff : CLAY_COLOUR;
+  const colour = draped || ramped ? 0xffffff : CLAY_COLOUR;
   // Playback re-applies shading on every snapshot; only touch the material
-  // when the mode (or the drape) actually changed, so `needsUpdate` does not
-  // rebuild the program every frame.
+  // when the mode (or the drape/ramp) actually changed, so `needsUpdate` does
+  // not rebuild the program every frame.
   let changed = false;
   if (material.map !== map) {
     material.map = map;
+    changed = true;
+  }
+  if (material.vertexColors !== ramped) {
+    material.vertexColors = ramped;
     changed = true;
   }
   if (material.color.getHex() !== colour) {
@@ -453,7 +463,11 @@ function buildLightGizmo(light: LightObject): THREE.Group {
  * albedo ramp; Solid must show no colour at all, and Material supplies the real
  * drape ([`applyTerrainShading`]).
  */
-function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
+function buildTerrainMesh(
+  preview: TerrainPreview,
+  zScale: number,
+  ramp: { stops: [number, number, number][]; strength: number } | null,
+): THREE.Mesh {
   const resolution = preview.resolution;
   const geometry = new THREE.PlaneGeometry(1, 1, resolution - 1, resolution - 1);
   geometry.rotateX(-Math.PI / 2);
@@ -463,11 +477,28 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
   const [minElevation] = [preview.minElevation];
 
   const position = geometry.attributes.position as THREE.BufferAttribute;
+  const span = Math.max(1e-6, preview.maxElevation - preview.minElevation);
+  const colours = ramp ? new Float32Array(position.count * 3) : null;
   for (let index = 0; index < position.count; index += 1) {
     const row = Math.floor(index / resolution);
     const column = index % resolution;
     const elevation = preview.heights[row * resolution + column] ?? minElevation;
     position.setY(index, (elevation - minElevation) * zScale * horizontal);
+    if (colours && ramp) {
+      // The same elevation domain the renderer maps through the LUT, and the
+      // engine's linear stops — which is the space vertex colours live in.
+      const [r, g, b] = rampColor(
+        ramp.stops,
+        (elevation - minElevation) / span,
+        ramp.strength,
+      );
+      colours[index * 3] = r;
+      colours[index * 3 + 1] = g;
+      colours[index * 3 + 2] = b;
+    }
+  }
+  if (colours) {
+    geometry.setAttribute("color", new THREE.BufferAttribute(colours, 3));
   }
 
   geometry.computeVertexNormals();
@@ -481,10 +512,17 @@ function buildTerrainMesh(preview: TerrainPreview, zScale: number): THREE.Mesh {
   mesh.userData.owned = true;
   mesh.userData.studioMaterial = mesh.material;
   mesh.userData.drape = null;
+  // Whether this mesh carries an elevation ramp at all (the attribute is fixed
+  // once built; the mode decides if it is shown).
+  mesh.userData.ramp = colours !== null;
   return mesh;
 }
 
-function contentSignature(object: SceneObject, terrainResolution: number): string {
+function contentSignature(
+  object: SceneObject,
+  terrainResolution: number,
+  ramp: string,
+): string {
   switch (object.kind.type) {
     case "mesh":
       return `mesh:${JSON.stringify(object.kind.source)}:${JSON.stringify(object.kind.material)}`;
@@ -492,7 +530,9 @@ function contentSignature(object: SceneObject, terrainResolution: number): strin
       // Preview resolution AND the draped albedo are part of the identity:
       // changing either must rebuild (and re-drape) the mesh, which is exactly
       // what used to be ignored.
-      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}:${object.kind.overlay?.asset ?? "none"}:${object.kind.overlay?.opacity ?? ""}`;
+      // The elevation ramp is baked into the mesh's vertex colours, so a
+      // colormap change is a rebuild — not just a shading swap.
+      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}:${object.kind.overlay?.asset ?? "none"}:${object.kind.overlay?.opacity ?? ""}:${ramp}`;
     case "camera":
       return `camera:${object.kind.fovDeg}`;
     case "light":
@@ -656,6 +696,27 @@ export function Viewport3D() {
     }
     return pending;
   }, []);
+
+  /** The engine's colormap stops per name (fetched once; the shell has no
+   *  palette of its own). */
+  const colormapStopsCache = useRef(new Map<string, Promise<[number, number, number][]>>());
+  const loadColormapStops = useCallback((name: string) => {
+    const cache = colormapStopsCache.current;
+    let pending = cache.get(name);
+    if (!pending) {
+      pending = bridge.colormapStops(name).then((stops) => {
+        if (!Array.isArray(stops) || stops.length < 2) {
+          throw new Error(`the engine returned no stops for ${name}`);
+        }
+        return stops.map(
+          (stop) => [stop[0], stop[1], stop[2]] as [number, number, number],
+        );
+      });
+      cache.set(name, pending);
+      pending.catch(() => cache.delete(name));
+    }
+    return pending;
+  }, [bridge]);
 
   /** Decoded drape texture for a terrain overlay (shell-side GeoTIFF decode;
    *  cached by path — opacity is applied on the material, not the texture). */
@@ -1219,7 +1280,14 @@ export function Viewport3D() {
       group.visible = object.visible && !(cameraView && object.id === activeCameraId);
       applyTransform(group, object.transform);
 
-      const signature = contentSignature(object, terrainResolution);
+      // The preview's elevation ramp: the engine's own LUT, sampled by the
+      // shell and applied to the mesh, so Material shows the map without a
+      // Rendered frame.
+      const rampName =
+        object.kind.type === "terrain" ? project.render.colormap : "";
+      const rampStrength = project.render.colormapStrength;
+      const rampKey = rampName ? `${rampName}:${rampStrength}` : "none";
+      const signature = contentSignature(object, terrainResolution, rampKey);
       if (group.userData.signature !== signature) {
         group.userData.signature = signature;
         disposeChildren(group);
@@ -1297,11 +1365,19 @@ export function Viewport3D() {
         group.add(buildLoadingPlaceholder());
         const expected = signature;
         const zScale = terrainKind.zScale;
-        readTerrain(asset.path)
-          .then((preview) => {
+        Promise.all([
+          readTerrain(asset.path),
+          rampName
+            ? loadColormapStops(rampName).then((stops) => ({
+                stops,
+                strength: rampStrength,
+              }))
+            : Promise.resolve(null),
+        ])
+          .then(([preview, ramp]) => {
             if (group.userData.signature !== expected) return;
             disposeChildren(group);
-            const mesh = buildTerrainMesh(preview, zScale);
+            const mesh = buildTerrainMesh(preview, zScale, ramp);
             group.add(mesh);
             setProblem(null);
             applyTerrainShading(mesh, viewportModeRef.current === "solid");
@@ -1462,7 +1538,18 @@ export function Viewport3D() {
     }
     // Everything above mutated the scene; draw once on the next tick.
     runtime.needsRender = true;
-  }, [cameraView, flyMode, loadTexture, readMesh, readTerrain, space, state, terrainResolution, tool]);
+  }, [
+    cameraView,
+    flyMode,
+    loadColormapStops,
+    loadTexture,
+    readMesh,
+    readTerrain,
+    space,
+    state,
+    terrainResolution,
+    tool,
+  ]);
 
   // A project HDRI replaces the studio sky for Material and Rendered. The
   // viewport decodes and pre-filters it here (Rendered receives the path and

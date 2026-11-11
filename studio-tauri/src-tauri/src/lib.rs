@@ -78,6 +78,7 @@ pub fn run() {
             commands::read_mesh_file,
             commands::file_size,
             commands::terrain_preview,
+            commands::colormap_stops,
             commands::import_terrain_dem,
             commands::read_image_asset,
             commands::read_hdr,

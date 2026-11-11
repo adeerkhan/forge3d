@@ -550,6 +550,80 @@ pub fn sample_terrain(
     Ok(value)
 }
 
+/// The engine's colormap sampled into the stops the Material preview paints.
+///
+/// `Colormap.rgba` is **linear** RGBA (the LUT's own working space), so the
+/// stops go straight into the preview's vertex colours without an sRGB decode;
+/// the panel converts them for CSS. Sampling 32 of the 256 texels keeps the
+/// preview within ~1/255 of the rendered LUT.
+const COLORMAP_SCRIPT: &str = r#"
+import json, sys
+
+try:
+    import numpy as np
+    import forge3d as f3d
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": "the engine is unavailable: %s" % (exc,)}))
+    raise SystemExit(0)
+
+name = sys.argv[1]
+token = name if ":" in name else "forge3d:" + name
+try:
+    cmap = f3d.get_colormap(token)
+except Exception as exc:
+    print(json.dumps({"ok": False, "detail": "unknown colormap %r: %s" % (name, exc)}))
+    raise SystemExit(0)
+
+rgba = np.asarray(cmap.rgba, dtype=float)
+if rgba.ndim != 2 or rgba.shape[0] < 2:
+    print(json.dumps({"ok": False, "detail": "the colormap has no stops"}))
+    raise SystemExit(0)
+count = 32
+indices = np.linspace(0, rgba.shape[0] - 1, count).round().astype(int)
+stops = [[round(float(rgba[i][0]), 6), round(float(rgba[i][1]), 6), round(float(rgba[i][2]), 6)] for i in indices]
+print(json.dumps({"ok": True, "name": token, "stops": stops}))
+"#;
+
+/// One-shot colormap sample. No GPU session: the preview only needs the ramp.
+pub fn colormap_stops(python: &str, name: &str) -> Result<Vec<[f64; 3]>, String> {
+    let (stdout, stderr) = run_script(python, COLORMAP_SCRIPT, &[name.to_owned()], SCRIPT_TIMEOUT)?;
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| format!("the colormap sampler produced no output: {}", stderr.trim()))?;
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("the colormap sampler returned invalid JSON: {error}"))?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return Err(value
+            .get("detail")
+            .and_then(|detail| detail.as_str())
+            .unwrap_or("the colormap could not be sampled")
+            .to_owned());
+    }
+    let stops = value
+        .get("stops")
+        .and_then(|stops| stops.as_array())
+        .ok_or_else(|| "the colormap sampler returned no stops".to_owned())?;
+    stops
+        .iter()
+        .map(|stop| {
+            let channels = stop
+                .as_array()
+                .ok_or_else(|| "a colormap stop is not an array".to_owned())?;
+            if channels.len() != 3 {
+                return Err("a colormap stop does not have three channels".to_owned());
+            }
+            let mut rgb = [0.0_f64; 3];
+            for (index, value) in channels.iter().enumerate() {
+                rgb[index] = value
+                    .as_f64()
+                    .ok_or_else(|| "a colormap channel is not a number".to_owned())?;
+            }
+            Ok(rgb)
+        })
+        .collect()
+}
+
 /// Solar position from the engine's SIDERA ephemeris.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolarPosition {

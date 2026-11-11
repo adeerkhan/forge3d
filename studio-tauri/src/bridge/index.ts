@@ -78,6 +78,9 @@ export interface StudioBridge {
   checkAssets(): Promise<AssetIntegrity[]>;
   /** Sample a DEM into a heightfield for the Studio viewport. */
   terrainPreview(path: string, resolution?: number): Promise<TerrainPreview>;
+  /** The engine's colormap as 32 linear-RGB stops, for the Material preview's
+   *  elevation ramp and the panel's colour strip. */
+  colormapStops(name: string): Promise<number[][]>;
   /** Replace the scene terrain's DEM with a raster the user picked — or add
    *  the terrain when the scene has none yet. */
   importTerrainDem(path: string): Promise<SessionState>;

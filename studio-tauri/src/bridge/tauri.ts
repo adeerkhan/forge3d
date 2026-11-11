@@ -98,6 +98,8 @@ export const tauriBridge: StudioBridge = {
   terrainPreview: (path, resolution) =>
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
+  colormapStops: (name) => invoke<number[][]>("colormap_stops", { name }),
+
   importTerrainDem: (path) => invoke<SessionState>("import_terrain_dem", { path }),
 
   setTerrainOverlay: (path, opacity) =>

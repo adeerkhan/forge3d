@@ -53,6 +53,7 @@ be a payload field: vector layers and meshes.
 | Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
 | 5.12 elevation legend — the engine's `Legend` in the frame's corner | done (needs a colormap) |
 | 5.14 overlay texture follows the source (4096 texels) | done |
+| 5.16 the elevation ramp in the Material preview (engine stops) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -482,6 +483,24 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - Data is ready: `assets/gpkg/luxembourg_rail.gpkg` (2031 line features,
   EPSG:4326, same CRS as `assets/tif/luxembourg_dem.tif`), readable with the
   stdlib (`sqlite3` + GeoPackage WKB) if the engine side lands first.
+
+### 5.16 The cartography in the Material preview (0.5 day) — **done**
+- Material mode is the fast, lit viewport; it showed the draped raster but not
+  the **elevation ramp**, so choosing a colormap changed only the Rendered
+  frame — the map was invisible while authoring it.
+- The ramp now paints the preview mesh: the shell fetches the engine's own
+  stops (`colormapStops` → `forge3d.get_colormap(name).rgba`, 32 of the 256
+  texels, linear RGB) and writes them as vertex colours, mixed with the clay
+  by the colormap strength exactly as the renderer's `mix` albedo mode does.
+  Solid stays clay; Material shows the drape when one is attached, otherwise
+  the ramp.
+- **The stops are the engine's, not a hand copy.** The first attempt used five
+  hand-written hex stops; measured against the engine's LUT they were off by
+  up to **74/255** (viridis), 84 (magma) and 189 (vik) — a preview that lies
+  about the map. The new bridge command removes the copy: the panel strip and
+  the mesh both read `forge3d.get_colormap`, and a node test pins the
+  interpolation, the clamp, the strength mix and the display encoding.
+- Check: `colormap.test.ts` in `npm test`, `tsc`, the vite build.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

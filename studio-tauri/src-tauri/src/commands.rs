@@ -497,6 +497,16 @@ pub fn terrain_preview(
     crate::forge3d::sample_terrain(&python, &path, resolution.unwrap_or(96))
 }
 
+/// The engine's colormap, sampled into the stops the Material preview paints.
+#[tauri::command(async)]
+pub fn colormap_stops(
+    forge: State<'_, Forge3dState>,
+    name: String,
+) -> Result<Vec<[f64; 3]>, String> {
+    let python = forge.probe(false).python;
+    crate::forge3d::colormap_stops(&python, &name)
+}
+
 /// Per-parameter capability table: what each material/light/camera parameter
 /// actually reaches in the current renderers (studio-core is the one source).
 #[tauri::command]

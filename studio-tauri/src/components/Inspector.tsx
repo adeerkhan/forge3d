@@ -18,6 +18,7 @@ import { objectKindLabel } from "../bridge/types";
 import { bridge } from "../bridge/env";
 import { base64ToArrayBuffer, listGltfNodes } from "../viewport/assets";
 import { useSession } from "../state/session-context";
+import { colormapTitle, linearToCss, type RampStop } from "../viewport/colormap";
 import { ChoiceField, NumberField, RangeField, Section, TextField, Toggle } from "./fields";
 
 // ---------------------------------------------------------------- capability
@@ -1123,23 +1124,33 @@ function TerrainEditor({
   );
 }
 
-/** The engine's palettes, as preview strips. The LUT the renderer samples
- *  comes from `forge3d.available_colormaps()`; this is only what the option
- *  looks like in the panel. */
-const COLORMAP_PREVIEWS: Record<string, { stops: string[]; title: string }> = {
-  viridis: {
-    stops: ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
-    title: "forge3d:viridis",
-  },
-  magma: {
-    stops: ["#000004", "#3b0f70", "#8c2981", "#f0605d", "#fcfdbf"],
-    title: "forge3d:magma",
-  },
-  vik: {
-    stops: ["#001260", "#3f7f93", "#a5c8ca", "#e7cfb4", "#5c3a21"],
-    title: "forge3d:vik",
-  },
-};
+/** The engine's own stops for a colormap, fetched once per name. The panel
+ *  strip and the viewport's ramp both come from here, so the swatch cannot
+ *  drift from the render. */
+function useColormapStops(name: string): RampStop[] | null {
+  const [stops, setStops] = useState<RampStop[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    setStops(null);
+    if (!name) return () => {
+      live = false;
+    };
+    bridge
+      .colormapStops(name)
+      .then((value) => {
+        if (!live || !Array.isArray(value) || value.length < 2) return;
+        setStops(value.map((stop) => [stop[0], stop[1], stop[2]] as RampStop));
+      })
+      .catch(() => {
+        /* the strip is decoration: a failure leaves it empty, the render still
+           uses the engine's LUT */
+      });
+    return () => {
+      live = false;
+    };
+  }, [name]);
+  return stops;
+}
 
 /** Map tab: the terrain's cartography — relief, elevation ramp, imagery. */
 export function MapSection() {
@@ -1166,7 +1177,7 @@ export function MapSection() {
   // One colormap LUT per frame: a raster overlay and a colormap cannot both
   // apply, so the ramp is disabled while an overlay is draped.
   const overlayOwnsTheColormap = Boolean(terrain.overlay);
-  const preview = COLORMAP_PREVIEWS[render.colormap];
+  const previewStops = useColormapStops(render.colormap);
   // The DEM's own relief, as a percentage of its longer footprint edge — the
   // number the vertical-scale rule is about. At true scale this is what makes
   // a country-sized DEM read as a plate.
@@ -1244,7 +1255,7 @@ export function MapSection() {
             ...(["viridis", "magma", "vik"] as const).map((value) => ({
               value,
               label: value[0].toUpperCase() + value.slice(1),
-              title: `The engine's ${COLORMAP_PREVIEWS[value].title} elevation ramp`,
+              title: `The engine's ${colormapTitle(value)} elevation ramp`,
             })),
           ].map((option) => ({
             ...option,
@@ -1257,12 +1268,16 @@ export function MapSection() {
               : "The engine's own catalogue (forge3d:viridis, :magma, :vik) mapped over the elevation."
           }
         />
-        {preview && (
+        {previewStops && (
           <div className="colormap-preview">
             <span
               className="colormap-preview__ramp"
-              style={{ background: `linear-gradient(90deg, ${preview.stops.join(", ")})` }}
-              title={preview.title}
+              style={{
+                background: `linear-gradient(90deg, ${previewStops
+                  .map(linearToCss)
+                  .join(", ")})`,
+              }}
+              title={colormapTitle(render.colormap)}
             />
             <span className="colormap-preview__labels">
               <span>
@@ -1270,7 +1285,7 @@ export function MapSection() {
                   ? "low"
                   : `${terrain.elevationRange[0].toFixed(0)} m`}
               </span>
-              <span>{preview.title}</span>
+              <span>{colormapTitle(render.colormap)}</span>
               <span>
                 {terrain.elevationRange === null
                   ? "high"
