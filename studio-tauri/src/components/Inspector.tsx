@@ -1050,17 +1050,13 @@ function MaterialEditor({ object, material }: { object: SceneObject; material: M
 }
 
 function TerrainEditor({
-  object,
   terrain,
   asset,
 }: {
-  object: SceneObject;
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
-  const { actions, terrainResolution, setTerrainResolution, state } = useSession();
-  const renderSettings = useRenderSettings();
-  const caps = useCapabilities();
+  const { actions, terrainResolution, setTerrainResolution } = useSession();
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -1071,14 +1067,6 @@ function TerrainEditor({
       : terrain.worldSpanXz.map((value) => `${(value / 1000).toFixed(2)} km`).join(" × ");
   const pixels =
     terrain.dimensions === null ? "—" : `${terrain.dimensions[0]} × ${terrain.dimensions[1]} px`;
-
-  const overlayAsset =
-    terrain.overlay
-      ? state?.project.assets.find((entry) => entry.id === terrain.overlay?.asset)
-      : undefined;
-  // The engine binds one colormap LUT per frame (the first overlay that has
-  // one), so a raster overlay and a colormap cannot both apply.
-  const overlayOwnsTheColormap = Boolean(terrain.overlay);
 
   return (
     <Section title="Terrain">
@@ -1092,74 +1080,6 @@ function TerrainEditor({
         <dt>Elevation</dt>
         <dd className="mono">{elevation}</dd>
       </div>
-
-      <NumberField
-        label="Vertical scale"
-        value={terrain.zScale}
-        step={0.1}
-        // The engine's TerrainRenderParams range: it raises "z_scale must be
-        // 0.1-50.0" rather than clamping, so the field must not offer a value
-        // outside it (0.05 here used to fail the render).
-        min={0.1}
-        max={50}
-        onCommit={(zScale) =>
-          void actions.apply({ type: "setTerrainZScale", id: object.id, zScale })
-        }
-      />
-      <span className="hint">
-        Derived from the DEM's relief (6% of its footprint): a country-size DEM
-        comes up exaggerated, a steep one keeps its true scale. Change it here
-        to override.
-      </span>
-      {renderSettings && (
-        <>
-          <ChoiceField
-            label="Colormap"
-            value={renderSettings.render.colormap}
-            options={[
-              { value: "", label: "None", title: "The terrain's own material set colours it" },
-              { value: "viridis", label: "Viridis", title: "The engine's forge3d:viridis elevation ramp" },
-              { value: "magma", label: "Magma", title: "The engine's forge3d:magma elevation ramp" },
-              { value: "vik", label: "Vik", title: "The engine's forge3d:vik elevation ramp" },
-            ].map((option) => ({
-              ...option,
-              // Keep the selected value reachable so it can be cleared.
-              disabled:
-                overlayOwnsTheColormap &&
-                option.value !== renderSettings.render.colormap,
-            }))}
-            onChange={(colormap) => renderSettings.commit({ colormap })}
-            hint={
-              overlayOwnsTheColormap
-                ? "The raster overlay uses the engine's single colormap binding; remove it to show an elevation ramp."
-                : "An elevation ramp over the terrain — the engine's own available_colormaps(). Strength 0 keeps the material set."
-            }
-          />
-          {renderSettings.render.colormap && (
-            <>
-              <NumberField
-                label="Colormap strength"
-                value={renderSettings.render.colormapStrength}
-                step={0.05}
-                min={0}
-                max={1}
-                onCommit={(colormapStrength) =>
-                  renderSettings.commit({ colormapStrength })
-                }
-              />
-              <Toggle
-                label="Elevation legend"
-                checked={renderSettings.render.legend}
-                onChange={(legend) => renderSettings.commit({ legend })}
-              />
-              <span className="hint">
-                The engine's own legend (gradient bar, ticks in metres) in the
-                frame's corner, scaled with the still.
-              </span>
-            </>
-          )}
-        </>
-      )}
 
       <label className="field">
         <span className="field-label">
@@ -1186,27 +1106,207 @@ function TerrainEditor({
         </button>
       </div>
 
-      <Section title="Material">
+      <p className="hint">
+        Relief, the elevation ramp and the draped imagery are in the{" "}
+        <strong>Map</strong> tab — they belong to the terrain's cartography, not
+        to the object's transform.
+      </p>
+
+      <p className="hint">
+        The slider is the heightfield detail the Solid view builds from this DEM
+        (32 = blocky, 512 = close to the source grid). The renderer always reads
+        the original GeoTIFF, so Rendered is unaffected by this setting — and
+        every render uses the camera you are looking through, so orbit and press
+        Re-render to see it from there.
+      </p>
+    </Section>
+  );
+}
+
+/** The engine's palettes, as preview strips. The LUT the renderer samples
+ *  comes from `forge3d.available_colormaps()`; this is only what the option
+ *  looks like in the panel. */
+const COLORMAP_PREVIEWS: Record<string, { stops: string[]; title: string }> = {
+  viridis: {
+    stops: ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
+    title: "forge3d:viridis",
+  },
+  magma: {
+    stops: ["#000004", "#3b0f70", "#8c2981", "#f0605d", "#fcfdbf"],
+    title: "forge3d:magma",
+  },
+  vik: {
+    stops: ["#001260", "#3f7f93", "#a5c8ca", "#e7cfb4", "#5c3a21"],
+    title: "forge3d:vik",
+  },
+};
+
+/** Map tab: the terrain's cartography — relief, elevation ramp, imagery. */
+export function MapSection() {
+  const { actions, state } = useSession();
+  const settings = useRenderSettings();
+  if (!settings) return null;
+  const { render, commit } = settings;
+  const terrainObject = state?.project.scene.objects.find(
+    (entry) => entry.kind.type === "terrain",
+  );
+  const terrain =
+    terrainObject && terrainObject.kind.type === "terrain" ? terrainObject.kind : null;
+  if (!terrainObject || !terrain) {
+    return (
+      <p className="hint">
+        This project has no terrain. Add a DEM from Object → Terrain (Change
+        DEM…) to get relief, a colormap and draped imagery.
+      </p>
+    );
+  }
+  const overlayAsset = terrain.overlay
+    ? state?.project.assets.find((entry) => entry.id === terrain.overlay?.asset)
+    : undefined;
+  // One colormap LUT per frame: a raster overlay and a colormap cannot both
+  // apply, so the ramp is disabled while an overlay is draped.
+  const overlayOwnsTheColormap = Boolean(terrain.overlay);
+  const preview = COLORMAP_PREVIEWS[render.colormap];
+  // The DEM's own relief, as a percentage of its longer footprint edge — the
+  // number the vertical-scale rule is about. At true scale this is what makes
+  // a country-sized DEM read as a plate.
+  const reliefPercent =
+    terrain.elevationRange && terrain.worldSpanXz
+      ? ((terrain.elevationRange[1] - terrain.elevationRange[0]) /
+          Math.max(terrain.worldSpanXz[0], terrain.worldSpanXz[1])) *
+        100
+      : null;
+
+  return (
+    <>
+      <Section title="Relief" id="map-relief">
         <div className="readout readout--compact">
-          <dt>Engine set</dt>
-          <dd>terrain_default()</dd>
-          <dt>Layers</dt>
-          <dd>rock · grass · dirt · snow</dd>
-          <dt>Texture maps</dt>
-          <dd>none found — flat layer colours</dd>
+          <dt>Elevation</dt>
+          <dd>
+            {terrain.elevationRange === null
+              ? "—"
+              : `${terrain.elevationRange[0].toFixed(0)}–${terrain.elevationRange[1].toFixed(0)} m`}
+          </dd>
+          <dt>Footprint</dt>
+          <dd>
+            {terrain.worldSpanXz === null
+              ? "—"
+              : terrain.worldSpanXz
+                  .map((value) => `${(value / 1000).toFixed(1)} km`)
+                  .join(" × ")}
+          </dd>
+          <dt>Relief</dt>
+          <dd>
+            {reliefPercent === null ? "—" : `${reliefPercent.toFixed(1)}% of the footprint`}
+          </dd>
+        </div>
+        <NumberField
+          label="Vertical scale"
+          value={terrain.zScale}
+          step={0.1}
+          min={0.1}
+          max={50}
+          onCommit={(zScale) =>
+            void actions.apply({ type: "setTerrainZScale", id: terrainObject.id, zScale })
+          }
+        />
+        <div className="inline-actions">
+          <button
+            type="button"
+            className="button button--small"
+            onClick={() =>
+              void actions.apply({ type: "fitTerrainRelief", id: terrainObject.id })
+            }
+          >
+            Fit the DEM's relief
+          </button>
         </div>
         <p className="hint">
-          The engine shades terrain from four triplanar PBR layers and resolves
-          their rock/grass/dirt/snow maps from{" "}
-          <span className="mono">assets/materials/</span> (or{" "}
-          <span className="mono">FORGE3D_MATERIAL_DIR</span>). This checkout
-          ships none, so the default renders flat. Attach an albedo raster to
-          give the surface imagery — new Bryce projects come with the NAIP
-          orthophoto already attached.
+          1 is true scale. The rule targets 6% relief over the footprint, so a
+          country-size DEM comes up exaggerated and a steep one keeps its true
+          scale — Bryce stays 1, the Swiss Alps 5.25 because 4 km across 352 km
+          is 1.1% and reads as a plate. Fit re-derives that for this DEM.
         </p>
+        {reliefPercent !== null && reliefPercent < 3 && (
+          <p className="hint hint--warn">
+            This DEM is only {reliefPercent.toFixed(1)}% relief, so 1.0 shows it
+            as a printed sheet. Press <strong>Fit the DEM's relief</strong>.
+          </p>
+        )}
+      </Section>
+
+      <Section title="Elevation ramp" id="map-colormap">
+        <ChoiceField
+          label="Colormap"
+          value={render.colormap}
+          options={[
+            { value: "", label: "None", title: "The terrain's material set colours it" },
+            ...(["viridis", "magma", "vik"] as const).map((value) => ({
+              value,
+              label: value[0].toUpperCase() + value.slice(1),
+              title: `The engine's ${COLORMAP_PREVIEWS[value].title} elevation ramp`,
+            })),
+          ].map((option) => ({
+            ...option,
+            disabled: overlayOwnsTheColormap && option.value !== render.colormap,
+          }))}
+          onChange={(colormap) => commit({ colormap })}
+          hint={
+            overlayOwnsTheColormap
+              ? "The draped raster uses the engine's single colormap binding; remove it to show an elevation ramp."
+              : "The engine's own catalogue (forge3d:viridis, :magma, :vik) mapped over the elevation."
+          }
+        />
+        {preview && (
+          <div className="colormap-preview">
+            <span
+              className="colormap-preview__ramp"
+              style={{ background: `linear-gradient(90deg, ${preview.stops.join(", ")})` }}
+              title={preview.title}
+            />
+            <span className="colormap-preview__labels">
+              <span>
+                {terrain.elevationRange === null
+                  ? "low"
+                  : `${terrain.elevationRange[0].toFixed(0)} m`}
+              </span>
+              <span>{preview.title}</span>
+              <span>
+                {terrain.elevationRange === null
+                  ? "high"
+                  : `${terrain.elevationRange[1].toFixed(0)} m`}
+              </span>
+            </span>
+          </div>
+        )}
+        {render.colormap && (
+          <>
+            <NumberField
+              label="Colormap strength"
+              value={render.colormapStrength}
+              step={0.05}
+              min={0}
+              max={1}
+              onCommit={(colormapStrength) => commit({ colormapStrength })}
+            />
+            <Toggle
+              label="Elevation legend"
+              checked={render.legend}
+              onChange={(legend) => commit({ legend })}
+            />
+            <p className="hint">
+              Strength 0 keeps the material set. The legend draws the engine's
+              gradient bar and elevation ticks in the frame's bottom-right,
+              scaled with the still.
+            </p>
+          </>
+        )}
+      </Section>
+
+      <Section title="Imagery" id="map-imagery">
         <div className="readout readout--compact">
-          <dt>Albedo raster</dt>
-          <dd>{overlayAsset?.name ?? "none — engine default"}</dd>
+          <dt>Draped raster</dt>
+          <dd>{overlayAsset?.name ?? "none"}</dd>
         </div>
         {terrain.overlay && (
           <label className="field">
@@ -1233,7 +1333,7 @@ function TerrainEditor({
             onChange={(despeckle) =>
               void actions.apply({
                 type: "setTerrainOverlay",
-                id: object.id,
+                id: terrainObject.id,
                 overlay: { ...terrain.overlay!, despeckle },
               })
             }
@@ -1245,7 +1345,7 @@ function TerrainEditor({
             className="button button--small"
             onClick={() => void actions.importTerrainOverlay()}
           >
-            {terrain.overlay ? "Replace albedo raster…" : "Add albedo raster…"}
+            {terrain.overlay ? "Replace raster…" : "Add raster…"}
           </button>
           {terrain.overlay && (
             <button
@@ -1257,31 +1357,21 @@ function TerrainEditor({
             </button>
           )}
         </div>
-        <CapabilityBadges rows={caps?.terrainMaterial} />
         <p className="hint">
-          The albedo raster is draped over the DEM and composited after
-          lighting, so categorical palettes survive. This is also what the
-          Forge3D renderer consumes; the engine has no other material
-          override for terrain.
+          A single-band class raster (land cover: class IDs) is painted through
+          the engine's land-cover palette; an RGB raster keeps its own colours.
+          Either way it is draped after lighting, so categorical palettes
+          survive. Attaching one clears an elevation ramp — the engine binds one
+          colormap per frame.
         </p>
         {terrain.overlay && (
           <p className="hint">
-            Despeckle applies to a single-band class raster (class IDs, painted
-            through the land-cover palette): it absorbs a cell whose class has
-            at most two cells in its 3 × 3 block into the block's majority. An
-            RGB raster passes through untouched.
+            Despeckle absorbs a class cell that holds at most two cells of its
+            3 × 3 block into the block's majority. It is inert on an RGB raster.
           </p>
         )}
       </Section>
-
-      <p className="hint">
-        The slider is the heightfield detail the Solid view builds from this DEM
-        (32 = blocky, 512 = close to the source grid). The renderer always reads
-        the original GeoTIFF, so Rendered is unaffected by this setting — and
-        every render uses the camera you are looking through, so orbit and press
-        Re-render to see it from there.
-      </p>
-    </Section>
+    </>
   );
 }
 
@@ -1477,7 +1567,7 @@ export function ObjectProperties() {
         <ImportedMesh object={object} asset={meshAsset} />
       )}
       {object.kind.type === "terrain" && (
-        <TerrainEditor object={object} terrain={object.kind} asset={terrainAsset} />
+        <TerrainEditor terrain={object.kind} asset={terrainAsset} />
       )}
       {object.kind.type === "camera" && (
         <CameraEditor

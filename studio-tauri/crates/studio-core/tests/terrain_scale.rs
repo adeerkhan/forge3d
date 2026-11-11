@@ -174,3 +174,42 @@ fn the_model_refuses_a_vertical_scale_the_engine_refuses() {
         assert!(error.contains("vertical scale"), "{error}");
     }
 }
+
+#[test]
+fn fit_relief_adopts_the_dems_default_and_undo_restores_true_scale() {
+    // A project saved before the per-DEM default carries zScale 1.0, which
+    // renders the Alps as a plate. One undoable command adopts the rule the
+    // core owns — no second copy of 0.06 in the shell.
+    let asset = dem_asset("switzerland_dem.tif");
+    let mut project = Project::starter("Alps", Some(seed(&asset, SWISS_RANGE, SWISS_SPAN)));
+    let terrain_id = project.terrain_object().expect("terrain").id;
+    {
+        let object = project.scene.object_mut(terrain_id).expect("terrain");
+        if let studio_core::ObjectKind::Terrain(terrain) = &mut object.kind {
+            terrain.z_scale = 1.0;
+        }
+    }
+    let mut editor = Editor::new(project);
+
+    editor
+        .apply(Command::FitTerrainRelief { id: terrain_id })
+        .expect("fit relief");
+    let fitted = editor
+        .project()
+        .scene
+        .object(terrain_id)
+        .and_then(|object| object.terrain())
+        .expect("terrain")
+        .z_scale;
+    assert!((fitted - 5.246).abs() < 0.001, "got {fitted}");
+
+    editor.undo().expect("undo is available");
+    let restored = editor
+        .project()
+        .scene
+        .object(terrain_id)
+        .and_then(|object| object.terrain())
+        .expect("terrain")
+        .z_scale;
+    assert!((restored - 1.0).abs() < f32::EPSILON, "got {restored}");
+}

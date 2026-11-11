@@ -388,6 +388,14 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   test (`the_new_settings_reach_the_pixels`) renders one frame twice (identical
   bytes), then with a colormap and with sun visibility (different bytes), so a
   key-name drift between the Rust payload and the service fails a test.
+- **Preview supersampling is now on every preview.** The payload used to ask
+  for `render_scale` 2 only up to 4 Mpx of *requested* frame; the viewport
+  capped the request at 4096 per side, so a 4× viewport (3688×3180) landed at
+  scale 1 — the exact configuration that shows the terrain's per-cell aliasing.
+  The threshold is now the internal target (8 Mpx requested → 16 Mpx at 2×) and
+  the viewport caps at 2048, which the engine renders at 4096 and blits down:
+  a 4× viewport frame went from 11.7 Mpx of IPC at scale 1 to 3.6 Mpx at
+  scale 2, while the engine still draws 4096 wide.
 - **No client-side re-implementation.** Supersampling is `render_scale`; the
   class palette is `thematic.apply_palette`; the colormap is
   `Colormap1D`/`OverlayLayer.from_colormap1d`; the camera is
@@ -397,7 +405,21 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   (needs an HDR target and a pinned-shader change), the water blob filter and
   the class despeckle (raster rules, not renderer mechanisms).
 
-### 5.12 Elevation legend (0.25 day) — **done**
+### 5.12 Cartography has a home: the Map tab — **done**
+- Relief, the elevation ramp (with preview strips for `viridis`/`magma`/`vik`
+  and the DEM's min/max metres), the legend and the draped imagery moved out of
+  Object → Terrain into a **Map** tab of its own. Nothing about them changed
+  except where they live: from the Object tab they were unfindable, which is
+  what "where is the cartography" meant.
+- The Relief section shows the DEM's **relief as a percentage of its
+  footprint** (the number the rule is about: Bryce 11.3%, the Swiss 1.1%) and
+  warns under 3% that 1.0 renders a plate.
+- `Command::FitTerrainRelief` re-derives the DEM's default vertical scale in
+  the core (`scene::dem_default_z_scale`) — one undoable command, no copy of
+  the 0.06 rule in the shell. A project saved before the default (zScale 1.0)
+  adopts it in one click; undo returns to 1.0.
+
+### 5.13 Elevation legend (0.25 day) — **done**
 - `RenderSettings.legend` (serde-default `false`) → `quality.legend`. When a
   colormap is selected, the service composes the engine's own
   `forge3d.legend.Legend` (gradient bar, five ticks in the DEM's metres, title)

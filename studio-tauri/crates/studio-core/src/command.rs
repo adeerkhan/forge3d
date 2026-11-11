@@ -204,6 +204,14 @@ pub enum Command {
         length: u32,
     },
 
+    /// Set the terrain's vertical scale to the DEM's own default: the
+    /// exaggeration that gives its relief 6% of its footprint. One command so
+    /// the rule lives only in `scene::dem_default_z_scale` (a project that
+    /// predates the default can adopt it in one undoable step).
+    FitTerrainRelief {
+        id: ObjectId,
+    },
+
     /// Attach, change, or remove a terrain's draped overlay.
     SetTerrainOverlay {
         id: ObjectId,
@@ -598,6 +606,34 @@ impl Command {
                 if let Some(object) = project.scene.object_mut(*id) {
                     if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
                         terrain.z_scale = *z_scale;
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetTerrainZScale {
+                        id: *id,
+                        z_scale: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
+            Command::FitTerrainRelief { id } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let (previous, elevation_range, world_span_xz) = match &object.kind {
+                    crate::scene::ObjectKind::Terrain(terrain) => (
+                        terrain.z_scale,
+                        terrain.elevation_range,
+                        terrain.world_span_xz,
+                    ),
+                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
+                };
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.z_scale =
+                            crate::scene::dem_default_z_scale(elevation_range, world_span_xz);
                     }
                 }
                 Ok(Outcome {
@@ -1082,6 +1118,7 @@ impl Command {
             | Command::SetLight { id, .. }
             | Command::SetPrimitive { id, .. }
             | Command::SetTerrainZScale { id, .. }
+            | Command::FitTerrainRelief { id }
             | Command::SetTerrainOverlay { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. }
@@ -1141,6 +1178,7 @@ impl Command {
             Command::SetTerrainZScale { id, .. } => {
                 format!("Terrain scale {}", name_of(id))
             }
+            Command::FitTerrainRelief { id } => format!("Fit relief of {}", name_of(id)),
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),

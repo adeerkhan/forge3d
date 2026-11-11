@@ -602,7 +602,10 @@ impl RenderRequest {
                 // ... but only up to a pixel budget: a "4x viewport" request
                 // is already 4x the pixels, and 2x on top of that is 8x
                 // internally, which the GPU will refuse or crawl through.
-                "renderScale": if u64::from(self.width) * u64::from(self.height) <= 4_000_000 {
+                // The threshold is the *internal* budget: 8 Mpx requested is
+                // a 16 Mpx target at 2x, which the GPU takes; above that the
+                // frame keeps its pixels and loses the antialiasing.
+                "renderScale": if u64::from(self.width) * u64::from(self.height) <= 8_000_000 {
                     2.0
                 } else {
                     1.0
@@ -922,6 +925,24 @@ mod tests {
         assert_eq!(
             request().to_payload("final", None)["quality"]["renderScale"],
             2.0
+        );
+
+        // The threshold is the internal target, not the requested frame: a
+        // 2048x2048 preview (4.2 Mpx) is still 2x, which is what lets the
+        // viewport cap at 2048 and keep the antialiasing. A frame over 8 Mpx
+        // would need a 16+ Mpx target, so it keeps its pixels and loses AA.
+        let mut large = request();
+        large.width = 2048;
+        large.height = 2048;
+        assert_eq!(
+            large.to_payload("preview", None)["quality"]["renderScale"],
+            2.0
+        );
+        large.width = 4096;
+        large.height = 2160;
+        assert_eq!(
+            large.to_payload("final", None)["quality"]["renderScale"],
+            1.0
         );
     }
 

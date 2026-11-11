@@ -1661,13 +1661,15 @@ export function Viewport3D() {
   }, [sizeMenuOpen]);
 
   /** Frame size for a Rendered viewport frame. No hidden multipliers — what
-   *  the selector shows is the size the engine renders. The 4096 cap scales
-   *  the whole frame down uniformly so the aspect never changes.
+   *  the selector shows is the size the engine renders. The cap scales the
+   *  whole frame down uniformly so the aspect never changes.
    *
-   *  Supersampling is the engine's job (`render_scale`): it renders 2x and
-   *  blits down, which removes the terrain's per-cell aliasing. Doing it here
-   *  by asking for a 2x frame and letting the browser downscale cost the same
-   *  time and four times the pixels over IPC, so it is not done twice. */
+   *  The cap is 2048, not 4096, because the engine supersamples every preview
+   *  (`render_scale` 2): a 2048 frame is rendered at 4096 and blitted down,
+   *  which is what removes the terrain's per-cell aliasing. Asking for 4096
+   *  put the frame over the payload's supersampling budget, so the engine
+   *  rendered it at scale 1 — full of sparkles — and sent four times the
+   *  pixels over IPC for the worse picture. */
   const requestSize = useCallback(() => {
     const base =
       renderScale === "project"
@@ -1676,7 +1678,7 @@ export function Viewport3D() {
           ? { width: demDims[0], height: demDims[1] }
           : { width: Math.max(320, size.width), height: Math.max(240, size.height) };
     const factor = renderScale === "project" || renderScale === "dem" ? 1 : Number(renderScale);
-    const cap = 4096;
+    const cap = 2048;
     const shrink = Math.min(1, cap / (base.width * factor), cap / (base.height * factor));
     return {
       width: Math.max(64, Math.round(base.width * factor * shrink)),

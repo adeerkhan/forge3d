@@ -6,6 +6,7 @@ import {
   CloudIcon,
   CubeIcon,
   KeyframeIcon,
+  MapIcon,
   MountainIcon,
   SlidersIcon,
   SunIcon,
@@ -14,6 +15,7 @@ import {
   AtmosphereSection,
   EnvironmentSettings,
   LightRig,
+  MapSection,
   ObjectProperties,
   ProjectFacts,
   RenderSettingsEditor,
@@ -29,7 +31,14 @@ import {
  * object are different questions, and a 1000px scroll mixes them.
  */
 
-type PropsTab = "render" | "scene" | "light" | "atmosphere" | "object" | "animation";
+type PropsTab =
+  | "render"
+  | "scene"
+  | "light"
+  | "atmosphere"
+  | "map"
+  | "object"
+  | "animation";
 
 const TABS: {
   id: PropsTab;
@@ -60,6 +69,13 @@ const TABS: {
     label: "Atmosphere",
     Icon: CloudIcon,
     title: "Atmosphere: the weather on the terrain — fog and water",
+  },
+  {
+    id: "map",
+    label: "Map",
+    Icon: MapIcon,
+    title:
+      "Map: the terrain's cartography — vertical relief, elevation colormap, legend and draped imagery",
   },
   {
     id: "object",
@@ -140,6 +156,7 @@ export function SettingsSidebar() {
                 </>
               )}
               {tab === "atmosphere" && <AtmosphereSection />}
+              {tab === "map" && <MapSection />}
               {tab === "object" && <ObjectProperties />}
               {tab === "animation" && <Timeline />}
             </>

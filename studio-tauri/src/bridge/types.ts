@@ -508,6 +508,8 @@ export type Command =
   | { type: "setRenderSettings"; render: RenderSettings }
   | { type: "setAssetPath"; id: string; path: string; byteSize: number }
   | { type: "setTerrainZScale"; id: string; zScale: number }
+  /** Set the vertical scale to the DEM's own 6%-relief default. */
+  | { type: "fitTerrainRelief"; id: string }
   | {
       type: "setTerrainDem";
       id: string;
