@@ -1244,6 +1244,12 @@ export function MapSection() {
             as a printed sheet. Press <strong>Fit the DEM's relief</strong>.
           </p>
         )}
+        <p className="hint">
+          Seen from far enough to hold the whole country, even 6% relief reads
+          flat without shadows. <strong>Render → Shadows → Terrain sun
+          shadows</strong> adds the ridge shadows a printed map uses, and
+          zooming in is where the shape shows.
+        </p>
       </Section>
 
       <Section title="Elevation ramp" id="map-colormap">
