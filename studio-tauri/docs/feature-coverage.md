@@ -114,7 +114,9 @@ Still open, in order of value:
 
 ## 5. The phases
 
-**Phase 14 — the engine's cartographic tier.** The rails are the user's own
+**Phase 14 — the engine's cartographic tier** (the goal prompt, with the
+increment-by-increment recipe and the measured facts:
+`docs/goal-phase-14-cartographic-tier.md`). The rails are the user's own
 example and the largest remaining gap: the viewer draws vector overlays
 (`src/viewer/terrain/vector_overlay.rs`), the offscreen path cannot. The work
 is one overlay pass in the offscreen renderer (geometry buffers, drape from the
