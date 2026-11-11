@@ -381,19 +381,36 @@ class StudioRenderer:
         )
         return np.ascontiguousarray(keep.astype(np.float32)), settings
 
-    def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
-        """Read a raster overlay decimated to the frame, aiming for the drape.
+    #: Long side of the overlay texture, in texels. The engine samples it at
+    #: the terrain's UV, so this — not the frame size — sets how much land-cover
+    #: detail a close-up keeps. Decimating to the frame turned a 10 m land-cover
+    #: map into 390 m blocks on a 900 px frame; 4096 is the engine's own overlay
+    #: ceiling and keeps the class pattern crisp at a full-country view.
+    OVERLAY_TEXTURE_LONG_SIDE = 4096
 
-        Deliberately no reprojection: the overlay is stretched across the terrain
-        footprint, which is what the gallery examples do. (Reprojecting into a
-        0..N destination grid put a georeferenced raster at coordinates far from
-        its own extent and produced a flat grey layer.)
+    def overlay_texture_size(self, height: int, width: int):
+        """The texture size a source raster is read at: its own, capped by the
+        long-side ceiling. Aspect is preserved."""
+        scale = min(1.0, float(self.OVERLAY_TEXTURE_LONG_SIDE) / max(height, width, 1))
+        return max(1, int(round(height * scale))), max(1, int(round(width * scale)))
+
+    def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
+        """Read a raster overlay into the engine's drape texture.
+
+        The texture's resolution follows the *source*, not the frame: the
+        engine samples it per pixel, so a decimated-to-frame atlas loses the
+        land cover's own detail the moment the camera moves in. Deliberately no
+        reprojection: the overlay is stretched across the terrain footprint,
+        which is what the gallery examples do. (Reprojecting into a 0..N
+        destination grid put a georeferenced raster at coordinates far from its
+        own extent and produced a flat grey layer.)
         """
         import rasterio
         from rasterio.enums import Resampling as RasterioResampling
 
         with rasterio.open(overlay["path"]) as src:
             bands = min(3, src.count)
+            height, width = self.overlay_texture_size(src.height, src.width)
             planes = [
                 src.read(
                     band + 1,

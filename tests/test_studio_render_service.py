@@ -489,3 +489,16 @@ def test_the_legend_is_the_engines_and_needs_a_colormap():
     # The legend lands bottom-right and leaves the top-left untouched.
     assert (drawn[:60, :100] == frame[:60, :100]).all()
     assert not (drawn[60:, 100:] == frame[60:, 100:]).all()
+
+
+def test_the_overlay_texture_follows_the_source_not_the_frame():
+    """A drape used to be decimated to the frame — 390 m blocks on a 900 px
+    frame. The texture now keeps the source's own resolution up to the engine's
+    overlay ceiling, so a close-up still shows the land cover's classes."""
+    service = load_service()
+    size = service.StudioRenderer.overlay_texture_size
+    stub = object.__new__(service.StudioRenderer)
+    # The bundled Swiss land cover, 10055 x 22069, capped on its long side.
+    assert size(stub, 10055, 22069) == (1866, 4096)
+    # A source smaller than the ceiling keeps its own pixels.
+    assert size(stub, 900, 1200) == (900, 1200)

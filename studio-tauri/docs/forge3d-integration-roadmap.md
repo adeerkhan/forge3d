@@ -52,6 +52,8 @@ be a payload field: vector layers and meshes.
 | Ambient occlusion control | **removed** — 0 pixels changed, 2.0 s per frame (5.10) |
 | Engine fidelity — Hosek–Wilkie evaluates green-dominant where the CPU radiance table is blue | open (measured; Preetham is the blue option) |
 | 5.12 elevation legend — the engine's `Legend` in the frame's corner | done (needs a colormap) |
+| 5.14 overlay texture follows the source (4096 texels) | done |
+| 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
 
@@ -440,6 +442,38 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   categorical legend still needs a class scheme the project does not store.
 - Check: schema contract + fixture, payload assertion, service test (the
   compositor leaves the top-left untouched and the shape unchanged).
+
+### 5.14 The drape keeps the raster's own resolution (0.25 day) — **done**
+- The overlay texture was read at the **frame's** size, so a 10 m land-cover
+  map became 390 m blocks on a 900 px frame and coarser on a small one. The
+  texture now follows the source, capped on its long side at the engine's
+  4096 overlay ceiling (`OVERLAY_TEXTURE_LONG_SIDE`), so a close-up keeps the
+  class pattern and a whole-country view is as crisp as the source allows.
+- Measured on the Swiss land cover (10055×22069 → 1866×4096 texels): the 900 px
+  frame's drape went from the averaged blocks to the raster's own class
+  boundaries; a source under 4096 keeps its pixels untouched.
+- Check: service test on the sizing rule (`overlay_texture_size`), 31 service
+  tests green.
+
+### 5.15 Vector overlays (the rail-network gallery example) — **blocked, measured**
+- The gallery's Luxembourg rail image is a **viewer** snapshot: the lines reach
+  the renderer through `add_vector_overlay` IPC and are drawn by
+  `src/viewer/terrain/vector_overlay.rs` (geometry, drape, depth test, halo).
+- Studio's stills render through `TerrainRenderParams` → the offscreen terrain
+  pass, which has **no vector geometry at all**: `VectorOverlaySettings` only
+  carries `depth_test`/halo/contour flags, and a `VectorOverlayConfig` passed
+  through the params is ignored. Measured on the Luxembourg DEM (640×480):
+  depth/halo settings **0** changed samples, a `VectorOverlayConfig` triangle
+  with `drape=True` also **0**.
+- Two honest routes, both real work: (a) add an overlay pass to the offscreen
+  terrain renderer (vertex/index buffers, drape from the height texture, depth
+  test, halo — the viewer's implementation is the reference), or (b) render
+  vector-bearing projects through the viewer/`MapScene` compositor, which is
+  §7.1 and moves the anchors. Until one lands, Studio does not offer a vector
+  layer control: it would draw nothing.
+- Data is ready: `assets/gpkg/luxembourg_rail.gpkg` (2031 line features,
+  EPSG:4326, same CRS as `assets/tif/luxembourg_dem.tif`), readable with the
+  stdlib (`sqlite3` + GeoPackage WKB) if the engine side lands first.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
