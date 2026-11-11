@@ -652,3 +652,40 @@ def test_the_engine_height_domain_describes_the_heights_it_is_given():
     assert flat[1] > flat[0]
     # No finite samples must not crash.
     assert service.engine_height_domain(np.array([np.nan, np.nan])) == (0.0, 1.0)
+
+
+def test_the_vector_reader_reads_a_geopackage_without_a_third_party_package():
+    """A GeoPackage is a SQLite database with GeoPackage binary geometry; the
+    studio's environment has no geopandas, fiona or pyproj (verified)."""
+    service = load_service()
+    path = Path(__file__).resolve().parents[1] / "assets/gpkg/luxembourg_rail.gpkg"
+    lines, crs = service.read_vector_lines(str(path))
+    assert crs == "EPSG:4326"
+    assert len(lines) > 2000, "the rail network has 2,035 features"
+    points = [point for line in lines for point in line]
+    assert all(len(line) >= 2 for line in lines)
+    # The lines fall inside Luxembourg, which is the DEM's own footprint.
+    assert 5.7 < min(p[0] for p in points) < 5.9
+    assert 6.4 < max(p[0] for p in points) < 6.6
+    assert 49.4 < min(p[1] for p in points) < 49.6
+    assert 50.1 < max(p[1] for p in points) < 50.3
+
+
+def test_the_vector_reader_rejects_a_file_it_cannot_read():
+    service = load_service()
+    with pytest.raises(RuntimeError, match="GeoPackage"):
+        service.read_vector_lines("definitely-not-a-vector.tif")
+
+
+def test_the_ground_scale_is_metres_per_pixel():
+    """The vector width is a real width in metres; the rasterizer wants pixels,
+    so the two are converted with the frame's ground scale."""
+    service = load_service()
+    # A camera 10,000 m away (in the renderer's units), a 45 degree field of
+    # view and a 1,000x1,000 frame: the frame is about 8,284 m wide.
+    scale = service.ground_scale_metres_per_pixel(10_000.0, 45.0, 1000, 1000, 1.0)
+    assert 8.0 < scale < 8.5, scale
+    # A scaled world (the service's country-scale budget) divides the metres.
+    scaled = service.ground_scale_metres_per_pixel(10_000.0, 45.0, 1000, 1000, 0.5)
+    assert scaled == pytest.approx(scale * 2.0)
+    assert service.ground_scale_metres_per_pixel(0.0, 45.0, 1000, 1000, 1.0) == 0.0

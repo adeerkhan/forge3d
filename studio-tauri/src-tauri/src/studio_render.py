@@ -119,14 +119,15 @@ def dem_span(dem) -> tuple[float, float]:
     return abs(float(resolution[0])) * width, abs(float(resolution[1])) * height
 
 
-def load_dem(path: str) -> tuple[np.ndarray, float, float, tuple[float, float]]:
+def load_dem(path: str):
     """Read a DEM through the engine's loader and compute the render frame.
 
-    Returns heights (nodata filled, outliers clamped), the metric span, and the
-    robust elevation range. Reading, nodata masking and CRS handling are the
-    engine's (`forge3d.io`, `forge3d.gis`); only the presentation choices —
-    clamp to [0.01, 99.99] percentiles, fill holes with the floor — are the
-    studio's.
+    Returns the heights (nodata filled, outliers clamped), the metric span, the
+    robust elevation range, the raster's bounds and its CRS. Reading, nodata
+    masking and CRS handling are the engine's (`forge3d.io`, `forge3d.gis`); only
+    the presentation choices — clamp to [0.01, 99.99] percentiles, fill holes
+    with the floor — are the studio's. The bounds and the CRS are what place a
+    vector layer on the terrain.
     """
     from forge3d import io as fio
 
@@ -143,7 +144,18 @@ def load_dem(path: str) -> tuple[np.ndarray, float, float, tuple[float, float]]:
     span_x, span_y = dem_span(dem)
     if span_x <= 0.0 or span_y <= 0.0:
         span_x, span_y = float(raw.shape[1]), float(raw.shape[0])
-    return heights.astype(np.float32), span_x, span_y, (float(low), float(high))
+    bounds = None
+    if getattr(dem, "bounds", None) is not None:
+        bounds = tuple(float(value) for value in dem.bounds)
+    crs = str(getattr(dem, "crs", "") or "")
+    return (
+        heights.astype(np.float32),
+        span_x,
+        span_y,
+        (float(low), float(high)),
+        bounds,
+        crs,
+    )
 
 
 class StudioRenderer:
@@ -151,7 +163,14 @@ class StudioRenderer:
         import forge3d as f3d
 
         self.f3d = f3d
-        self.heights, self.span_x, self.span_y, self.range = load_dem(dem_path)
+        (
+            self.heights,
+            self.span_x,
+            self.span_y,
+            self.range,
+            self.dem_bounds,
+            self.dem_crs,
+        ) = load_dem(dem_path)
         self.dem_path = dem_path
         # The renderer rejects view coordinates beyond +/-65,536 units, so a
         # country-scale DEM is scaled into that budget (proportions preserved).
@@ -826,6 +845,43 @@ class StudioRenderer:
                     "(install it with `pip install oidn` / `pip install pyoidn` next to the engine)" % (exc,)
                 ) from exc
 
+        vector = request.get("vector") or None
+        if vector:
+            lines, vector_crs = read_vector_lines(str(vector["path"]))
+            dem_code = crs_code(self.dem_crs)
+            file_code = crs_code(vector_crs)
+            if dem_code and file_code and dem_code != file_code:
+                raise RuntimeError(
+                    "the vector file is in EPSG:%s and the DEM in EPSG:%s; "
+                    "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
+                )
+            # The width is the feature's real width in metres; the rasterizer
+            # works in pixels, so it is converted with the frame's ground scale
+            # (and never falls below one pixel, or a country-wide view would
+            # lose the network entirely).
+            metres_per_pixel = ground_scale_metres_per_pixel(
+                radius,
+                float(camera.get("fovDeg", 45.0) or 45.0),
+                width,
+                height,
+                self.scale,
+            )
+            width_metres = float(vector.get("width", 40.0))
+            stroke_px = 1.0
+            if metres_per_pixel > 0.0 and width_metres > 0.0:
+                stroke_px = max(1.0, width_metres / metres_per_pixel)
+            overlay = vector_overlay_rgba(
+                params,
+                self.heights,
+                self.dem_bounds,
+                lines,
+                width,
+                height,
+                colour=tuple(float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))),
+                stroke_px=stroke_px,
+            )
+            rgb = composite_overlay(rgb, overlay)
+
         rgb = apply_post_effects(rgb, quality)
         legend_name = str(quality.get("colormap") or "").strip()
         if bool(quality.get("legend", False)) and legend_name:
@@ -1379,6 +1435,199 @@ def read_vector_lines(path: str):
         return lines, crs
     finally:
         connection.close()
+
+
+def crs_code(crs) -> str:
+    """The EPSG code of a CRS string ("EPSG:4326" -> "4326"), or "" when the
+    CRS does not name one."""
+    text = str(crs or "").strip()
+    if ":" in text:
+        text = text.rsplit(":", 1)[-1]
+    return text if text.isdigit() else ""
+
+
+def _sample_height(heights, u: float, v: float) -> float:
+    """The height at a terrain UV, bilinearly (the engine's own sampling)."""
+    rows, cols = heights.shape[:2]
+    x = min(max(u, 0.0), 1.0) * (cols - 1)
+    y = min(max(v, 0.0), 1.0) * (rows - 1)
+    x0 = int(x)
+    y0 = int(y)
+    x1 = min(x0 + 1, cols - 1)
+    y1 = min(y0 + 1, rows - 1)
+    tx = x - x0
+    ty = y - y0
+    top = float(heights[y0, x0]) * (1.0 - tx) + float(heights[y0, x1]) * tx
+    bottom = float(heights[y1, x0]) * (1.0 - tx) + float(heights[y1, x1]) * tx
+    return top * (1.0 - ty) + bottom * ty
+
+
+def ground_scale_metres_per_pixel(radius: float, fov_deg: float, width: int, height: int, scale: float) -> float:
+    """How many metres one pixel of the frame covers.
+
+    The camera's radius is in the renderer's scaled units (the DEM's metres
+    times the service's scale), so the visible width in metres is
+    `2 * radius * tan(fov/2) * aspect / scale`.
+    """
+    import math
+
+    if radius <= 0.0 or width <= 0 or height <= 0 or scale <= 0.0:
+        return 0.0
+    aspect = float(width) / float(height)
+    visible = 2.0 * radius * math.tan(math.radians(fov_deg) * 0.5) * aspect
+    return visible / (scale * float(width))
+
+
+def vector_overlay_rgba(
+    params,
+    heights,
+    bounds,
+    lines,
+    width: int,
+    height: int,
+    colour=(1.0, 0.29, 0.1, 1.0),
+    stroke_px: float = 3.0,
+    densify: int = 256,
+):
+    """The engine's projection and the engine's own vector rasterizer.
+
+    Nothing here is a second implementation: the terrain points go through
+    `TerrainRenderParams.project_terrain_points` (the engine's exact camera
+    and height transform), the lines are rasterized by
+    `forge3d.vector_render_oit_py` (the engine's anti-aliased OIT bridge), and
+    the result is composited over the frame.
+
+    The lines arrive in the raster's own coordinates. They are placed on the
+    terrain by mapping them to the terrain's UV, sampling the height there
+    (so the line follows the ground) and projecting through the engine's
+    camera. A point that lands where the terrain is not present is dropped, so
+    the lines do not float over the sky.
+    """
+    import numpy as np
+
+    if not lines or bounds is None:
+        return None
+    west, south, east, north = (float(value) for value in bounds)
+    if not east > west or not north > south:
+        raise RuntimeError("the terrain has no measurable bounds to place vectors on")
+
+    # 1. the geographic lines become terrain UVs, densified along the ground.
+    polylines_uv = []
+    for line in lines:
+        if len(line) < 2:
+            continue
+        points = []
+        for index in range(len(line) - 1):
+            x0, y0 = line[index]
+            x1, y1 = line[index + 1]
+            u0 = (x0 - west) / (east - west)
+            u1 = (x1 - west) / (east - west)
+            v0 = (north - y0) / (north - south)
+            v1 = (north - y1) / (north - south)
+            steps = max(1, int(densify * max(abs(u1 - u0), abs(v1 - v0))))
+            for step in range(steps):
+                t = step / steps
+                points.append((u0 + (u1 - u0) * t, v0 + (v1 - v0) * t))
+        u, v = line[-1]
+        points.append(((u - west) / (east - west), (north - v) / (north - south)))
+        if len(points) >= 2:
+            polylines_uv.append(points)
+    if not polylines_uv:
+        return None
+
+    # 2. the engine's projection: terrain UV + height + offset -> screen pixels.
+    projected = []
+    for points in polylines_uv:
+        batch = [[u, v, _sample_height(heights, u, v), 0.0] for u, v in points]
+        # The shared frame is the production mesh's own sampling (a 512-vertex
+        # grid over the DEM) and the same camera the mesh path renders with, so
+        # the line lands where the ground is.
+        values = params.project_terrain_points(batch, shared_frame=True)
+        projected.append(values)
+    if not any(projected):
+        return None
+
+    # 3. where is the terrain visible? The engine rasterizes the DEM's depth
+    #    with the same camera, so a line over the sky is dropped.
+    terrain_depth = None
+    try:
+        terrain_depth = np.asarray(
+            params.project_terrain_depth(
+                heights, (int(width), int(height)), None, None, True
+            )
+        )
+    except Exception:  # noqa: BLE001 - the overlay is optional
+        terrain_depth = None
+
+    # 4. the rasterizer works in NDC; the engine's projection returns pixels.
+    polylines = []
+    for values in projected:
+        current = []
+        for value in values:
+            if value is None:
+                if len(current) >= 2:
+                    polylines.append(current)
+                current = []
+                continue
+            px, py, depth = float(value[0]), float(value[1]), float(value[2])
+            if terrain_depth is not None:
+                column = int(px)
+                row = int(py)
+                if 0 <= row < terrain_depth.shape[0] and 0 <= column < terrain_depth.shape[1]:
+                    # The raster's background is exactly 1.0 (the far plane);
+                    # the terrain's depth is just below it, so the test is
+                    # "is this pixel the background", not "is it far away".
+                    if float(terrain_depth[row, column]) >= 1.0 - 1e-6:
+                        # No terrain at this pixel: the line is over the sky.
+                        if len(current) >= 2:
+                            polylines.append(current)
+                        current = []
+                        continue
+            current.append((2.0 * px / max(width, 1) - 1.0, 1.0 - 2.0 * py / max(height, 1)))
+        if len(current) >= 2:
+            polylines.append(current)
+    if not polylines:
+        return None
+
+    # One polyline per segment, the same shape MapScene's own payload uses
+    # ("a projected path is densified along the DEM, so give each segment its
+    # own instance"). The OIT bridge draws one instance per polyline, so a
+    # densified path handed over as one polyline would draw only its first
+    # segment.
+    segments = []
+    for path in polylines:
+        for index in range(len(path) - 1):
+            segments.append((path[index], path[index + 1]))
+    if not segments:
+        return None
+
+    import forge3d as f3d
+
+    overlay = f3d.vector_render_oit_py(
+        int(width),
+        int(height),
+        points_xy=None,
+        point_rgba=None,
+        point_size=None,
+        polylines=[[a, b] for a, b in segments],
+        polyline_rgba=[colour for _ in segments],
+        stroke_width=[float(stroke_px) for _ in segments],
+    )
+    return np.asarray(overlay, dtype=np.uint8)
+
+
+def composite_overlay(rgb: np.ndarray, overlay) -> np.ndarray:
+    """The overlay over the frame (the engine's own compositing rule)."""
+    if overlay is None:
+        return rgb
+    source = np.asarray(overlay, dtype=np.uint8)
+    if source.ndim != 3 or source.shape[:2] != rgb.shape[:2] or source.shape[2] != 4:
+        raise RuntimeError("the vector overlay does not match the frame")
+    alpha = source[..., 3:4].astype(np.float32) / 255.0
+    bottom = rgb.astype(np.float32)
+    out = bottom * (1.0 - alpha) + source[..., :3].astype(np.float32) * alpha
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
 
 
 def apply_post_effects(rgb: np.ndarray, quality: Dict[str, Any]) -> np.ndarray:
