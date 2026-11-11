@@ -452,8 +452,16 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - Measured on the Swiss land cover (10055×22069 → 1866×4096 texels): the 900 px
   frame's drape went from the averaged blocks to the raster's own class
   boundaries; a source under 4096 keeps its pixels untouched.
-- Check: service test on the sizing rule (`overlay_texture_size`), 31 service
-  tests green.
+- **Cost, measured:** a national 10 m raster is ~2.6 GB of float32 across its
+  bands. Reading it whole took **19.4 s per frame** because the drape was
+  rebuilt every request. GDAL now reads the strips with `ALL_CPUS` (17.2 s →
+  3.5 s for the three masked bands) and the decoded RGBA is cached by file
+  identity (`overlay_key`: path, mtime, size, despeckle; the opacity is applied
+  per request), so the first frame with a new overlay costs 8.3 s including the
+  engine's warm-up and every later frame 280 ms — with the opacity slider
+  reusing the same pixels.
+- Check: service tests on the sizing rule and on the decode-once cache, 32
+  service tests green.
 
 ### 5.15 Vector overlays (the rail-network gallery example) — **blocked, measured**
 - The gallery's Luxembourg rail image is a **viewer** snapshot: the lines reach

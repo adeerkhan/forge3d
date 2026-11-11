@@ -149,6 +149,11 @@ class StudioRenderer:
         # The AETHER LUT is a shipped table: resolving it per frame costs a few
         # ms, and its parameters are fixed by the gate in `sky_settings`.
         self._aether_lut: Any = None
+        # A land-cover raster is read whole (overviews or not, a 10 m national
+        # raster costs ~9 s to decode), so the RGBA is cached by file identity.
+        # Only the strength (the layer's opacity) is applied per request.
+        self._overlay_rgba_cache: Dict[tuple, np.ndarray] = {}
+        self._overlay_rgba_limit = 4
 
         self.session = f3d.Session(window=False, backend="vulkan")
         self.renderer = f3d.TerrainRenderer(self.session)
@@ -394,21 +399,52 @@ class StudioRenderer:
         scale = min(1.0, float(self.OVERLAY_TEXTURE_LONG_SIDE) / max(height, width, 1))
         return max(1, int(round(height * scale))), max(1, int(round(width * scale)))
 
-    def build_overlay(self, overlay: Dict[str, Any], width: int, height: int):
-        """Read a raster overlay into the engine's drape texture.
+    def overlay_key(self, overlay: Dict[str, Any]):
+        """What the cached RGBA depends on: the file's identity and the class
+        post-processing. The opacity is *not* in the key — it is applied when
+        the overlay layer is built, so moving the slider reuses the pixels."""
+        path = str(overlay["path"])
+        try:
+            stat = Path(path).stat()
+            identity = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            identity = (0, 0)
+        return (path, *identity, bool(overlay.get("despeckle", False)))
+
+    def build_overlay(self, overlay: Dict[str, Any]):
+        """The engine's drape layer for a raster overlay.
 
         The texture's resolution follows the *source*, not the frame: the
         engine samples it per pixel, so a decimated-to-frame atlas loses the
-        land cover's own detail the moment the camera moves in. Deliberately no
-        reprojection: the overlay is stretched across the terrain footprint,
-        which is what the gallery examples do. (Reprojecting into a 0..N
-        destination grid put a georeferenced raster at coordinates far from its
-        own extent and produced a flat grey layer.)
+        land cover's own detail the moment the camera moves in. The decoded
+        RGBA is cached by file identity (a national 10 m raster costs ~9 s to
+        read), and only the layer — and its opacity — is rebuilt per request.
+        Deliberately no reprojection: the overlay is stretched across the
+        terrain footprint, which is what the gallery examples do.
+        (Reprojecting into a 0..N destination grid put a georeferenced raster at
+        coordinates far from its own extent and produced a flat grey layer.)
         """
+        key = self.overlay_key(overlay)
+        rgba = self._overlay_rgba_cache.get(key)
+        if rgba is None:
+            rgba = self.read_overlay_rgba(overlay)
+            self._overlay_rgba_cache[key] = rgba
+            while len(self._overlay_rgba_cache) > self._overlay_rgba_limit:
+                self._overlay_rgba_cache.pop(next(iter(self._overlay_rgba_cache)))
+        return self.f3d.OverlayLayer.from_raster_rgba(
+            np.ascontiguousarray(rgba),
+            strength=float(overlay.get("opacity", 0.82)),
+        )
+
+    def read_overlay_rgba(self, overlay: Dict[str, Any]) -> np.ndarray:
+        """Decode a raster into the RGBA the drape texture uploads."""
         import rasterio
         from rasterio.enums import Resampling as RasterioResampling
 
-        with rasterio.open(overlay["path"]) as src:
+        # A national 10 m raster is ~2.6 GB of float32 across its bands; GDAL
+        # reads the strips in parallel, which takes the three-band masked read
+        # from 17.2 s to 3.5 s (measured on the Swiss land cover, 10055x22069).
+        with rasterio.Env(GDAL_NUM_THREADS="ALL_CPUS"), rasterio.open(overlay["path"]) as src:
             bands = min(3, src.count)
             height, width = self.overlay_texture_size(src.height, src.width)
             planes = [
@@ -440,10 +476,7 @@ class StudioRenderer:
                         classes = despeckle_classes(classes)
                     rgba = apply_palette(classes, CLASSIFICATION_PALETTE)
                     rgba[~valid] = (0, 0, 0, 0)
-                    return self.f3d.OverlayLayer.from_raster_rgba(
-                        np.ascontiguousarray(rgba),
-                        strength=float(overlay.get("opacity", 0.82)),
-                    )
+                    return np.ascontiguousarray(rgba)
 
             rgb = np.zeros((height, width, 3), dtype=np.float32)
             for index, plane in enumerate(planes):
@@ -463,12 +496,9 @@ class StudioRenderer:
                 )
                 if peak > 255.0:
                     rgb *= 255.0 / 65535.0
-                rgba = np.concatenate(
+                return np.concatenate(
                     [np.clip(rgb, 0.0, 255.0).astype(np.uint8), np.where(valid, 255, 0).astype(np.uint8)[..., None]],
                     axis=2,
-                )
-                return self.f3d.OverlayLayer.from_raster_rgba(
-                    rgba, strength=float(overlay.get("opacity", 0.82))
                 )
 
         flat = rgb.reshape(-1, 3)
@@ -480,11 +510,8 @@ class StudioRenderer:
             low, high = 0.0, 255.0
         scaled = np.clip((rgb - low) / (high - low), 0.0, 1.0)
         alpha = np.where(valid, 255, 0).astype(np.uint8)
-        rgba = np.concatenate(
+        return np.concatenate(
             [(scaled * 255.0).astype(np.uint8), alpha[..., None]], axis=2
-        )
-        return self.f3d.OverlayLayer.from_raster_rgba(
-            rgba, strength=float(overlay.get("opacity", 0.82))
         )
 
     #: Model token -> the engine's `SkySettings.model` spelling.
@@ -576,7 +603,7 @@ class StudioRenderer:
         overlays = []
         if overlay:
             try:
-                overlays = [self.build_overlay(overlay, width, height)]
+                overlays = [self.build_overlay(overlay)]
             except Exception as exc:  # noqa: BLE001
                 print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
 

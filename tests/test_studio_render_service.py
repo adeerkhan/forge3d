@@ -13,6 +13,7 @@ maths — the parts a GPU golden cannot see:
 from __future__ import annotations
 
 import importlib.util
+import types
 from pathlib import Path
 
 import numpy as np
@@ -502,3 +503,34 @@ def test_the_overlay_texture_follows_the_source_not_the_frame():
     assert size(stub, 10055, 22069) == (1866, 4096)
     # A source smaller than the ceiling keeps its own pixels.
     assert size(stub, 900, 1200) == (900, 1200)
+
+
+def test_the_overlay_rgba_is_decoded_once_per_file(tmp_path):
+    """A national 10 m raster costs seconds to decode; opacity changes and the
+    next frames must reuse it, not read the file again."""
+    service = load_service()
+    source = tmp_path / "overlay.tif"
+    source.write_bytes(b"not really a tif")  # identity only: stat() is all we read
+    stub = object.__new__(service.StudioRenderer)
+    stub._overlay_rgba_cache = {}
+    stub._overlay_rgba_limit = 2
+    stub.f3d = types.SimpleNamespace(
+        OverlayLayer=types.SimpleNamespace(
+            from_raster_rgba=lambda rgba, strength: ("layer", strength, rgba.shape)
+        )
+    )
+    calls = []
+
+    def read(overlay):
+        calls.append(overlay["path"])
+        return np.zeros((4, 6, 4), dtype=np.uint8)
+
+    stub.read_overlay_rgba = read
+    overlay = {"path": str(source), "opacity": 0.82}
+    first = service.StudioRenderer.build_overlay(stub, overlay)
+    second = service.StudioRenderer.build_overlay(stub, {**overlay, "opacity": 0.4})
+    assert len(calls) == 1, "the second frame must not re-read the raster"
+    assert first[1] == 0.82 and second[1] == 0.4, "opacity is per request"
+    # A different despeckle is a different decode.
+    service.StudioRenderer.build_overlay(stub, {**overlay, "despeckle": True})
+    assert len(calls) == 2
