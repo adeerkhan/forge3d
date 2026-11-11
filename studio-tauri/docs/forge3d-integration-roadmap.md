@@ -64,6 +64,10 @@ be a payload field: vector layers and meshes.
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
 
+**The coverage review** — what Forge3D can do against what the Studio brings
+of it, with the gaps and their costs — is `docs/feature-coverage.md`. It also
+carries the stage and the phase plan (14–17).
+
 The earlier roadmap's Phases 8–18 were a capability catalogue. They are mapped
 to decisions in §7 and the appendix; most of them are now explicitly **not
 built** until a trigger fires.
