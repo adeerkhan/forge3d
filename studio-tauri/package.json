@@ -1,6 +1,7 @@
 {
   "name": "forge3d-studio",
   "private": true,
+  "license": "Apache-2.0 OR MIT",
   "version": "0.1.0",
   "type": "module",
   "description": "Forge3D Studio \u2014 Tauri desktop shell (Phase 1)",

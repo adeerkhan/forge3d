@@ -642,3 +642,18 @@ with a JSON sidecar.
 ```bash
 python3 scripts/make_icons.py   # writes src-tauri/icons/*
 ```
+
+## License and the Pro boundary
+
+Studio lives inside the forge3d repository and carries the same licence as the
+engine: **Apache-2.0 OR MIT** (`../LICENSE`, `../LICENSE-APACHE`; the Cargo
+workspace sets `license = "Apache-2.0 OR MIT"` and this package repeats it).
+Contributions to the shell land under that licence, like any other part of the
+repository.
+
+The engine's Pro-gated surface — `MapPlate` composition, SVG/PDF export, Mapbox
+style loading, the building import pipelines and scene bundles
+(`_check_pro_access`) — is **not used by Studio**: the shell renders through the
+open-source terrain path (`TerrainRenderParams`, `Legend`, `thematic`, the
+viewer IPC) and needs no licence key. That is also why the map plate is a
+blocked feature in the roadmap: shipping it would make the shell require a key.
