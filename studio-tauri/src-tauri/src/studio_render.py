@@ -870,7 +870,7 @@ class StudioRenderer:
             stroke_px = 1.0
             if metres_per_pixel > 0.0 and width_metres > 0.0:
                 stroke_px = max(1.0, width_metres / metres_per_pixel)
-            overlay = vector_overlay_rgba(
+            vector_overlay = vector_overlay_rgba(
                 params,
                 self.heights,
                 self.dem_bounds,
@@ -880,7 +880,7 @@ class StudioRenderer:
                 colour=tuple(float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))),
                 stroke_px=stroke_px,
             )
-            rgb = composite_overlay(rgb, overlay)
+            rgb = composite_overlay(rgb, vector_overlay)
 
         rgb = apply_post_effects(rgb, quality)
         legend_name = str(quality.get("colormap") or "").strip()
@@ -897,17 +897,26 @@ class StudioRenderer:
             title = str(quality.get("plateTitle") or "").strip()
             if not title:
                 title = Path(self.dem_path).stem.replace("_", " ").title()
-            legend = None
+            legends = []
             class_ids = self.overlay_classes(overlay) if overlay else []
             if class_ids:
                 # A class raster: the legend names the classes the palette
                 # already paints.
-                legend = plate_class_legend(class_ids)
+                legends.append(plate_class_legend(class_ids))
             elif legend_name:
                 try:
-                    legend = plate_legend(legend_name, self.range)
+                    legends.append(plate_legend(legend_name, self.range))
                 except Exception:  # noqa: BLE001 - the plate still has its title
-                    legend = None
+                    pass
+            if vector:
+                # The vector layer gets its own entry: its swatch and its file.
+                legends.append(
+                    plate_vector_legend(
+                        vector.get("colour", (0.9, 0.29, 0.1, 1.0)),
+                        Path(str(vector.get("path", "vector"))).name,
+                    )
+                )
+            legend = legends or None
             # The scale bar is only true for a near-vertical view (the ground
             # scale varies across an oblique frame), and the north arrow only
             # for a north-up one.
@@ -1118,12 +1127,27 @@ def plate_class_legend(class_ids) -> np.ndarray:
     return np.asarray(canvas)
 
 
+def plate_vector_legend(colour, label: str) -> np.ndarray:
+    """A legend entry for the vector layer: its swatch and its file name."""
+    from PIL import Image, ImageDraw
+
+    font = plate_font(13)
+    title_font = plate_font(15)
+    canvas = Image.new("RGBA", (190, 52), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.text((2, 2), "Vector layer", fill=(54, 54, 60), font=title_font)
+    rgba = [max(0, min(255, int(round(float(value) * 255.0)))) for value in colour[:4]]
+    draw.rectangle([2, 26, 18, 42], fill=(rgba[0], rgba[1], rgba[2], 255), outline=(150, 150, 150))
+    draw.text((26, 27), label[:24], fill=(72, 72, 78), font=font)
+    return np.asarray(canvas)
+
+
 def compose_plate(
     rgb: np.ndarray,
     mask: np.ndarray,
     *,
     title: str,
-    legend: "np.ndarray | None" = None,
+    legend: "np.ndarray | list | None" = None,
     caption: str = "",
     metres_per_pixel: "float | None" = None,
     north_up: bool = False,
@@ -1160,11 +1184,16 @@ def compose_plate(
     font_title = plate_font(title_size)
     font_caption = plate_font(caption_size)
 
-    page_w = width + margin * 2
-    header = int(title_size * 2.1) + margin
-    legend_w = legend.shape[1] if legend is not None else 0
-    legend_h = legend.shape[0] if legend is not None else 0
+    # One or more legends, stacked in the page's top-left corner.
+    legends = []
     if legend is not None:
+        legends = list(legend) if isinstance(legend, (list, tuple)) else [legend]
+        legends = [item for item in legends if getattr(item, "size", 0) > 4]
+    legend_w = max((item.shape[1] for item in legends), default=0)
+    legend_h = sum(item.shape[0] for item in legends) + 8 * max(0, len(legends) - 1)
+    page_w = width + margin * 2 + legend_w
+    header = int(title_size * 2.1) + margin
+    if legends:
         header = max(header, legend_h + int(title_size * 1.6) + margin)
     footer = int(caption_size * 2.4) + margin // 2
     page_h = header + height + footer
@@ -1172,9 +1201,11 @@ def compose_plate(
     page = Image.new("RGBA", (page_w, page_h), (255, 255, 255, 255))
     draw = ImageDraw.Draw(page)
     draw.text((page_w // 2, margin // 2), title, fill=(38, 38, 42), font=font_title, anchor="ma")
-    if legend is not None:
-        legend_img = Image.fromarray(np.ascontiguousarray(legend), "RGBA")
-        page.alpha_composite(legend_img, dest=(margin, int(title_size * 1.5) + margin // 2))
+    legend_y = int(title_size * 1.5) + margin // 2
+    for item in legends:
+        legend_img = Image.fromarray(np.ascontiguousarray(item), "RGBA")
+        page.alpha_composite(legend_img, dest=(margin, legend_y))
+        legend_y += item.shape[0] + 8
     if north_up:
         # A north arrow only where it is true: the arrow is drawn for a
         # north-up view, not rotated by a guess.

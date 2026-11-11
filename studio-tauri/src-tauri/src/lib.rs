@@ -84,6 +84,7 @@ pub fn run() {
             commands::read_hdr,
             commands::raster_preview,
             commands::set_terrain_overlay,
+            commands::set_terrain_vector,
             commands::forge3d_probe,
             commands::render_frame,
             commands::render_still,

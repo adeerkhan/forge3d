@@ -59,6 +59,7 @@ be a payload field: vector layers and meshes.
 | 5.19 plate furniture: scale bar and north arrow | done |
 | 5.20 the categorical legend (class maps snap back to the palette) | done |
 | 5.21 the interactive path's stale shader contract | repaired (measured; not a swap) |
+| 5.22 vector layers — the rail network on the terrain | done (lines; labels/furniture next) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -610,6 +611,41 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - So the contract fix unblocks a *capability*, not a swap: the interactive path
   is now available for measurement (and for MapScene, which already calls it),
   but Studio's stills stay on the mesh path until the difference is understood.
+
+### 5.22 Vector layers — the rail network draws (1 day) — **done**
+- The engine already had every piece, scattered: `TerrainRenderParams.
+  project_terrain_points` projects terrain UV + height through the exact mesh
+  camera, `forge3d.vector_render_oit_py` rasterizes anti-aliased lines, and
+  MapScene composites the result. The tier is those three composed, not a new
+  renderer: the service reads the file, maps the lines to the terrain's UV,
+  samples the height along them, projects, rasterizes and composites.
+- **The data is read without a third-party package**: a GeoPackage is a SQLite
+  database with GeoPackage binary geometry, so `sqlite3` plus a WKB parser is
+  enough (the studio's environment has no geopandas, fiona or pyproj —
+  verified). GeoJSON is plain JSON. The CRSs must agree; a mismatch fails
+  loudly instead of landing in the wrong place. The Luxembourg rail file
+  (2,035 features, 780 km of track, EPSG:4326) matches its DEM, so nothing is
+  reprojected.
+- **The lines land on the ground** and the width is the feature's real width in
+  metres, converted to pixels with the frame's ground scale (never below one
+  pixel). Measured on the Luxembourg DEM (900×700, 40 m rails): radius
+  97,500 m → 15,496 changed samples; 60,000 m → 24,397; 40,000 m → 30,448. The
+  plate shows the network with the "Vector layer" legend entry, the north arrow
+  and the scale bar.
+- **An engine bug fell out of the measurement**: the OIT bridge packed one
+  instance per *segment* but drew one per *polyline*, so a densified path lost
+  all but its first few segments (1,610 samples instead of 24,397). Fixed in
+  `src/py_functions/vector/render.rs`; the shell also hands over one polyline
+  per segment, which is MapScene's own payload convention.
+- The layer is a terrain field (`TerrainVectorLayer`: asset, RGBA colour, width
+  in metres), one undoable command (`SetTerrainVector`), a payload key
+  (`vector`) and a Map-tab section.
+- **Still lacking** (14.5): labels, furniture, polygons and a legend for the
+  *vector* attributes; the layer is lines only, one layer, drawn over the
+  terrain rather than occluded by its ridges.
+- Check: the reader (a real GeoPackage), the ground scale, the vector legend,
+  the stacked plate legends, the command's undo and its range rejections, the
+  payload and wire shape.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

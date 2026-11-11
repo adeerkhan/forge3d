@@ -1174,6 +1174,9 @@ export function MapSection() {
   const overlayAsset = terrain.overlay
     ? state?.project.assets.find((entry) => entry.id === terrain.overlay?.asset)
     : undefined;
+  const vectorAsset = terrain.vector
+    ? state?.project.assets.find((entry) => entry.id === terrain.vector?.asset)
+    : undefined;
   // One colormap LUT per frame: a raster overlay and a colormap cannot both
   // apply, so the ramp is disabled while an overlay is draped.
   const overlayOwnsTheColormap = Boolean(terrain.overlay);
@@ -1335,6 +1338,80 @@ export function MapSection() {
             </p>
           </>
         )}
+      </Section>
+
+      <Section title="Vector layer" id="map-vector">
+        <div className="readout readout--compact">
+          <dt>Layer</dt>
+          <dd>{vectorAsset?.name ?? "none"}</dd>
+        </div>
+        {terrain.vector && (
+          <>
+            <NumberField
+              label="Width (m)"
+              value={terrain.vector.widthMetres}
+              step={5}
+              min={0.1}
+              max={1000}
+              onCommit={(widthMetres) =>
+                void actions.setTerrainVectorStyle(
+                  terrain.vector!.colour,
+                  widthMetres,
+                )
+              }
+            />
+            <div className="pair">
+              {(["R", "G", "B"] as const).map((channel, index) => (
+                <NumberField
+                  key={channel}
+                  label={channel}
+                  value={terrain.vector!.colour[index]}
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  onCommit={(value) => {
+                    const colour = [...terrain.vector!.colour] as [
+                      number,
+                      number,
+                      number,
+                      number,
+                    ];
+                    colour[index] = value;
+                    void actions.setTerrainVectorStyle(
+                      colour,
+                      terrain.vector!.widthMetres,
+                    );
+                  }}
+                />
+              ))}
+            </div>
+          </>
+        )}
+        <div className="inline-actions">
+          <button
+            type="button"
+            className="button button--small"
+            onClick={() => void actions.importTerrainVector()}
+          >
+            {terrain.vector ? "Replace vector layer…" : "Add vector layer…"}
+          </button>
+          {terrain.vector && (
+            <button
+              type="button"
+              className="button button--small"
+              onClick={() => void actions.clearTerrainVector()}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <p className="hint">
+          Lines from a GeoPackage or GeoJSON (rail, rivers, boundaries), draped
+          on the terrain by the engine's own camera projection and drawn with
+          the engine's anti-aliased vector rasterizer. The width is the
+          feature's real width in metres, so the network reads the same at a
+          country scale and up close.
+        </p>
       </Section>
 
       <Section title="Plate" id="map-plate">

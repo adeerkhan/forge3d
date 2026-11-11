@@ -731,6 +731,83 @@ pub fn set_terrain_overlay(
         .ok_or_else(|| "no project is open".to_owned())
 }
 
+/// Attach (or clear) a vector layer on the scene terrain.
+///
+/// The file is a GeoPackage or GeoJSON of lines; the layer keeps its colour and
+/// the line's real width in the DEM's metres. The service reads the file and
+/// projects the lines through the engine's own camera, so nothing here parses
+/// geometry.
+#[tauri::command]
+pub fn set_terrain_vector(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    colour: Option<Vec<f32>>,
+    width_metres: Option<f32>,
+) -> Result<SessionState, String> {
+    let mut session = lock(&state)?;
+    let snapshot = session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())?;
+    let terrain = snapshot
+        .project
+        .terrain_object()
+        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
+
+    let mut commands = Vec::new();
+    let layer = match path {
+        None => None,
+        Some(path) => {
+            let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+            let existing = snapshot
+                .project
+                .assets
+                .iter()
+                .find(|asset| asset.path == path)
+                .cloned();
+            let asset = existing.unwrap_or_else(|| studio_core::Asset {
+                id: studio_core::ids::new_id(),
+                name: std::path::Path::new(&path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "vector.gpkg".to_owned()),
+                path: path.clone(),
+                kind: studio_core::AssetKind::Vector,
+                byte_size: metadata.len(),
+            });
+            if !snapshot
+                .project
+                .assets
+                .iter()
+                .any(|entry| entry.id == asset.id)
+            {
+                commands.push(Command::AddAsset {
+                    asset: asset.clone(),
+                });
+            }
+            let colour = colour
+                .filter(|channels| channels.len() == 4)
+                .map(|channels| [channels[0], channels[1], channels[2], channels[3]])
+                .unwrap_or([0.9, 0.29, 0.1, 1.0]);
+            Some(studio_core::scene::TerrainVectorLayer {
+                asset: asset.id,
+                colour,
+                width_metres: width_metres.unwrap_or(40.0).clamp(0.1, 1_000.0),
+            })
+        }
+    };
+    commands.push(Command::SetTerrainVector {
+        id: terrain.id,
+        layer,
+    });
+
+    session
+        .apply(Command::Batch { commands })
+        .map_err(|error| error.to_string())?;
+    session
+        .state()
+        .ok_or_else(|| "no project is open".to_owned())
+}
+
 /// Read an image asset (PNG/JPEG) for the Solid viewport's textures.
 #[tauri::command(async)]
 pub fn read_image_asset(path: String) -> Result<MeshFilePayload, String> {

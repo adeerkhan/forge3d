@@ -1068,6 +1068,8 @@ pub enum AssetKind {
     Orthophoto,
     /// A Radiance `.hdr` environment map for image-based lighting.
     Hdr,
+    /// A vector layer: a GeoPackage or GeoJSON of lines (rail, river, boundary).
+    Vector,
 }
 
 impl AssetKind {
@@ -1082,6 +1084,7 @@ impl AssetKind {
             Some("glb") => Some(AssetKind::Glb),
             Some("tif" | "tiff") => Some(AssetKind::Dem),
             Some("hdr") => Some(AssetKind::Hdr),
+            Some("gpkg" | "geojson" | "json") => Some(AssetKind::Vector),
             _ => None,
         }
     }
@@ -1093,6 +1096,7 @@ impl AssetKind {
             AssetKind::Dem => "tif",
             AssetKind::Orthophoto => "tif",
             AssetKind::Hdr => "hdr",
+            AssetKind::Vector => "gpkg",
         }
     }
 

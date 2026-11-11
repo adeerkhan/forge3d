@@ -440,6 +440,8 @@ pub struct RenderRequest {
     pub sun_color: [f64; 3],
     pub z_scale: f64,
     pub overlay: Option<OverlayRequest>,
+    /// The vector layer drawn on the terrain (rail, river, boundary).
+    pub vector: Option<VectorRequest>,
     pub exposure: f64,
     pub shadows: bool,
     /// Render the sky background; the project can turn it off for Rendered.
@@ -498,6 +500,16 @@ pub struct RenderRequest {
     pub bloom_softness: f32,
     pub bloom_intensity: f32,
     pub vignette: f32,
+}
+
+/// A vector layer for the renderer: the file, the line colour and the line's
+/// real width in the DEM's metres.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorRequest {
+    pub path: String,
+    pub colour: [f32; 4],
+    pub width_metres: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -667,6 +679,7 @@ impl RenderRequest {
                 "vignette": self.vignette,
             },
             "overlay": self.overlay,
+            "vector": self.vector,
             "exposure": self.exposure,
             "shadows": self.shadows,
             "iblIntensity": self.ibl_intensity,
@@ -740,6 +753,11 @@ impl RenderRequest {
                 preserve_colors: overlay.preserve_colors,
                 despeckle: overlay.despeckle,
             }),
+            vector: terrain.vector.as_ref().map(|vector| VectorRequest {
+                path: vector.path.clone(),
+                colour: vector.colour,
+                width_metres: vector.width_metres,
+            }),
             exposure: 1.35,
             shadows: true,
             sky: true,
@@ -805,6 +823,7 @@ mod tests {
             sun_color: [1.0, 0.97, 0.92],
             z_scale: 1.0,
             overlay: None,
+            vector: None,
             exposure: 1.35,
             shadows: true,
             sky: true,
@@ -958,6 +977,22 @@ mod tests {
             large.to_payload("final", None)["quality"]["renderScale"],
             1.0
         );
+    }
+
+    #[test]
+    fn payload_carries_the_vector_layer() {
+        let mut payload = request();
+        payload.vector = Some(VectorRequest {
+            path: "/data/luxembourg_rail.gpkg".to_owned(),
+            colour: [0.9, 0.29, 0.1, 1.0],
+            width_metres: 40.0,
+        });
+        let value = payload.to_payload("preview", None);
+        assert_eq!(value["vector"]["path"], "/data/luxembourg_rail.gpkg");
+        assert_eq!(value["vector"]["widthMetres"], 40.0);
+        assert!((value["vector"]["colour"][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        // No layer, no key content: the service must see an explicit null.
+        assert!(request().to_payload("preview", None)["vector"].is_null());
     }
 
     #[test]
@@ -1188,6 +1223,57 @@ mod tests {
             "sunVisibility": {"enabled": true, "distance": 4000.0, "steps": 32}
         }));
         assert_ne!(plain.png, sun.png, "sun visibility must reach the pixels");
+
+        state.stop();
+    }
+
+    /// End-to-end proof that a vector layer reaches pixels through the real
+    /// payload: the same Luxembourg frame, with and without the rail file.
+    #[test]
+    #[ignore = "spawns the engine Python session and the GPU"]
+    fn the_vector_layer_reaches_the_pixels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = root.join(".venv/bin/python");
+        let dem = root.join("assets/tif/luxembourg_dem.tif");
+        let rail = root.join("assets/gpkg/luxembourg_rail.gpkg");
+        if !python.exists() || !dem.exists() || !rail.exists() {
+            eprintln!("skipping: this checkout has no .venv/engine DEM/rail trio");
+            return;
+        }
+
+        let state = RenderState::new();
+        let frame = |vector: serde_json::Value| {
+            let payload = json!({
+                "width": 320,
+                "height": 240,
+                "camera": {"phiDeg": 90.0, "thetaDeg": 45.0, "radius": 60000.0, "target": [0, 0, 0], "fovDeg": 40.0},
+                "sun": {"azimuthDeg": 315.0, "elevationDeg": 25.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
+                "quality": {"sky": false},
+                "exposure": 1.35,
+                "iblIntensity": 1.0,
+                "environmentBackgroundIntensity": 1.0,
+                "vector": vector
+            });
+            state
+                .render(
+                    python.to_str().expect("utf-8 python path"),
+                    dem.to_str().expect("utf-8 dem path"),
+                    payload,
+                    FRAME_TIMEOUT,
+                )
+                .expect("one frame from the service")
+        };
+
+        let plain = frame(serde_json::Value::Null);
+        let with_rails = frame(json!({
+            "path": rail.to_str().expect("utf-8 rail path"),
+            "colour": [0.9, 0.29, 0.1, 1.0],
+            "widthMetres": 40.0
+        }));
+        assert_ne!(
+            plain.png, with_rails.png,
+            "the vector layer must reach the pixels"
+        );
 
         state.stop();
     }

@@ -36,6 +36,12 @@ fn ts_camel_case_shapes_deserialize() {
                 .to_string(),
         ),
         (
+            "setTerrainVector",
+            format!(
+                r#"{{"type":"setTerrainVector","id":"{id}","layer":{{"asset":"{id}","colour":[0.9,0.29,0.1,1.0],"widthMetres":40.0}}}}"#
+            ),
+        ),
+        (
             "applyMapLook",
             format!(r#"{{"type":"applyMapLook","id":"{id}"}}"#),
         ),

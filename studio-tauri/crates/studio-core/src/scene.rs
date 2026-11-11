@@ -382,6 +382,34 @@ pub struct TerrainObject {
     /// Draped raster overlay (land cover, orthophoto) — the cartographic layer.
     #[serde(default)]
     pub overlay: Option<TerrainOverlay>,
+    /// A vector layer drawn on the terrain (a rail network, rivers, boundaries).
+    #[serde(default)]
+    pub vector: Option<TerrainVectorLayer>,
+}
+
+/// A vector layer drawn on the terrain.
+///
+/// The lines come from the asset (a GeoPackage or GeoJSON); the colour and the
+/// width are the studio's: the width is the feature's real width in the DEM's
+/// metres, converted to pixels with the frame's ground scale at render time.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainVectorLayer {
+    pub asset: AssetId,
+    /// The line colour, RGBA in 0..=1.
+    #[serde(default = "default_vector_colour")]
+    pub colour: [f32; 4],
+    /// The line's width in the DEM's metres.
+    #[serde(default = "default_vector_width")]
+    pub width_metres: f32,
+}
+
+fn default_vector_colour() -> [f32; 4] {
+    [0.9, 0.29, 0.1, 1.0]
+}
+
+fn default_vector_width() -> f32 {
+    40.0
 }
 
 /// A raster draped over the terrain, e.g. land cover or an orthophoto.
@@ -406,6 +434,25 @@ pub struct TerrainOverlay {
 
 fn default_opacity() -> f32 {
     0.82
+}
+
+impl TerrainVectorLayer {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.asset.is_nil() {
+            return Err("vector layer has no asset".to_owned());
+        }
+        if !self
+            .colour
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err("vector colour channels must be between 0 and 1".to_owned());
+        }
+        if !self.width_metres.is_finite() || !(0.1..=1_000.0).contains(&self.width_metres) {
+            return Err("vector width must be between 0.1 and 1000 m".to_owned());
+        }
+        Ok(())
+    }
 }
 
 impl TerrainOverlay {
@@ -459,6 +506,7 @@ impl TerrainObject {
             z_scale: 1.0,
             albedo: None,
             overlay: None,
+            vector: None,
             dimensions: None,
             world_origin_xz: None,
             world_span_xz: None,
@@ -523,6 +571,9 @@ impl TerrainObject {
         // The engine refuses anything outside its range (it raises instead of
         // clamping), so a value in here must be one `TerrainRenderParams`
         // accepts.
+        if let Some(vector) = &self.vector {
+            vector.validate()?;
+        }
         if !self.z_scale.is_finite() || !(MIN_Z_SCALE..=MAX_Z_SCALE).contains(&self.z_scale) {
             return Err(format!(
                 "terrain vertical scale must be between {MIN_Z_SCALE} and {MAX_Z_SCALE}"

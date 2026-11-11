@@ -86,6 +86,13 @@ export interface StudioBridge {
   importTerrainDem(path: string): Promise<SessionState>;
   /** Attach (`path`) or clear (`null`) a raster overlay on the terrain. */
   setTerrainOverlay(path: string | null, opacity?: number): Promise<SessionState>;
+  /** Attach (`path`) or clear (`null`) a vector layer on the terrain. The
+   *  colour is RGBA 0..=1 and the width is in the DEM's metres. */
+  setTerrainVector(
+    path: string | null,
+    colour?: [number, number, number, number],
+    widthMetres?: number,
+  ): Promise<SessionState>;
 
   // Forge3D workspace adapter
   forge3dProbe(force?: boolean): Promise<EngineStatus>;

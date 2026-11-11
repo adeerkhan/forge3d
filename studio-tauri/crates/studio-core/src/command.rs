@@ -230,6 +230,12 @@ pub enum Command {
         id: ObjectId,
     },
 
+    /// Attach, change, or remove a terrain's vector layer.
+    SetTerrainVector {
+        id: ObjectId,
+        layer: Option<crate::scene::TerrainVectorLayer>,
+    },
+
     /// Attach, change, or remove a terrain's draped overlay.
     SetTerrainOverlay {
         id: ObjectId,
@@ -1007,6 +1013,40 @@ impl Command {
                 })
             }
 
+            Command::SetTerrainVector { id, layer } => {
+                let layer = *layer;
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let previous = match &object.kind {
+                    crate::scene::ObjectKind::Terrain(terrain) => terrain.vector,
+                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
+                };
+                if let Some(layer) = layer {
+                    if project.asset(layer.asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: layer.asset });
+                    }
+                    // The colour and the width are the shell's units; reject a
+                    // value the renderer's rasterizer cannot take.
+                    layer
+                        .validate()
+                        .map_err(|reason| CommandError::invalid("vector layer", reason))?;
+                }
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.vector = layer;
+                    }
+                }
+                Ok(Outcome {
+                    inverse: Command::SetTerrainVector {
+                        id: *id,
+                        layer: previous,
+                    },
+                    affected: vec![*id],
+                })
+            }
+
             Command::SetTerrainOverlay { id, overlay } => {
                 let object = project
                     .scene
@@ -1233,6 +1273,7 @@ impl Command {
             | Command::FitTerrainRelief { id }
             | Command::ApplyMapLook { id }
             | Command::SetTerrainOverlay { id, .. }
+            | Command::SetTerrainVector { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. }
             | Command::SetGltfNode { id, .. }
@@ -1307,6 +1348,13 @@ impl Command {
             Command::SetTimelineConfig { .. } => "Timeline settings".to_owned(),
             Command::SetAssetPath { id, .. } => {
                 format!("Relink asset {}", crate::ids::short_id(id))
+            }
+            Command::SetTerrainVector { id, layer } => {
+                if layer.is_some() {
+                    format!("Vector layer on {}", name_of(id))
+                } else {
+                    format!("Remove vector layer from {}", name_of(id))
+                }
             }
             Command::SetTerrainOverlay { id, overlay } => {
                 if overlay.is_some() {

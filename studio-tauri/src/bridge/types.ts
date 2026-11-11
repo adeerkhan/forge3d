@@ -40,7 +40,7 @@ export interface LightObject {
   intensity: number;
 }
 
-export type AssetKind = "gltf" | "glb" | "dem" | "orthophoto" | "hdr";
+export type AssetKind = "gltf" | "glb" | "dem" | "orthophoto" | "hdr" | "vector";
 
 /** An imported source file. Stored relative to the project where possible. */
 export interface Asset {
@@ -81,6 +81,18 @@ export interface TerrainObject {
   worldSpanXz: [number, number] | null;
   elevationRange: [number, number] | null;
   overlay: TerrainOverlay | null;
+  /** A vector layer drawn on the terrain (rail, river, boundary). */
+  vector: TerrainVectorLayer | null;
+}
+
+/** A vector layer drawn on the terrain: the file, the line colour and the
+ *  line's real width in the DEM's metres. */
+export interface TerrainVectorLayer {
+  asset: string;
+  /** RGBA in 0..=1. */
+  colour: [number, number, number, number];
+  /** The line's width in the DEM's metres. */
+  widthMetres: number;
 }
 
 export interface TerrainOverlay {
@@ -528,6 +540,11 @@ export type Command =
       zScale?: number | null;
     }
   | { type: "setTerrainOverlay"; id: string; overlay: TerrainOverlay | null }
+  | {
+      type: "setTerrainVector";
+      id: string;
+      layer: TerrainVectorLayer | null;
+    }
   | { type: "setActiveCamera"; id: string | null }
   | { type: "setViewport"; viewport: ViewportState }
   | { type: "setWorkspace"; workspace: Workspace }

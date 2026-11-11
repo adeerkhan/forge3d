@@ -96,6 +96,12 @@ export interface SessionApi {
     clearRenderFrame(): void;
     /** Pick and import a DEM, replacing the terrain's source. */
     importTerrainDem(): Promise<void>;
+    /** Pick a GeoPackage/GeoJSON of lines and attach it as the terrain's
+     *  vector layer. */
+    importTerrainVector(): Promise<void>;
+    clearTerrainVector(): Promise<void>;
+    /** Recolour or rewidth the terrain's vector layer (one command). */
+    setTerrainVectorStyle(colour: [number, number, number, number], widthMetres: number): Promise<void>;
     /** The map look in one undoable step: relief, map camera, north-west sun,
      *  ray-marched hillshade — and the viewport switches to the camera. */
     applyMapLook(): Promise<void>;

@@ -300,6 +300,20 @@ pub struct TerrainHandoff {
     pub elevation_range: Option<[f32; 2]>,
     /// Draped raster overlay, if any.
     pub overlay: Option<TerrainOverlayHandoff>,
+    /// Vector layer, if any.
+    pub vector: Option<TerrainVectorHandoff>,
+}
+
+/// A vector layer on its way to the renderer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerrainVectorHandoff {
+    pub path: String,
+    pub name: String,
+    /// The line colour, RGBA in 0..=1.
+    pub colour: [f32; 4],
+    /// The line's width in the DEM's metres.
+    pub width_metres: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -584,6 +598,16 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
                     opacity: overlay.opacity,
                     preserve_colors: overlay.preserve_colors,
                     despeckle: overlay.despeckle,
+                })
+        }),
+        vector: terrain.vector.and_then(|vector| {
+            project
+                .asset(vector.asset)
+                .map(|asset| TerrainVectorHandoff {
+                    path: asset.path.clone(),
+                    name: asset.name.clone(),
+                    colour: vector.colour,
+                    width_metres: vector.width_metres,
                 })
         }),
     })

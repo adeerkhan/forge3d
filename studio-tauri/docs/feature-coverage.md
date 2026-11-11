@@ -44,7 +44,7 @@ breakdown of what a *terrain and cartography studio* needs from those.
 | Terrain inputs (`mini_dem`, `fetch_dem`, datasets, COG) | partial | local GeoTIFF only; no dataset fetching, no COG streaming |
 | Raster overlays (`ViewerHandle.load_overlay`) | **full** | the drape, in the Material preview and in Rendered, at the source's resolution |
 | Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
-| Vector overlays and labels | **none** | the offscreen path has no vector geometry (0 changed samples, measured) |
+| Vector overlays and labels | **lines only** | the engine's projection + OIT rasterizer, composed in the service; labels and furniture are the rest of the tier |
 | Picking and selection | partial | the Solid view picks objects; the engine's terrain picking is not used |
 | Point clouds | none | a different product tier |
 | Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |
@@ -114,16 +114,11 @@ Still open, in order of value:
 
 ## 5. The phases
 
-**Phase 14 — the engine's cartographic tier** (the goal prompt, with the
-increment-by-increment recipe and the measured facts:
-`docs/goal-phase-14-cartographic-tier.md`). The rails are the user's own
-example and the largest remaining gap: the viewer draws vector overlays
-(`src/viewer/terrain/vector_overlay.rs`), the offscreen path cannot. The work
-is one overlay pass in the offscreen renderer (geometry buffers, drape from the
-height texture, depth test, halo), measured the way everything else here is
-measured. *Trigger:* the rail example, which is already in the assets
-(`assets/gpkg/luxembourg_rail.gpkg`, 2,031 features, EPSG:4326, the same CRS
-as the DEM — readable with the standard library's `sqlite3`).
+**Phase 14 — the engine's cartographic tier** — **shipped, lines only**
+(`docs/goal-phase-14-cartographic-tier.md`): the rail network draws on the
+Luxembourg DEM and on the plate, through the engine's own projection and OIT
+rasterizer. Still open in the tier: labels, furniture, polygons, and a legend
+for the vector attributes.
 
 **Phase 15 — converge on `MapScene`.** The engine's typed map scene carries
 labels, buildings, 3D Tiles, furniture, graticules and bundles; Studio has its

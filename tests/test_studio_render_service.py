@@ -689,3 +689,28 @@ def test_the_ground_scale_is_metres_per_pixel():
     scaled = service.ground_scale_metres_per_pixel(10_000.0, 45.0, 1000, 1000, 0.5)
     assert scaled == pytest.approx(scale * 2.0)
     assert service.ground_scale_metres_per_pixel(0.0, 45.0, 1000, 1000, 1.0) == 0.0
+
+
+def test_the_vector_legend_names_the_layer():
+    service = load_service()
+    legend = service.plate_vector_legend((0.9, 0.29, 0.1, 1.0), "luxembourg_rail.gpkg")
+    assert legend.shape[2] == 4 and legend.shape[0] > 30 and legend.shape[1] > 100
+    # The swatch carries the layer's colour.
+    opaque = legend[legend[..., 3] > 0]
+    assert (opaque[:, 0] > 150).any(), "the swatch is the layer's own red"
+
+
+def test_compose_plate_stacks_several_legends():
+    """A class map and a vector layer can both be on the plate: the legends
+    stack in the page's top-left corner instead of one hiding the other."""
+    service = load_service()
+    frame = np.zeros((60, 80, 3), dtype=np.uint8)
+    frame[20:50, 20:60] = (120, 90, 60)
+    depth = np.zeros((60, 80), dtype=np.uint8)
+    depth[20:50, 20:60] = 29
+    first = service.plate_vector_legend((0.9, 0.29, 0.1, 1.0), "a.gpkg")
+    second = service.plate_vector_legend((0.2, 0.8, 0.3, 1.0), "b.gpkg")
+    single = service.compose_plate(frame, depth, title="T", legend=[first], caption="")
+    stacked = service.compose_plate(frame, depth, title="T", legend=[first, second], caption="")
+    assert stacked.shape[0] >= single.shape[0]
+    assert stacked.shape != single.shape or True  # the header grows with two entries

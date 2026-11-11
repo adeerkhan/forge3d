@@ -555,6 +555,54 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
+  const importTerrainVector = useCallback(async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [
+          { name: "Vector layer", extensions: ["gpkg", "geojson", "json"] },
+        ],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
+      setBusy(true);
+      setState(await bridge.setTerrainVector(path, [0.9, 0.29, 0.1, 1.0], 40));
+      flash("Vector layer attached");
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail, flash]);
+
+  const clearTerrainVector = useCallback(async () => {
+    try {
+      setBusy(true);
+      setState(await bridge.setTerrainVector(null));
+      flash("Vector layer removed");
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [fail, flash]);
+
+  const setTerrainVectorStyle = useCallback(
+    async (colour: [number, number, number, number], widthMetres: number) => {
+      const project = state?.project;
+      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
+      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.vector) {
+        return;
+      }
+      await applyCommand({
+        type: "setTerrainVector",
+        id: terrain.id,
+        layer: { ...terrain.kind.vector, colour, widthMetres },
+      });
+    },
+    [applyCommand, state],
+  );
+
   const applyMapLook = useCallback(async () => {
     const project = state?.project;
     const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
@@ -1012,6 +1060,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       relinkAsset,
       refreshAssetIntegrity,
       importTerrainDem,
+      importTerrainVector,
+      clearTerrainVector,
+      setTerrainVectorStyle,
       applyMapLook,
       importTerrainOverlay,
       setTerrainOverlayOpacity,
@@ -1068,6 +1119,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       relinkAsset,
       refreshAssetIntegrity,
       importTerrainDem,
+      importTerrainVector,
+      clearTerrainVector,
+      setTerrainVectorStyle,
       importTerrainOverlay,
       clearTerrainOverlay,
       refreshEngine,
