@@ -213,3 +213,78 @@ fn fit_relief_adopts_the_dems_default_and_undo_restores_true_scale() {
         .z_scale;
     assert!((restored - 1.0).abs() < f32::EPSILON, "got {restored}");
 }
+
+#[test]
+fn the_map_look_sets_relief_camera_sun_and_hillshade_and_undo_restores_them() {
+    // One command, one undo: the whole cartography setup.
+    let asset = dem_asset("switzerland_dem.tif");
+    let project = Project::starter("Alps", Some(seed(&asset, SWISS_RANGE, SWISS_SPAN)));
+    let terrain_id = project.terrain_object().expect("terrain").id;
+    let camera_id = project
+        .scene
+        .objects
+        .iter()
+        .find(|object| matches!(object.kind, studio_core::ObjectKind::Camera(_)))
+        .expect("a camera")
+        .id;
+    let sun_id = project
+        .scene
+        .objects
+        .iter()
+        .find(|object| matches!(object.kind, studio_core::ObjectKind::Light(_)))
+        .expect("a sun")
+        .id;
+    let camera_before = project.scene.object(camera_id).expect("camera").transform;
+    let sun_before = project.scene.object(sun_id).expect("sun").transform;
+    let mut editor = Editor::new(project);
+
+    editor
+        .apply(Command::ApplyMapLook { id: terrain_id })
+        .expect("the map look applies");
+
+    let terrain = editor
+        .project()
+        .scene
+        .object(terrain_id)
+        .and_then(|object| object.terrain())
+        .expect("terrain")
+        .z_scale;
+    assert!((terrain - 5.246).abs() < 0.001, "relief: {terrain}");
+    assert!(
+        editor.project().render.sun_visibility,
+        "the hillshade is on"
+    );
+    assert_eq!(editor.project().render.sun_visibility_steps, 48);
+
+    // The camera moved and widened: the still's fixed orbit radius has to see
+    // the whole country, so the field of view grows.
+    let camera = editor
+        .project()
+        .scene
+        .object(camera_id)
+        .expect("camera")
+        .clone();
+    assert_ne!(camera.transform, camera_before, "the camera moved");
+    let fov = match &camera.kind {
+        studio_core::ObjectKind::Camera(kind) => kind.fov_deg,
+        _ => panic!("a camera"),
+    };
+    assert!(fov > 45.0, "the still's field of view widens, got {fov}");
+
+    // The sun points north-west now: the rotation is not the starter's.
+    let sun = editor.project().scene.object(sun_id).expect("sun").clone();
+    assert_ne!(sun.transform, sun_before, "the sun moved");
+
+    editor.undo().expect("undo is available");
+    let restored = editor.project().scene.object(camera_id).expect("camera");
+    assert_eq!(
+        restored.transform, camera_before,
+        "undo restores the camera"
+    );
+    let restored_sun = editor.project().scene.object(sun_id).expect("sun");
+    assert_eq!(restored_sun.transform, sun_before, "undo restores the sun");
+    assert!(
+        !editor.project().render.sun_visibility,
+        "undo restores the hillshade"
+    );
+}

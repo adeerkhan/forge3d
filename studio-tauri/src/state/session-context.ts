@@ -96,6 +96,9 @@ export interface SessionApi {
     clearRenderFrame(): void;
     /** Pick and import a DEM, replacing the terrain's source. */
     importTerrainDem(): Promise<void>;
+    /** The map look in one undoable step: relief, map camera, north-west sun,
+     *  ray-marched hillshade — and the viewport switches to the camera. */
+    applyMapLook(): Promise<void>;
     /** Pick an albedo texture (PNG/JPEG) for the selected mesh. */
     importMaterialTexture(): Promise<void>;
     /** Remove the selected mesh's texture. */

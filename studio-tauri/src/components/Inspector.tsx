@@ -1249,7 +1249,20 @@ export function MapSection() {
           >
             Fit the DEM's relief
           </button>
+          <button
+            type="button"
+            className="button button--small button--primary"
+            onClick={() => void actions.applyMapLook()}
+          >
+            Map look
+          </button>
         </div>
+        <p className="hint">
+          Map look does the whole cartography setup in one undoable step: the
+          DEM's own relief, the map camera (from the north, 31° off vertical,
+          framed on the whole footprint), the gallery's north-west sun and the
+          ray-marched hillshade that makes the relief read.
+        </p>
         <p className="hint">
           1 is true scale. The rule targets 6% relief over the footprint, so a
           country-size DEM comes up exaggerated and a steep one keeps its true

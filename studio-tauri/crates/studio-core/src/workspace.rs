@@ -152,6 +152,109 @@ pub fn compute_render_view(input: &TerrainView) -> Option<RenderView> {
     })
 }
 
+/// The camera transform that frames a terrain the way a printed map does.
+///
+/// The inverse of [`compute_render_view`]: the terrain's own footprint and
+/// relief decide how far back the camera has to be, and the requested orbit
+/// (azimuth from north, polar angle from straight down) decides where it
+/// stands. The result is a *camera transform* — the same thing the viewport
+/// and the still share — so a map framing is one object in the project, not a
+/// viewport-only pose.
+///
+/// Two cameras have to agree, so the function returns both numbers:
+///
+/// * the **transform** places the eye where the viewport draws it, at the
+///   distance that frames the terrain's long side with `fov_deg`;
+/// * the **fov** the *still* needs, because the renderer's orbit keeps a fixed
+///   ten-unit radius (see [`camera_render_view`]) and therefore frames the
+///   terrain only if the field of view is widened to match. Without this the
+///   exported still would show a different area than the viewport.
+pub fn map_camera_transform(
+    terrain: &crate::scene::TerrainObject,
+    azimuth_deg: f64,
+    polar_deg: f64,
+    fov_deg: f64,
+) -> Option<(crate::math::Transform, f32)> {
+    use crate::math::{Transform, Vec3};
+
+    let span = terrain.world_span_xz?;
+    let max_span = span[0].max(span[1]);
+    if !max_span.is_finite() || max_span <= 0.0 || !fov_deg.is_finite() {
+        return None;
+    }
+    let requested_fov = fov_deg.clamp(1.0, 179.0).to_radians();
+    // Metres per viewport unit: the terrain's long side is SCENE_TERRAIN_SIZE
+    // units across.
+    let scale = max_span / f64::from(crate::project::SCENE_TERRAIN_SIZE);
+    // The renderer's orbit keeps a fixed radius (ten viewport units — see
+    // [`camera_render_view`]), so the eye has to stand there for the still and
+    // the viewport to frame the same area, and the *field of view* is what
+    // decides how much fits.
+    const ORBIT_RADIUS_UNITS: f64 = 10.0;
+    let distance_units = ORBIT_RADIUS_UNITS;
+    let radius_metres = distance_units * scale;
+    let [low, high] = terrain.elevation_range.unwrap_or([0.0, 0.0]);
+    let relief = f64::from(high) - f64::from(low);
+    // The renderer centres the relief on zero, so the aim sits half a relief
+    // above the terrain's base.
+    let aim = Vec3::new(
+        0.0,
+        (relief * f64::from(terrain.z_scale) / (2.0 * scale)) as f32,
+        0.0,
+    );
+
+    let azimuth = azimuth_deg.to_radians();
+    let polar = polar_deg.to_radians();
+    let (sin_polar, cos_polar) = polar.sin_cos();
+    let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+    // `compute_render_view` reads the azimuth as atan2(north, east) — from
+    // east towards north — and the model's +Z is south.
+    let east = radius_metres * sin_polar * cos_azimuth;
+    let north = radius_metres * sin_polar * sin_azimuth;
+    let up = radius_metres * cos_polar;
+    let eye = Vec3::new(
+        aim.x + (east / scale) as f32,
+        aim.y + (up / scale) as f32,
+        aim.z - (north / scale) as f32,
+    );
+    let delta = (aim.x - eye.x, aim.y - eye.y, aim.z - eye.z);
+    let length = (delta.0 * delta.0 + delta.1 * delta.1 + delta.2 * delta.2).sqrt();
+    if !length.is_finite() || length <= 1e-9 {
+        return None;
+    }
+    let forward = Vec3::new(delta.0 / length, delta.1 / length, delta.2 / length);
+    // The still's orbit radius is fixed at ten viewport units, so its field of
+    // view has to cover what the viewport shows.
+    // The field of view that frames the terrain's long side from the orbit
+    // radius — never narrower than the one the project asked for.
+    let half_units = f64::from(crate::project::SCENE_TERRAIN_SIZE) * 0.5;
+    let fit_fov = (2.0 * (half_units / ORBIT_RADIUS_UNITS).atan()).to_degrees();
+    let still_fov = (fit_fov.to_radians().max(requested_fov).to_degrees()) as f32;
+    Some((
+        Transform {
+            translation: eye,
+            rotation_deg: Transform::rotation_looking_along(forward),
+            scale: Vec3::ONE,
+        },
+        still_fov,
+    ))
+}
+
+/// The scene's sun direction for a map's azimuth and elevation.
+///
+/// Azimuth runs from north, clockwise (315 is the north-west); the model's
+/// axes are +X east, +Y up, +Z south, so the direction is built in those.
+pub fn map_sun_direction(azimuth_deg: f64, elevation_deg: f64) -> [f32; 3] {
+    let azimuth = azimuth_deg.to_radians();
+    let elevation = elevation_deg.to_radians();
+    let horizontal = elevation.cos();
+    [
+        (horizontal * azimuth.sin()) as f32,
+        elevation.sin() as f32,
+        (-horizontal * azimuth.cos()) as f32,
+    ]
+}
+
 /// The project's active camera as the renderer's orbit view.
 ///
 /// Aiming ten units ahead mirrors the viewport's camera
@@ -539,6 +642,87 @@ fn workspace_slug(workspace: Workspace) -> &'static str {
 mod tests {
     use super::*;
     use crate::ids::ObjectId;
+
+    #[test]
+    fn the_map_camera_transform_round_trips_to_the_requested_orbit() {
+        // The map framing is the inverse of `compute_render_view`: ask for an
+        // orbit, get a camera transform, and read the orbit back.
+        let mut project = Project::starter(
+            "Map",
+            Some(crate::project::TerrainSeed {
+                title: Some("Alps".to_owned()),
+                name: "switzerland_dem.tif".to_owned(),
+                path: "/data/switzerland_dem.tif".to_owned(),
+                byte_size: 1,
+                dimensions: Some([3200, 7294]),
+                elevation_range: Some([189.0, 4_220.0]),
+                world_origin_xz: Some([2_600_000.0, 1_200_000.0]),
+                world_span_xz: Some([352_427.0, 225_654.0]),
+                overlay: None,
+            }),
+        );
+        let terrain_id = project
+            .scene
+            .objects
+            .iter()
+            .find(|object| object.is_terrain())
+            .expect("a terrain")
+            .id;
+        let terrain = project
+            .scene
+            .object(terrain_id)
+            .and_then(|object| object.terrain())
+            .expect("terrain payload")
+            .clone();
+        // A country: 352 km by 226 km, 4 km of relief.
+        let terrain = crate::scene::TerrainObject {
+            world_span_xz: Some([352_427.0, 225_654.0]),
+            elevation_range: Some([189.0, 4_220.0]),
+            z_scale: 5.246,
+            ..terrain
+        };
+        let (transform, still_fov) =
+            map_camera_transform(&terrain, 315.0, 25.0, 45.0).expect("a map framing");
+        // Put it on the scene's camera and read the orbit back.
+        let camera_id = project
+            .scene
+            .objects
+            .iter()
+            .find(|object| object.is_camera())
+            .expect("a camera")
+            .id;
+        if let Some(object) = project.scene.object_mut(camera_id) {
+            object.transform = transform;
+            if let ObjectKind::Camera(camera) = &mut object.kind {
+                camera.fov_deg = still_fov;
+            }
+        }
+        let view = camera_render_view(&project).expect("an orbit view");
+        assert!((view.phi_deg - 315.0).abs() < 0.5, "{view:?}");
+        assert!((view.theta_deg - 25.0).abs() < 0.5, "{view:?}");
+        // The still's fixed ten-unit orbit has to see the whole country: the
+        // visible half-width is radius * tan(fov/2), and the terrain's long
+        // side is twelve units.
+        let half_width = 10.0 * (f64::from(still_fov).to_radians() * 0.5).tan();
+        assert!(
+            half_width * 2.0 >= f64::from(crate::project::SCENE_TERRAIN_SIZE) - 0.01,
+            "the still frames {half_width} units, the terrain is 12"
+        );
+    }
+
+    #[test]
+    fn the_map_sun_direction_is_the_gallerys_north_west() {
+        // 315° from north, clockwise: north-west. The model's +Z is south, so
+        // the direction is negative on both horizontal axes.
+        let direction = map_sun_direction(315.0, 24.0);
+        assert!(direction[0] < 0.0 && direction[2] < 0.0, "{direction:?}");
+        assert!(direction[1] > 0.0, "{direction:?}");
+        let length = (direction[0].powi(2) + direction[1].powi(2) + direction[2].powi(2)).sqrt();
+        assert!((length - 1.0).abs() < 1e-4, "{direction:?}");
+        // Due north: +X east is zero, and +Z (south) is negative.
+        let north = map_sun_direction(0.0, 0.0);
+        assert!(north[0].abs() < 1e-6 && north[2] < -0.99, "{north:?}");
+    }
 
     #[test]
     fn sun_angles_match_the_light_rotation() {

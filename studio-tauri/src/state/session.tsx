@@ -555,6 +555,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
+  const applyMapLook = useCallback(async () => {
+    const project = state?.project;
+    const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
+    if (!project || !terrain || terrain.kind.type !== "terrain") {
+      flash("This project has no terrain to frame");
+      return;
+    }
+    try {
+      setBusy(true);
+      await applyCommand({ type: "applyMapLook", id: terrain.id });
+      // The map framing lives on the scene camera, so the viewport has to look
+      // through it rather than keep its own orbit.
+      setCameraView(true);
+      flash("Map look applied: relief fitted, north-west sun, hillshade on");
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  }, [applyCommand, fail, flash, state]);
+
   const importTerrainOverlay = useCallback(async () => {
     try {
       const picked = await openDialog({
@@ -991,6 +1012,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       relinkAsset,
       refreshAssetIntegrity,
       importTerrainDem,
+      applyMapLook,
       importTerrainOverlay,
       setTerrainOverlayOpacity,
       clearTerrainOverlay,
@@ -1032,6 +1054,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [
       addPrimitive,
       applyCommand,
+      applyMapLook,
       deleteSelection,
       duplicateSelection,
       fail,

@@ -63,6 +63,17 @@ impl CommandError {
     }
 }
 
+/// The map look's camera: from the north, 31 degrees off straight down — the
+/// gallery's Swiss land-cover framing.
+const MAP_AZIMUTH_DEG: f64 = 90.0;
+const MAP_POLAR_DEG: f64 = 31.0;
+/// The gallery's sun: north-west, 24 degrees above the horizon.
+const MAP_SUN_AZIMUTH_DEG: f64 = 315.0;
+const MAP_SUN_ELEVATION_DEG: f64 = 24.0;
+/// How far the hillshade's rays reach, and how many steps they take.
+const MAP_SUN_REACH_M: f64 = 4_000.0;
+const MAP_SUN_STEPS: u32 = 48;
+
 /// A reversible edit to the canonical project.
 ///
 /// New values only: the previous values are read from the model during
@@ -202,6 +213,13 @@ pub enum Command {
     SetTimelineConfig {
         frame_rate: u32,
         length: u32,
+    },
+
+    /// Apply the map look in one step: the DEM's own relief, a map camera,
+    /// the gallery's north-west sun, and the ray-marched hillshade that makes
+    /// a country-sized DEM read as terrain instead of a sheet.
+    ApplyMapLook {
+        id: ObjectId,
     },
 
     /// Set the terrain's vertical scale to the DEM's own default: the
@@ -614,6 +632,100 @@ impl Command {
                         z_scale: previous,
                     },
                     affected: vec![*id],
+                })
+            }
+
+            Command::ApplyMapLook { id } => {
+                let object = project
+                    .scene
+                    .object(*id)
+                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
+                let crate::scene::ObjectKind::Terrain(terrain) = &object.kind else {
+                    return Err(CommandError::invalid("terrain", "object is not a terrain"));
+                };
+                let terrain = terrain.clone();
+                let camera = project
+                    .scene
+                    .camera()
+                    .ok_or_else(|| CommandError::invalid("scene", "the scene has no camera"))?;
+                let camera_id = camera.id;
+                let camera_kind = match &camera.kind {
+                    crate::scene::ObjectKind::Camera(kind) => *kind,
+                    _ => return Err(CommandError::invalid("camera", "object is not a camera")),
+                };
+                let camera_transform = camera.transform;
+                let sun = project
+                    .scene
+                    .objects
+                    .iter()
+                    .find(|object| {
+                        matches!(&object.kind, crate::scene::ObjectKind::Light(light) if light.kind == crate::scene::LightKind::Directional)
+                    })
+                    .ok_or_else(|| CommandError::invalid("scene", "the scene has no sun"))?;
+                let sun_id = sun.id;
+                let sun_transform = sun.transform;
+
+                let (map_transform, still_fov) = crate::workspace::map_camera_transform(
+                    &terrain,
+                    MAP_AZIMUTH_DEG,
+                    MAP_POLAR_DEG,
+                    f64::from(camera_kind.fov_deg),
+                )
+                .ok_or_else(|| {
+                    CommandError::invalid("terrain", "the DEM has no measured footprint")
+                })?;
+                let sun_rotation = crate::workspace::sun_rotation(
+                    crate::workspace::map_sun_direction(MAP_SUN_AZIMUTH_DEG, MAP_SUN_ELEVATION_DEG),
+                );
+                let previous_z_scale = terrain.z_scale;
+                let previous_render = project.render.clone();
+
+                if let Some(object) = project.scene.object_mut(*id) {
+                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
+                        terrain.z_scale = crate::scene::dem_default_z_scale(
+                            terrain.elevation_range,
+                            terrain.world_span_xz,
+                        );
+                    }
+                }
+                if let Some(object) = project.scene.object_mut(camera_id) {
+                    object.transform = map_transform;
+                    if let crate::scene::ObjectKind::Camera(kind) = &mut object.kind {
+                        kind.fov_deg = still_fov;
+                    }
+                }
+                if let Some(object) = project.scene.object_mut(sun_id) {
+                    object.transform.rotation_deg = sun_rotation;
+                }
+                project.render.sun_visibility = true;
+                project.render.sun_visibility_distance = MAP_SUN_REACH_M;
+                project.render.sun_visibility_steps = MAP_SUN_STEPS;
+
+                Ok(Outcome {
+                    inverse: Command::Batch {
+                        commands: vec![
+                            Command::SetTerrainZScale {
+                                id: *id,
+                                z_scale: previous_z_scale,
+                            },
+                            Command::SetTransform {
+                                id: camera_id,
+                                transform: camera_transform,
+                            },
+                            Command::SetCamera {
+                                id: camera_id,
+                                camera: camera_kind,
+                            },
+                            Command::SetTransform {
+                                id: sun_id,
+                                transform: sun_transform,
+                            },
+                            Command::SetRenderSettings {
+                                render: previous_render,
+                            },
+                        ],
+                    },
+                    affected: vec![*id, camera_id, sun_id],
                 })
             }
 
@@ -1119,6 +1231,7 @@ impl Command {
             | Command::SetPrimitive { id, .. }
             | Command::SetTerrainZScale { id, .. }
             | Command::FitTerrainRelief { id }
+            | Command::ApplyMapLook { id }
             | Command::SetTerrainOverlay { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. }
@@ -1179,6 +1292,7 @@ impl Command {
                 format!("Terrain scale {}", name_of(id))
             }
             Command::FitTerrainRelief { id } => format!("Fit relief of {}", name_of(id)),
+            Command::ApplyMapLook { id } => format!("Map look for {}", name_of(id)),
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),

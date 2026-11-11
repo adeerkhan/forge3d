@@ -514,6 +514,8 @@ export type Command =
   | { type: "setTerrainZScale"; id: string; zScale: number }
   /** Set the vertical scale to the DEM's own 6%-relief default. */
   | { type: "fitTerrainRelief"; id: string }
+  /** Apply the map look: relief, map camera, north-west sun, hillshade. */
+  | { type: "applyMapLook"; id: string }
   | {
       type: "setTerrainDem";
       id: string;

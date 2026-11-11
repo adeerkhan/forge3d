@@ -55,6 +55,7 @@ be a payload field: vector layers and meshes.
 | 5.14 overlay texture follows the source (4096 texels) | done |
 | 5.16 the elevation ramp in the Material preview (engine stops) | done |
 | 5.17 map plate export (white page, depth cut-out, title, legend) | done |
+| 5.18 the map look, in one undoable button | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -527,6 +528,28 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   but the names live in the gallery recipe), and a scale bar/north arrow.
 - Check: payload test (final-only, depth AOV, preview off), service test (crop
   to the mask, white page, subject pixels preserved, no mask = no plate).
+
+### 5.18 The map look, in one button (0.5 day) — **done**
+- Cartography setup was four places (fit relief, a camera, a sun, a hillshade)
+  and the numbers were in the gallery's recipe, not the app. `ApplyMapLook` does
+  all of it in one undoable command: the DEM's own relief, the map camera (from
+  the north, 31° off vertical, framed on the whole footprint), the gallery's
+  north-west sun (315°, 24°) and the ray-marched hillshade (4 km reach, 48
+  steps). The Inspector's Map tab has the button; the viewport switches to the
+  camera so the framing is what you see.
+- The camera needed the *inverse* of `compute_render_view`, and the renderer
+  keeps a fixed ten-unit orbit radius, so the eye has to stand at that radius
+  and the **field of view** is what decides how much fits (61.93° for a
+  country-sized DEM; the project's own field of view is kept when it is
+  wider). `workspace::map_camera_transform` returns both, and a round-trip test
+  pins it: the transform's orbit reads back as the requested azimuth and polar
+  angle, and the still's visible width covers the terrain's long side.
+- Measured on the Swiss DEM: the country fills the frame the way the gallery's
+  does (1200×900, 5.246, hillshade on, land cover draped), instead of a
+  rectangle floating in the sky.
+- Check: core tests for the round trip, the sun direction and the command
+  (relief 5.246, hillshade on, camera moved and widened, sun moved, undo
+  restores all three), and the TS wire shape.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

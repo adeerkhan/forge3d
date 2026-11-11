@@ -36,6 +36,10 @@ fn ts_camel_case_shapes_deserialize() {
                 .to_string(),
         ),
         (
+            "applyMapLook",
+            format!(r#"{{"type":"applyMapLook","id":"{id}"}}"#),
+        ),
+        (
             "setTransform",
             format!(
                 r#"{{"type":"setTransform","id":"{id}","transform":{{"translation":{{"x":0.0,"y":0.0,"z":0.0}},"rotationDeg":{{"x":0.0,"y":0.0,"z":0.0}},"scale":{{"x":1.0,"y":1.0,"z":1.0}}}}}}"#
