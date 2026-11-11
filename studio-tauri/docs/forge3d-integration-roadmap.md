@@ -56,6 +56,7 @@ be a payload field: vector layers and meshes.
 | 5.16 the elevation ramp in the Material preview (engine stops) | done |
 | 5.17 map plate export (white page, depth cut-out, title, legend) | done |
 | 5.18 the map look, in one undoable button | done |
+| 5.19 plate furniture: scale bar and north arrow | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -550,6 +551,21 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - Check: core tests for the round trip, the sun direction and the command
   (relief 5.246, hillshade on, camera moved and widened, sun moved, undo
   restores all three), and the TS wire shape.
+
+### 5.19 Map furniture: scale bar and north arrow (0.25 day) — **done**
+- The plate gets the two pieces of furniture a map needs and that need no
+  guesses: a **scale bar** (the ground scale at the frame's centre, snapped to
+  a round 1/2/5 length — "50 km" on the Swiss plate) and a **north arrow**.
+- Both are drawn only where they are true: the scale bar needs a near-vertical
+  view (an oblique frame has no single ground scale), and the arrow needs a
+  north-up camera (phi within 3° of north). A plate from any other camera gets
+  the title, the legend and the caption, and no wrong furniture.
+- The scale comes from the camera the frame was rendered with: the visible
+  width at the target (2 · radius · tan(fov/2), unscaled to metres) over the
+  frame's width.
+- A unit test covers the round-length rule: the first version of the loop
+  multiplied by 1.0 and never terminated — it hung the render, and the test
+  now pins it.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

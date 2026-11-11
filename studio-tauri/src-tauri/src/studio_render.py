@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import math
 import sys
 import tempfile
 import traceback
@@ -784,12 +785,23 @@ class StudioRenderer:
                     legend = plate_legend(legend_name, self.range)
                 except Exception:  # noqa: BLE001 - the plate still has its title
                     legend = None
+            # The scale bar is only true for a near-vertical view (the ground
+            # scale varies across an oblique frame), and the north arrow only
+            # for a north-up one.
+            fov = math.radians(float(camera.get("fovDeg", 45.0) or 45.0))
+            visible_metres = 2.0 * radius * math.tan(fov * 0.5) / max(self.scale, 1e-9)
+            metres_per_pixel = visible_metres / max(width, 1)
+            theta = float(camera.get("thetaDeg", 45.0) or 45.0)
+            phi = float(camera.get("phiDeg", 135.0) or 135.0)
+            north_up = theta <= 45.0 and min(abs(phi - 90.0), abs(phi - 450.0)) <= 3.0
             plate_rgb = compose_plate(
                 rgb,
                 depth,
                 title=title,
                 legend=legend,
                 caption="Forge3D Studio - %s" % Path(self.dem_path).stem,
+                metres_per_pixel=metres_per_pixel if theta <= 45.0 else None,
+                north_up=north_up,
             )
 
         png = encode_png(rgb)
@@ -929,6 +941,31 @@ def plate_legend(colormap_name: str, domain):
     return np.asarray(Legend.from_colormap(get_colormap(token), (float(low), float(high)), config).render())
 
 
+def _nice_length(metres: float) -> float:
+    """The largest 1, 2 or 5 times a power of ten that fits in `metres`.
+
+    A scale bar reads in round distances, so the bar's length is snapped to
+    one of those rather than to the exact pixel count.
+    """
+    if metres <= 0.0 or not math.isfinite(metres):
+        return 0.0
+    value = 1.0
+    while value * 10.0 <= metres:
+        value *= 10.0
+    for step in (5.0, 2.0):
+        while value * step <= metres:
+            value *= step
+    return value
+
+
+def _scale_label(metres: float) -> str:
+    """A scale bar's label: metres under a kilometre, kilometres above."""
+    if metres >= 1000.0:
+        value = metres / 1000.0
+        return ("%g km" % value) if value % 1 else ("%d km" % value)
+    return ("%g m" % metres) if metres % 1 else ("%d m" % metres)
+
+
 def compose_plate(
     rgb: np.ndarray,
     mask: np.ndarray,
@@ -936,6 +973,8 @@ def compose_plate(
     title: str,
     legend: "np.ndarray | None" = None,
     caption: str = "",
+    metres_per_pixel: "float | None" = None,
+    north_up: bool = False,
 ) -> np.ndarray:
     """A map plate: the rendered terrain cut out and laid on a white page.
 
@@ -984,7 +1023,56 @@ def compose_plate(
     if legend is not None:
         legend_img = Image.fromarray(np.ascontiguousarray(legend), "RGBA")
         page.alpha_composite(legend_img, dest=(margin, int(title_size * 1.5) + margin // 2))
+    if north_up:
+        # A north arrow only where it is true: the arrow is drawn for a
+        # north-up view, not rotated by a guess.
+        arrow_x = page_w - margin - int(title_size * 0.7)
+        arrow_y = int(title_size * 0.9) + margin // 2
+        arrow_len = max(18, int(title_size * 0.9))
+        draw.polygon(
+            [
+                (arrow_x, arrow_y - arrow_len),
+                (arrow_x - arrow_len // 4, arrow_y),
+                (arrow_x + arrow_len // 4, arrow_y),
+            ],
+            fill=(38, 38, 42),
+        )
+        draw.text(
+            (arrow_x, arrow_y + 4),
+            "N",
+            fill=(38, 38, 42),
+            font=font_caption,
+            anchor="ma",
+        )
     page.alpha_composite(Image.fromarray(np.ascontiguousarray(subject_rgba), "RGBA"), dest=(margin, header))
+    if metres_per_pixel and metres_per_pixel > 0:
+        # A scale bar in round distances, as long as it stays between 15% and
+        # 40% of the page's width.
+        target = width * 0.28
+        metres = target * metres_per_pixel
+        nice = _nice_length(metres)
+        bar_pixels = int(round(nice / metres_per_pixel))
+        if bar_pixels > 8:
+            bar_x = margin
+            bar_y = header + height - margin // 2
+            bar_h = max(3, int(title_size * 0.18))
+            draw.rectangle(
+                [
+                    bar_x,
+                    bar_y,
+                    bar_x + bar_pixels,
+                    bar_y + bar_h,
+                ],
+                fill=(38, 38, 42),
+            )
+            label = _scale_label(nice)
+            draw.text(
+                (bar_x, bar_y - int(caption_size * 1.4)),
+                label,
+                fill=(54, 54, 60),
+                font=font_caption,
+                anchor="ls",
+            )
     if caption:
         draw.text(
             (page_w // 2, page_h - footer + margin // 4),

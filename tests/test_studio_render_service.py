@@ -562,3 +562,18 @@ def test_compose_plate_cuts_out_on_depth_and_lays_the_subject_on_white():
     empty = np.zeros((8, 8), dtype=np.uint8)
     same = service.compose_plate(np.zeros((8, 8, 3), dtype=np.uint8), empty, title="x")
     assert same.shape == (8, 8, 3)
+
+
+def test_the_scale_bar_picks_a_round_length_and_labels_it():
+    """A scale bar reads in round distances: 1, 2 or 5 times a power of ten.
+    (The first version of this loop multiplied by 1.0 and never terminated.)"""
+    service = load_service()
+    nice = service._nice_length
+    assert nice(98_900.0) == 50_000.0
+    assert nice(1_000.0) == 1_000.0
+    assert nice(1_500.0) == 1_000.0
+    assert nice(6_000.0) == 5_000.0
+    assert nice(0.0) == 0.0
+    assert nice(float("inf")) == 0.0
+    assert service._scale_label(50_000.0) == "50 km"
+    assert service._scale_label(500.0) == "500 m"
