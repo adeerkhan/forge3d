@@ -210,6 +210,17 @@ def test_aether_refuses_parameters_the_shipped_bake_does_not_cover(sky_settings)
         )
 
 
+_SERVICE_MODULE = None
+
+
+def _engine_height_domain(heights):
+    """The service's own helper, from the module loaded once."""
+    global _SERVICE_MODULE
+    if _SERVICE_MODULE is None:
+        _SERVICE_MODULE = load_service()
+    return _SERVICE_MODULE.engine_height_domain(heights)
+
+
 class _WaterStub:
     """What the water and fog helpers read: the scaled heights, the scale that
     produced them, and the DEM's elevation range."""
@@ -218,6 +229,8 @@ class _WaterStub:
         self.heights = heights
         self.scale = scale
         self.range = range
+        # The renderer's domain for the heights it is given.
+        self.scaled_range = _engine_height_domain(heights)
 
 
 @pytest.fixture
@@ -615,3 +628,27 @@ def test_the_class_legend_lists_the_classes_the_map_shows():
     assert legend.shape[2] == 4
     # No classes, no legend.
     assert service.plate_class_legend([]).shape == (1, 1, 4)
+
+
+def test_the_engine_height_domain_describes_the_heights_it_is_given():
+    """The renderer clamps and normalizes the heightmap against the domain, so
+    a scaled DEM needs the *scaled* range. Handing it the DEM's own range made
+    every country-scale DEM a flat plate (Switzerland rendered flat; Bryce, at
+    scale 1, did not)."""
+    service = load_service()
+    import numpy as np
+
+    raw = (189.0, 4220.0)
+    scale = 0.085
+    scaled = np.asarray([raw[0] * scale, raw[1] * scale], dtype=np.float64)
+    domain = service.engine_height_domain(scaled)
+    assert domain == pytest.approx((scaled.min(), scaled.max()))
+    # The scaled domain is not the DEM's own range, and it is the one the
+    # renderer needs.
+    assert domain != pytest.approx(raw)
+    assert domain[0] <= scaled.min() and domain[1] >= scaled.max()
+    # A flat DEM still gets a usable domain.
+    flat = service.engine_height_domain(np.full((4, 4), 12.0))
+    assert flat[1] > flat[0]
+    # No finite samples must not crash.
+    assert service.engine_height_domain(np.array([np.nan, np.nan])) == (0.0, 1.0)

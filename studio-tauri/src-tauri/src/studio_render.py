@@ -79,6 +79,27 @@ def write_sky_hdr(path: Path, width: int = 128, height: int = 64) -> None:
     fio.write_hdr(path, image)
 
 
+def engine_height_domain(heights) -> tuple[float, float]:
+    """The height domain for the heights the renderer is given.
+
+    The renderer clamps and normalizes the heightmap against the domain
+    (`get_height_geom_t`), so the domain has to describe the heights *as they
+    are uploaded*. A country-scale DEM is scaled into the view budget, and
+    handing the renderer the DEM's original range collapsed every height to the
+    floor: Switzerland rendered as a flat plate. The range in the DEM's own
+    metres stays available for the levels and the legend.
+    """
+    values = np.asarray(heights, dtype=np.float64)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return (0.0, 1.0)
+    low = float(finite.min())
+    high = float(finite.max())
+    if high <= low:
+        high = low + 1.0
+    return (low, high)
+
+
 def dem_span(dem) -> tuple[float, float]:
     """Metric footprint of a DEM: pixel size when projected, local UTM when not.
 
@@ -138,6 +159,13 @@ class StudioRenderer:
         # scaled world must stay well below that (30,000 leaves headroom).
         self.scale = min(1.0, 30_000.0 / max(self.span_x, self.span_y))
         self.heights = self.heights * self.scale
+        # The engine's height domain has to describe the heights it is given:
+        # the renderer clamps and normalizes them against the domain, so a
+        # country-scale DEM (whose heights are scaled into the view budget)
+        # rendered with the *unscaled* range collapsed to the floor and came
+        # out as a flat plate. The raw range stays for the levels and the
+        # legend, which are in the DEM's metres.
+        self.scaled_range = engine_height_domain(self.heights)
 
         env_path = Path(tempfile.gettempdir()) / "forge3d-studio-sky.hdr"
         write_sky_hdr(env_path)
@@ -339,7 +367,7 @@ class StudioRenderer:
         # *below* the terrain means the same thing — there is no water down
         # there, and a silent empty frame reads as a broken control. Fall back
         # to auto rather than render nothing.
-        below = self.range[0]
+        below = self.scaled_range[0]
         scaled_level = None if level <= below else level * self.scale
         try:
             mask = derive_water_mask(
@@ -696,7 +724,7 @@ class StudioRenderer:
                 min(10.0, max(radius * 0.001, 0.01)),
                 400000.0,
             ),
-            domain=self.range,
+            domain=self.scaled_range,
             overlays=overlays,
             # The colormap only reaches the pixels in `mix` mode: the shader's
             # `material` branch assigns `material_albedo` last, so a colormap
@@ -1215,6 +1243,142 @@ def compose_legend(
         np.uint8
     )
     return frame
+
+
+#: The vector reader. GeoPackage is a SQLite database with GeoPackage binary
+#: geometry; GeoJSON is plain JSON. Neither needs a third-party package: the
+#: studio's environment has no geopandas, fiona or pyproj (verified), and a
+#: GeoPackage is a SQLite file.
+
+_GPKG_MAGIC = b"GP"
+
+
+def _wkb_line_strings(data: bytes) -> list[list[tuple[float, float]]]:
+    """The lines inside a WKB geometry (Point/LineString/Polygon/Multi*)."""
+    import struct
+
+    lines: list[list[tuple[float, float]]] = []
+
+    def parse(offset: int, depth: int = 0):
+        if offset + 5 > len(data) or depth > 4:
+            return offset
+        order = data[offset]
+        prefix = "<" if order == 1 else ">"
+        (geometry_type,) = struct.unpack_from(prefix + "I", data, offset + 1)
+        offset += 5
+        base = geometry_type % 1000
+        if base == 1:  # Point
+            offset += 16
+        elif base == 2:  # LineString
+            (count,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            points = []
+            for _ in range(count):
+                x, y = struct.unpack_from(prefix + "dd", data, offset)
+                points.append((x, y))
+                offset += 16
+            lines.append(points)
+        elif base == 3:  # Polygon
+            (rings,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            for _ in range(rings):
+                (count,) = struct.unpack_from(prefix + "I", data, offset)
+                offset += 4 + count * 16
+        elif base in (4, 5, 6, 7):  # Multi* / GeometryCollection
+            (parts,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            for _ in range(parts):
+                offset = parse(offset, depth + 1)
+        return offset
+
+    parse(0)
+    return lines
+
+
+def _gpkg_geometry_lines(blob: bytes) -> list[list[tuple[float, float]]]:
+    """The lines inside a GeoPackage binary geometry blob."""
+    import struct
+
+    if len(blob) < 8 or blob[:2] != _GPKG_MAGIC:
+        return []
+    flags = blob[3]
+    offset = 8
+    if flags & 0x20:  # the srs id is present
+        offset += 4
+    envelope = (flags >> 1) & 0x07
+    offset += {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get(envelope, 0)
+    if offset >= len(blob):
+        return []
+    return _wkb_line_strings(blob[offset:])
+
+
+def read_vector_lines(path: str):
+    """The polylines of a vector file, in the file's own coordinates.
+
+    Returns `(lines, crs)` where `crs` is the file's CRS (an EPSG string for a
+    GeoPackage, whatever the GeoJSON says) or `None` when the file declares
+    none. A GeoPackage's CRS comes from `gpkg_geometry_columns`; a GeoJSON's
+    is only trusted when it names one.
+    """
+    import json
+    import os
+    import sqlite3
+
+    lowered = path.lower()
+    if lowered.endswith((".json", ".geojson")):
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+        lines: list[list[tuple[float, float]]] = []
+        crs = None
+        for feature in document.get("features", []) or []:
+            geometry = feature.get("geometry") or {}
+            kind = str(geometry.get("type", "")).lower()
+            coordinates = geometry.get("coordinates") or []
+            if kind == "linestring":
+                lines.append([(float(x), float(y)) for x, y in coordinates])
+            elif kind == "multilinestring":
+                for part in coordinates:
+                    lines.append([(float(x), float(y)) for x, y in part])
+        return lines, crs
+
+    if not lowered.endswith((".gpkg", ".sqlite", ".db")):
+        raise RuntimeError(
+            "unsupported vector file %r: expected GeoPackage (.gpkg) or GeoJSON" % (path,)
+        )
+    connection = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        cursor = connection.cursor()
+        table = None
+        geometry_column = "geom"
+        srs_id = None
+        try:
+            row = cursor.execute(
+                "SELECT table_name FROM gpkg_contents WHERE data_type = 'features' LIMIT 1"
+            ).fetchone()
+            table = row[0] if row else None
+        except sqlite3.Error:
+            table = None
+        if table is None:
+            raise RuntimeError("the GeoPackage has no feature table")
+        try:
+            row = cursor.execute(
+                "SELECT column_name, srs_id FROM gpkg_geometry_columns WHERE table_name = ?",
+                (table,),
+            ).fetchone()
+            if row is not None:
+                geometry_column, srs_id = row[0], row[1]
+        except sqlite3.Error:
+            pass
+        lines = []
+        for (blob,) in cursor.execute(
+            'SELECT "%s" FROM "%s"' % (geometry_column.replace('"', '""'), table.replace('"', '""'))
+        ):
+            if isinstance(blob, (bytes, bytearray)):
+                lines.extend(_gpkg_geometry_lines(bytes(blob)))
+        crs = "EPSG:%d" % int(srs_id) if srs_id is not None else None
+        return lines, crs
+    finally:
+        connection.close()
 
 
 def apply_post_effects(rgb: np.ndarray, quality: Dict[str, Any]) -> np.ndarray:
