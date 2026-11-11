@@ -577,3 +577,41 @@ def test_the_scale_bar_picks_a_round_length_and_labels_it():
     assert nice(float("inf")) == 0.0
     assert service._scale_label(50_000.0) == "50 km"
     assert service._scale_label(500.0) == "500 m"
+
+
+def test_a_class_map_export_snaps_back_to_the_palette():
+    """A land-cover export is often an *image* of the classes. The gallery's own
+    recipe snaps each pixel to the nearest palette entry; the same snap lets
+    the plate name the classes. An orthophoto is not a class map and is left
+    alone."""
+    service = load_service()
+    palette = service.CLASSIFICATION_PALETTE
+    image = np.zeros((4, 4, 3), dtype=np.float32)
+    image[0, 0] = palette[0]  # water
+    image[0, 1] = palette[3]  # crops
+    image[1, :] = palette[1]  # trees
+    classes, ids = service.snap_to_classes(image)
+    assert classes is not None, "a palette-coloured raster is a class map"
+    assert ids == [1, 2, 4], ids
+    assert classes[0, 0] == 1 and classes[0, 1] == 4 and classes[1, 0] == 2
+
+    # An image that is not made of palette colours stays an image — including
+    # a grey one, which would otherwise snap to the palette's spare grey.
+    photo = np.full((8, 8, 3), 120.0, dtype=np.float32)
+    photo[0, 0] = (17.0, 200.0, 233.0)
+    classes, ids = service.snap_to_classes(photo)
+    assert classes is None and ids == []
+
+    # Everything below the invalid threshold is nodata, as the gallery's rule
+    # has it.
+    dark = np.zeros((2, 2, 3), dtype=np.float32)
+    assert service.snap_to_classes(dark) == (None, [])
+
+
+def test_the_class_legend_lists_the_classes_the_map_shows():
+    service = load_service()
+    legend = service.plate_class_legend([1, 2, 4])
+    assert legend.shape[0] > 40 and legend.shape[1] > 100, legend.shape
+    assert legend.shape[2] == 4
+    # No classes, no legend.
+    assert service.plate_class_legend([]).shape == (1, 1, 4)

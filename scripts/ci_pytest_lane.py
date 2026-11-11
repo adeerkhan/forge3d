@@ -26,6 +26,11 @@ from _toml_compat import load_toml  # noqa: E402
 
 
 FAST_LANE_FILES = [
+    # The Studio surface audit: every RenderSettings field reaches the payload,
+    # the payload and the service agree in both directions, and the project
+    # model carries no parameter the engine was measured to ignore. A
+    # permanent contract, so it belongs in the routine lane.
+    "tests/test_studio_surface_audit.py",
     "tests/test_aether_acceptance_evidence.py",
     "tests/test_nephele_acceptance.py",
     "tests/test_nephele_fixture_contracts.py",

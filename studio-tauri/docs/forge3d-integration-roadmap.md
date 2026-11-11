@@ -57,6 +57,8 @@ be a payload field: vector layers and meshes.
 | 5.17 map plate export (white page, depth cut-out, title, legend) | done |
 | 5.18 the map look, in one undoable button | done |
 | 5.19 plate furniture: scale bar and north arrow | done |
+| 5.20 the categorical legend (class maps snap back to the palette) | done |
+| Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
 | Vector layers (§7.1), meshes in Rendered (§7.2) | design increments, trigger-gated |
@@ -566,6 +568,23 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - A unit test covers the round-length rule: the first version of the loop
   multiplied by 1.0 and never terminated — it hung the render, and the test
   now pins it.
+
+### 5.20 The categorical legend (0.5 day) — **done**
+- The plate's legend is the *classification* legend when the drape is a class
+  map: the palette's swatches and the class names that palette implies (Water,
+  Trees, Flooded vegetation, Crops, Built area, Bare ground, Snow, Rangeland),
+  listed for the classes the map actually shows.
+- A land-cover export is usually an **image of the classes**, not class IDs —
+  the bundled `switzerland_land_cover.tif` is 3-band. The service now snaps such
+  a raster back to the palette (`snap_to_classes`), the same rule the gallery's
+  `snap_overlay_to_legend` uses, so the drape wears the palette's exact
+  colours and the plate can name the classes.
+- The snap only applies to a **class map**: at least 80% of the valid pixels
+  have to sit close to one of the *named* classes. An orthophoto is not a class
+  map and is left alone — measured: the Bryce NAIP raster snaps to nothing, the
+  Swiss land cover snaps to classes 1–8 (plus the grey spare).
+- Check: service tests for the snap (palette colours snap, a grey image does
+  not, nodata stays nodata) and for the legend's shape; 36 service tests green.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

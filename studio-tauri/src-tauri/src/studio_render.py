@@ -400,6 +400,11 @@ class StudioRenderer:
         scale = min(1.0, float(self.OVERLAY_TEXTURE_LONG_SIDE) / max(height, width, 1))
         return max(1, int(round(height * scale))), max(1, int(round(width * scale)))
 
+    def overlay_classes(self, overlay: Dict[str, Any]):
+        """The class IDs a cached class raster holds (empty for an RGB one)."""
+        entry = self._overlay_rgba_cache.get(self.overlay_key(overlay))
+        return list(entry[1]) if entry else []
+
     def overlay_key(self, overlay: Dict[str, Any]):
         """What the cached RGBA depends on: the file's identity and the class
         post-processing. The opacity is *not* in the key — it is applied when
@@ -426,19 +431,25 @@ class StudioRenderer:
         coordinates far from its own extent and produced a flat grey layer.)
         """
         key = self.overlay_key(overlay)
-        rgba = self._overlay_rgba_cache.get(key)
-        if rgba is None:
-            rgba = self.read_overlay_rgba(overlay)
-            self._overlay_rgba_cache[key] = rgba
+        entry = self._overlay_rgba_cache.get(key)
+        if entry is None:
+            entry = self.read_overlay_rgba(overlay)
+            self._overlay_rgba_cache[key] = entry
             while len(self._overlay_rgba_cache) > self._overlay_rgba_limit:
                 self._overlay_rgba_cache.pop(next(iter(self._overlay_rgba_cache)))
+        rgba = entry[0]
         return self.f3d.OverlayLayer.from_raster_rgba(
             np.ascontiguousarray(rgba),
             strength=float(overlay.get("opacity", 0.82)),
         )
 
-    def read_overlay_rgba(self, overlay: Dict[str, Any]) -> np.ndarray:
-        """Decode a raster into the RGBA the drape texture uploads."""
+    def read_overlay_rgba(self, overlay: Dict[str, Any]):
+        """Decode a raster into the RGBA the drape texture uploads.
+
+        Returns the pixels and the class IDs the raster holds (empty for an RGB
+        raster): the plate's categorical legend needs to know which classes
+        the map actually shows.
+        """
         import rasterio
         from rasterio.enums import Resampling as RasterioResampling
 
@@ -477,7 +488,12 @@ class StudioRenderer:
                         classes = despeckle_classes(classes)
                     rgba = apply_palette(classes, CLASSIFICATION_PALETTE)
                     rgba[~valid] = (0, 0, 0, 0)
-                    return np.ascontiguousarray(rgba)
+                    present = [
+                        int(value)
+                        for value in np.unique(classes[valid])
+                        if int(value) >= 1
+                    ]
+                    return np.ascontiguousarray(rgba), present
 
             rgb = np.zeros((height, width, 3), dtype=np.float32)
             for index, plane in enumerate(planes):
@@ -486,6 +502,18 @@ class StudioRenderer:
             if bands == 1:
                 rgb[:, :, 1] = rgb[:, :, 0]
                 rgb[:, :, 2] = rgb[:, :, 0]
+
+            # A class map exported as an image: snap it back to the palette,
+            # so the drape wears the palette's exact colours and the plate can
+            # name the classes. An orthophoto is not a class map and is left
+            # alone (the share test decides).
+            snapped, class_ids = snap_to_classes(rgb)
+            if snapped is not None:
+                from forge3d.thematic import apply_palette
+
+                rgba = apply_palette(snapped, CLASSIFICATION_PALETTE)
+                rgba[~valid] = (0, 0, 0, 0)
+                return np.ascontiguousarray(rgba), class_ids
 
             # The shell serializes OverlayRequest as camelCase ("preserveColors").
             if overlay.get("preserve_colors", overlay.get("preserveColors")):
@@ -497,9 +525,12 @@ class StudioRenderer:
                 )
                 if peak > 255.0:
                     rgb *= 255.0 / 65535.0
-                return np.concatenate(
-                    [np.clip(rgb, 0.0, 255.0).astype(np.uint8), np.where(valid, 255, 0).astype(np.uint8)[..., None]],
-                    axis=2,
+                return (
+                    np.concatenate(
+                        [np.clip(rgb, 0.0, 255.0).astype(np.uint8), np.where(valid, 255, 0).astype(np.uint8)[..., None]],
+                        axis=2,
+                    ),
+                    [],
                 )
 
         flat = rgb.reshape(-1, 3)
@@ -511,8 +542,11 @@ class StudioRenderer:
             low, high = 0.0, 255.0
         scaled = np.clip((rgb - low) / (high - low), 0.0, 1.0)
         alpha = np.where(valid, 255, 0).astype(np.uint8)
-        return np.concatenate(
-            [(scaled * 255.0).astype(np.uint8), alpha[..., None]], axis=2
+        return (
+            np.concatenate(
+                [(scaled * 255.0).astype(np.uint8), alpha[..., None]], axis=2
+            ),
+            [],
         )
 
     #: Model token -> the engine's `SkySettings.model` spelling.
@@ -780,7 +814,12 @@ class StudioRenderer:
             if not title:
                 title = Path(self.dem_path).stem.replace("_", " ").title()
             legend = None
-            if legend_name:
+            class_ids = self.overlay_classes(overlay) if overlay else []
+            if class_ids:
+                # A class raster: the legend names the classes the palette
+                # already paints.
+                legend = plate_class_legend(class_ids)
+            elif legend_name:
                 try:
                     legend = plate_legend(legend_name, self.range)
                 except Exception:  # noqa: BLE001 - the plate still has its title
@@ -964,6 +1003,35 @@ def _scale_label(metres: float) -> str:
         value = metres / 1000.0
         return ("%g km" % value) if value % 1 else ("%d km" % value)
     return ("%g m" % metres) if metres % 1 else ("%d m" % metres)
+
+
+def plate_class_legend(class_ids) -> np.ndarray:
+    """The categorical legend for a class raster: the palette's swatches and
+    the class names that palette implies."""
+    from PIL import Image, ImageDraw
+
+    ids = sorted({int(value) for value in class_ids if int(value) >= 1})
+    if not ids:
+        return np.zeros((1, 1, 4), dtype=np.uint8)
+    scale = 1.0
+    font = plate_font(13)
+    title_font = plate_font(15)
+    swatch = 16
+    row = 22
+    width = 150
+    height = 26 + row * len(ids)
+    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+    draw = ImageDraw.Draw(canvas)
+    draw.text((2, 2), "Land cover", fill=(54, 54, 60), font=title_font)
+    for index, class_id in enumerate(ids):
+        y = 26 + index * row
+        colour = CLASSIFICATION_PALETTE[min(class_id, len(CLASSIFICATION_PALETTE)) - 1]
+        draw.rectangle([2, y, 2 + swatch, y + swatch], fill=tuple(colour), outline=(150, 150, 150))
+        label = CLASSIFICATION_LABELS[
+            min(class_id, len(CLASSIFICATION_LABELS)) - 1
+        ]
+        draw.text((2 + swatch + 8, y + 1), label, fill=(72, 72, 78), font=font)
+    return np.asarray(canvas)
 
 
 def compose_plate(
@@ -1195,6 +1263,67 @@ CLASSIFICATION_PALETTE = [
     (90, 190, 170),
     (210, 120, 160),
     (120, 120, 120),
+]
+
+#: A raster pixel darker than this in every channel is nodata — the gallery
+#: land-cover recipe's own rule (LANDCOVER_INVALID_CHANNEL_MAX).
+INVALID_CHANNEL_MAX = 15.0
+#: How close (in 0-255 units) a pixel's colour has to be to a palette entry
+#: for the raster to count as a class map rather than an image.
+CLASS_SNAP_TOLERANCE = 48.0
+#: The share of valid pixels that have to snap before the raster is treated as
+#: a class map.
+CLASS_SNAP_SHARE = 0.8
+
+
+def snap_to_classes(rgb: np.ndarray):
+    """Snap a class map's colours to the land-cover palette.
+
+    A land-cover export is often an *image* of the classes rather than class
+    IDs: the gallery's own recipe snaps each pixel to the nearest palette
+    entry (`snap_overlay_to_legend`). This does the same, and returns the class
+    IDs so the plate can name them.
+
+    It only applies when the raster really is a class map: at least
+    CLASS_SNAP_SHARE of the valid pixels have to be close to a palette colour.
+    An orthophoto is not a class map and is left alone.
+    """
+    valid = rgb.max(axis=2) > INVALID_CHANNEL_MAX
+    if not valid.any():
+        return None, []
+    palette = np.asarray(CLASSIFICATION_PALETTE, dtype=np.float32)
+    flat = rgb[valid]
+    distances = np.sqrt(((flat[:, None, :] - palette[None, :, :]) ** 2).sum(axis=2))
+    nearest = distances.argmin(axis=1)
+    closest = distances[np.arange(len(nearest)), nearest]
+    # Only the *named* classes count towards the share: the spare palette
+    # entries are greys and violets, and an orthophoto is full of those. A
+    # class map is mostly made of the named classes.
+    named = nearest < len(CLASSIFICATION_LABELS) - 4
+    share = float(((closest <= CLASS_SNAP_TOLERANCE) & named).mean())
+    if share < CLASS_SNAP_SHARE:
+        return None, []
+    classes = np.zeros(rgb.shape[:2], dtype=np.int32)
+    classes[valid] = nearest + 1
+    return classes, sorted({int(value) for value in np.unique(classes[valid])})
+
+
+#: The class names the land-cover palette implies. The drape paints class 1 as
+#: water, 2 as trees and so on, so the legend names the same classes the
+#: colours already stand for.
+CLASSIFICATION_LABELS = [
+    "Water",
+    "Trees",
+    "Flooded vegetation",
+    "Crops",
+    "Built area",
+    "Bare ground",
+    "Snow",
+    "Rangeland",
+    "Class 9",
+    "Class 10",
+    "Class 11",
+    "Class 12",
 ]
 
 #: A single-band classification's salt-and-pepper, with the gallery land-cover
