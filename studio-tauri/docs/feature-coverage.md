@@ -1,0 +1,141 @@
+# Feature coverage: what Forge3D can do, and what Studio brings of it
+
+The engine's own inventory is `docs/guides/feature_map.md` (its workflows, not
+its module layout). This page is the other half: for each workflow, what the
+Studio exposes, what it cannot reach, and why. It is the answer to "are all
+Forge3D's features brought to Studio?" — the honest answer is *no, and here is
+exactly which ones and what each one costs*.
+
+Two rules govern the table:
+
+* **A control must change pixels.** A parameter measured at 0 changed samples
+  on Studio's render path is not exposed; the audit gate
+  (`tests/test_studio_surface_audit.py`) keeps the model free of them.
+* **A shell must not re-implement an engine mechanism.** Where the engine has
+  a path, Studio uses it (supersampling is `render_scale`, the class palette is
+  `thematic.apply_palette`, the camera is `camera_render_view`, the plate's
+  legend is `forge3d.legend.Legend`).
+
+## 1. The stage
+
+| Phase | What it was | State |
+|---|---|---|
+| 0–2 | Shell, project model, Solid viewport | done |
+| 3 | Workspace switching | dropped on purpose (rendering lives in the viewport) |
+| 4–7 | Rendered mode, materials, timeline, hardening | done |
+| 8–9 | Engine facts in the probe, sun from date/place | done |
+| 10 | AOV + OIDN final stills | done |
+| 11 | Colormaps, sun visibility, vertical scale, despeckle | done |
+| 12 | Map plate, map furniture, categorical legend | done |
+| 13 | The map look (one button), the release audit as a CI gate | done |
+| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | **next** |
+| 15 | Convergence on `MapScene` as the scene model | design increment, trigger-gated |
+
+Studio exposes **68 controls** over 28 render settings, the scene model
+(terrain, mesh, camera, light), the timeline and the map plate. The engine's
+public Python surface is **381 names**; the table below is the honest
+breakdown of what a *terrain and cartography studio* needs from those.
+
+## 2. The inventory
+
+| Engine workflow (from its feature map) | Studio | Note |
+|---|---|---|
+| Interactive terrain viewing | **own path** | Studio's viewport is three.js; the still is the engine's offscreen terrain pass |
+| Terrain inputs (`mini_dem`, `fetch_dem`, datasets, COG) | partial | local GeoTIFF only; no dataset fetching, no COG streaming |
+| Raster overlays (`ViewerHandle.load_overlay`) | **full** | the drape, in the Material preview and in Rendered, at the source's resolution |
+| Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
+| Vector overlays and labels | **none** | the offscreen path has no vector geometry (0 changed samples, measured) |
+| Picking and selection | partial | the Solid view picks objects; the engine's terrain picking is not used |
+| Point clouds | none | a different product tier |
+| Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |
+| Terrain quality controls (`terrain_params`, `presets`) | partial | 28 settings are wired; the engine's presets are not exposed |
+| Water surfaces and optics | **full** | the mask, the physical surface, the roughness |
+| Native/offscreen rendering | **full** | `TerrainRenderer.render_terrain_pbr_pom` |
+| Reference-scene matching (`recover_scene`) | none | a research tool |
+| Typed map scenes (`MapScene`, `LabelLayer`, buildings, 3D Tiles) | **none** | the phase-14/15 target |
+| Geographic preparation (`PreparationRecipe`) | none | the engine prepares; Studio opens what is prepared |
+| Ordered map composition (`MapScene.render_passes`) | none | the plate is a Studio-side composite |
+| Geometry, mesh, vector, SDF, path tracing | none | tier-2 (different products) |
+| Device and memory diagnostics | **full** | the probe and the status bar |
+| Map plates and furniture (`MapPlate`, `Legend`, `ScaleBar`, `NorthArrow`) | **own plate** | `MapPlate` is Pro-gated, so Studio composes its own page from the engine's `Legend` |
+| Linked publications, vector export, buildings, Mapbox styles, bundles | none | Pro or tier-2 |
+
+## 3. The tools that are not connected
+
+Each of these is a place where the Studio shows something the engine never
+sees. They are the reason the app feels loose.
+
+1. **Object animation does not reach the render.** The timeline can key any
+   object's nine transform channels, but only the camera path and the camera's
+   field of view are sent to the engine; a keyed mesh never appears in the
+   exported frames (meshes do not reach Rendered yet — the capability table
+   says so). *Fix:* either ship meshes in Rendered (phase 15), or mark
+   non-camera channels as preview-only in the timeline.
+2. **The Material preview is never shadowed.** The viewport's sun has a full
+   shadow rig configured and then `castShadow = false`, so the preview shows a
+   flat-lit map while the still carries the ray-marched hillshade the map look
+   turns on. *Fix:* one line plus an acne check, or an honest note in the panel.
+3. **The preview and the still are two renderers.** They agree on the lighting
+   rig, the exposure and the tone-map by construction, but the engine's terrain
+   shading (triplanar layers, AO, sun visibility, shadows) only exists in the
+   still. The ramp and the drape *are* in both (that is why Phase 8 put the
+   ramp in the preview).
+4. **The Studio has its own scene model and camera mapping.** The camera's
+   Solid-to-renderer mapping is implemented twice — `viewMath.computeRenderView`
+   in TypeScript and `workspace::compute_render_view` in Rust — and pinned to
+   one shared golden vector so the two cannot drift. Duplication, but a
+   *checked* one.
+5. **The Studio README links to an untracked file.** `studio-tauri/README.md`
+   points at `../FORGE3D_STUDIO_IMPLEMENTATION_PLAN.md`, which was not in the
+   repository: the plan the product is built from was invisible to anyone who
+   cloned it. Now tracked.
+
+## 4. Cleanup
+
+Done in this pass:
+
+* the dead ambient-occlusion control (0 changed samples, 2 s per frame) —
+  deleted, not documented;
+* the zScale and frame-size ranges the engine refuses — the model now
+  rejects them like the engine does;
+* the duplicated camera mapping — kept, but pinned by a golden vector instead
+  of by convention;
+* the plan file the README links to — tracked.
+
+Still open, in order of value:
+
+* the **Material preview's shadows** (a flat preview against a shadowed still);
+* the **timeline's preview-only channels** (a control that cannot reach the
+  output);
+* the engine's **presets** and **dataset fetching** (Studio opens what is
+  prepared; the engine can fetch it);
+* the studio's own **plate compositor** versus the engine's Pro `MapPlate` —
+  documented, and the reason the plate is not in the Pro tier.
+
+## 5. The phases
+
+**Phase 14 — the engine's cartographic tier.** The rails are the user's own
+example and the largest remaining gap: the viewer draws vector overlays
+(`src/viewer/terrain/vector_overlay.rs`), the offscreen path cannot. The work
+is one overlay pass in the offscreen renderer (geometry buffers, drape from the
+height texture, depth test, halo), measured the way everything else here is
+measured. *Trigger:* the rail example, which is already in the assets
+(`assets/gpkg/luxembourg_rail.gpkg`, 2,031 features, EPSG:4326, the same CRS
+as the DEM — readable with the standard library's `sqlite3`).
+
+**Phase 15 — converge on `MapScene`.** The engine's typed map scene carries
+labels, buildings, 3D Tiles, furniture, graticules and bundles; Studio has its
+own model and its own service. Every cartographic feature added to Studio's
+own model is a second implementation. The convergence is the only way the
+cartographic tier grows without doubling. *Trigger:* the first vector layer
+landing (phase 14).
+
+**Phase 16 — the preview matches the still.** The preview's shadows, the
+hillshade and the plate's crop in the viewport, so authoring shows the output.
+
+**Phase 17 — the engine's inputs.** Dataset fetching, the engine's presets,
+COG streaming: Studio opens what the engine can fetch.
+
+**Not planned:** path tracing, splats, inverse rendering, point clouds,
+volumetrics, the globe. Different product tiers, and the roadmap's §8 already
+says so.

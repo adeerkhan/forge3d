@@ -440,6 +440,13 @@ export function Timeline() {
           </button>
         )}
       </div>
+      {selected && selected.kind.type !== "camera" && (
+        <p className="hint hint--warn">
+          Only the camera&apos;s keys reach the exported frames: a keyed
+          {selected.kind.type === "terrain" ? " terrain's" : " object&apos;s"} motion
+          is preview-only until meshes reach Rendered.
+        </p>
+      )}
 
       {!camera && (
         <p className="hint hint--warn">
