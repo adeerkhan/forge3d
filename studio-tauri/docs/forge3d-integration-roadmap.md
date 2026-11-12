@@ -61,6 +61,7 @@ be a payload field: vector layers and meshes.
 | 5.21 the interactive path's stale shader contract | repaired (measured; not a swap) |
 | 5.22 vector layers — the rail network on the terrain | done (lines; labels next) |
 | 5.23 vector labels — the engine's own text compositor | done (labels; furniture next) |
+| 5.24 the cartography workspace — the map as a layer stack | done (the stack; the engine's MapScene next) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -703,6 +704,42 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   (the accepted label, its bounds, a rejected name), the model's label
   defaults and refusals, the payload, and an end-to-end engine test that the
   labels reach the pixels (`the_vector_labels_reach_the_pixels`).
+
+### 5.24 The cartography workspace — the map as a layer stack (2 days) — **done**
+- **The map's decisions had three homes**: the terrain object's draped raster
+  and its vector layer, and the render settings' colormap and plate. A map is
+  not three things; it is a stack. The studio now has one: `Project::cartography`,
+  an ordered list of layers (relief → elevation ramp → imagery → vector layers
+  → label layers → plate), each with a kind, a name, an eye and its own style.
+  The v4→v5 migration moves the old fields into layers, so a reopened map
+  looks the way it was left.
+- **The Studio has a Cartography workspace**: a Photoshop-like layer panel on
+  the left (the eye, a swatch of what the layer draws, the name, the kind, and
+  the draw order), the map in the middle, and the selected layer's properties
+  on the right. The TopBar switches between the scene and the cartography.
+- **The renderer draws the stack back to front**, and the stack is the only
+  thing the render request carries: `cartography` replaces the request's
+  `overlay`, `vector`, `colormap`, `legend`, `plate` and `plateTitle` keys.
+  Two layers of the same kind now stack (two vector layers, two label layers),
+  and a hidden layer is simply not drawn.
+- **Measured** (Mount Fuji 30 m DEM, 900×700, 12 km radius): the relief alone
+  → the relief plus the elevation ramp: **1,680,769** changed samples (mean
+  42.772); the ramp's eye off → back to the relief (1,680,769); the full stack
+  (relief + ramp + vector + labels): **1,681,037** (mean 44.062); the label
+  layer's eye off: **55,547** (mean 2.403).
+- **The engine's one terrain-overlay slot is now the stack's business**: the
+  elevation ramp and the draped imagery both need it, so the uppermost visible
+  one wins and the service *reports* the other ("the elevation ramp is hidden
+  under the imagery: the engine composites one terrain overlay per frame")
+  instead of dropping it silently.
+- **Still open**: the layer stack is the studio's own model, not MapScene's
+  recipe — the shapes now match, so the convergence is a mapping rather than a
+  rewrite, but it is not done. Furniture, polygons and a legend for the
+  vector's attributes are still the rest of the tier.
+- Check: the model's own tests (add, remove, move, edit, undo, the ranges),
+  the migration (a v4 document becomes a stack), the payload (the stack, with
+  every layer's own settings), the wire shapes, and the end-to-end engine
+  tests that the ramp, the vector layer and the labels reach the pixels.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
