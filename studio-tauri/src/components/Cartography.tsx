@@ -146,7 +146,7 @@ function AddLayer() {
               type="button"
               onClick={() => void actions.addLabelLayer(vectors[0].id, "name")}
             >
-              Labels (of {vectors[0].name})
+              Labels…
             </button>
           )}
           <button type="button" onClick={() => void actions.addRampLayer("viridis")}>

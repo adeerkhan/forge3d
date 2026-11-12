@@ -1550,7 +1550,7 @@ def read_vector_features(path: str, label_field: str = ""):
 
     Returns `(lines, points, crs)`:
 
-    * `lines` — the polylines, as `read_vector_lines` returns them;
+    * `lines` — the polylines, in the file's own coordinates;
     * `points` — `(id, x, y, text)` for the point features that carry a
       non-empty value in `label_field`; the text is what a label would say,
       and a file without that attribute simply has no points;
@@ -1570,7 +1570,7 @@ def read_vector_features(path: str, label_field: str = ""):
             document = json.load(handle)
         lines: list[list[tuple[float, float]]] = []
         points: list[tuple[str, float, float, str]] = []
-        crs = None
+        crs = geojson_crs(document)
         for index, feature in enumerate(document.get("features", []) or []):
             geometry = feature.get("geometry") or {}
             kind = str(geometry.get("type", "")).lower()
@@ -1654,6 +1654,40 @@ def read_vector_features(path: str, label_field: str = ""):
         connection.close()
 
 
+def geojson_crs(document) -> Optional[str]:
+    """The CRS a GeoJSON declares, as an EPSG string.
+
+    RFC 7946 says a GeoJSON's coordinates are WGS 84 longitude/latitude, so a
+    document with no `crs` member is EPSG:4326. The old `crs` member (GeoJSON
+    2008) may name another system; the engine's own parser reads it, so the
+    studio never grows a second CRS grammar.
+    """
+    declared = document.get("crs")
+    name = None
+    if isinstance(declared, str):
+        name = declared
+    elif isinstance(declared, dict):
+        properties = declared.get("properties")
+        if isinstance(properties, dict):
+            name = properties.get("name")
+        elif declared.get("name"):
+            name = declared.get("name")
+    if not name:
+        # RFC 7946: no member means WGS 84 longitude/latitude.
+        return "EPSG:4326"
+    try:
+        from forge3d import gis
+
+        parsed = gis.parse_crs(str(name))
+    except Exception:  # noqa: BLE001 - an unreadable CRS is an unknown CRS
+        return None
+    authority = parsed.get("authority") if isinstance(parsed, dict) else None
+    code = authority.get("code") if isinstance(authority, dict) else None
+    if not code:
+        return None
+    return "EPSG:%s" % code
+
+
 def _feature_text(feature, field: str) -> str:
     """A feature's value in `field`, or "" when it has none."""
     if not field:
@@ -1666,18 +1700,6 @@ def _feature_text(feature, field: str) -> str:
     if value is None:
         return ""
     return str(value).strip()
-
-
-def read_vector_lines(path: str):
-    """The polylines of a vector file, in the file's own coordinates.
-
-    Returns `(lines, crs)` where `crs` is the file's CRS (an EPSG string for a
-    GeoPackage, whatever the GeoJSON says) or `None` when the file declares
-    none. A GeoPackage's CRS comes from `gpkg_geometry_columns`; a GeoJSON's
-    is only trusted when it names one.
-    """
-    lines, _points, crs = read_vector_features(path)
-    return lines, crs
 
 
 def crs_code(crs) -> str:

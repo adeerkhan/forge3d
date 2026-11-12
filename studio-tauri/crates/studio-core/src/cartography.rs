@@ -120,14 +120,6 @@ impl CartographyLayerKind {
         }
     }
 
-    /// The layer kinds that share the engine's one terrain-overlay slot.
-    pub fn uses_the_terrain_overlay_slot(&self) -> bool {
-        matches!(
-            self,
-            CartographyLayerKind::ElevationRamp { .. } | CartographyLayerKind::Imagery { .. }
-        )
-    }
-
     /// Whether the layer's values are inside the ranges the engine takes.
     pub fn validate(&self) -> Result<(), String> {
         match self {
@@ -284,23 +276,5 @@ mod tests {
         }
         .validate()
         .is_err());
-    }
-
-    #[test]
-    fn the_ramp_and_the_imagery_share_the_engine_overlay_slot() {
-        assert!(CartographyLayerKind::ElevationRamp {
-            colormap: "viridis".to_owned(),
-            strength: 1.0,
-            legend: false,
-        }
-        .uses_the_terrain_overlay_slot());
-        assert!(CartographyLayerKind::Imagery {
-            asset: new_id(),
-            opacity: 0.8,
-            preserve_colors: false,
-            despeckle: false,
-        }
-        .uses_the_terrain_overlay_slot());
-        assert!(!CartographyLayerKind::Relief.uses_the_terrain_overlay_slot());
     }
 }

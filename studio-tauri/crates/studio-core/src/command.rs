@@ -1027,7 +1027,13 @@ impl Command {
             }
 
             Command::AddCartographyLayer { layer, index } => {
-                let layer = layer.clone();
+                let mut layer = layer.clone();
+                if layer.id.is_nil() {
+                    // A layer without an id gets one: the id is what the stack
+                    // is keyed by, and a duplicate would make the second layer
+                    // of a kind impossible to add.
+                    layer.id = new_id();
+                }
                 layer
                     .validate()
                     .map_err(|reason| CommandError::invalid("cartography layer", reason))?;

@@ -1,4 +1,5 @@
 import { useSession } from "../state/session-context";
+import { vectorLayers } from "../state/cartography";
 import type { CartographyLayer } from "../bridge/types";
 import { ChoiceField, NumberField, Section, TextField, Toggle } from "./fields";
 
@@ -111,6 +112,22 @@ export function CartographyProperties() {
         )}
         {layer.type === "labels" && (
           <>
+            <ChoiceField
+              label="Names the features of"
+              value={layer.source ?? ""}
+              options={[
+                ...vectorLayers(state?.project).map((entry) => ({
+                  value: entry.id,
+                  label: entry.name,
+                })),
+              ]}
+              onChange={(source) => update({ source })}
+              hint={
+                vectorLayers(state?.project).length === 0
+                  ? "Add a vector layer first: the labels name its features."
+                  : undefined
+              }
+            />
             <TextField
               label="Label field"
               value={layer.field ?? ""}

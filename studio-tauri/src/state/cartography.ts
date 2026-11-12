@@ -10,7 +10,7 @@ import type { CartographyLayer, Project } from "../bridge/types";
  */
 
 /** The visible layers, in draw order. */
-export function visibleLayers(project: Project | null | undefined): CartographyLayer[] {
+function visibleLayers(project: Project | null | undefined): CartographyLayer[] {
   return (project?.cartography ?? []).filter((layer) => layer.visible);
 }
 
@@ -20,18 +20,13 @@ export function topRamp(project: Project | null | undefined): CartographyLayer |
   return ramps.length > 0 ? ramps[ramps.length - 1] : null;
 }
 
-/** The topmost visible imagery layer, or null. */
-export function topImagery(project: Project | null | undefined): CartographyLayer | null {
-  const layers = visibleLayers(project).filter((layer) => layer.type === "imagery");
-  return layers.length > 0 ? layers[layers.length - 1] : null;
-}
-
 /** The visible vector layers, in draw order. */
 export function vectorLayers(project: Project | null | undefined): CartographyLayer[] {
   return visibleLayers(project).filter((layer) => layer.type === "vector");
 }
 
-/** The visible label layers, in draw order. */
-export function labelLayers(project: Project | null | undefined): CartographyLayer[] {
-  return visibleLayers(project).filter((layer) => layer.type === "labels");
+/** The topmost visible imagery layer, or null. */
+export function topImagery(project: Project | null | undefined): CartographyLayer | null {
+  const layers = visibleLayers(project).filter((layer) => layer.type === "imagery");
+  return layers.length > 0 ? layers[layers.length - 1] : null;
 }

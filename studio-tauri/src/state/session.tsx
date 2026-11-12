@@ -597,37 +597,36 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
+  // A layer's id is minted here: the command refuses a duplicate id, so a
+  // second elevation ramp (or plate, or label layer) needs its own.
   const addCartographyLayer = useCallback(
     async (layer: CartographyLayer, index?: number) => {
-      await applyCommand({ type: "addCartographyLayer", layer, index });
-      setSelectedLayerId(layer.id);
+      const added = { ...layer, id: layer.id || crypto.randomUUID() };
+      await applyCommand({ type: "addCartographyLayer", layer: added, index });
+      setSelectedLayerId(added.id);
     },
     [applyCommand],
   );
 
   const addRampLayer = useCallback(
     async (colormap: string) => {
-      const layer: CartographyLayer = {
-        id: "",
+      await addCartographyLayer({
+        id: crypto.randomUUID(),
         name: "Elevation ramp",
         visible: true,
         type: "elevationRamp",
         colormap,
         strength: 1,
         legend: false,
-      };
-      // The id is the shell's: the command refuses a duplicate, and the
-      // engine's ids are UUIDs the shell cannot mint, so the command fills
-      // one in when the layer arrives without it.
-      await applyCommand({ type: "addCartographyLayer", layer });
+      });
     },
-    [applyCommand],
+    [addCartographyLayer],
   );
 
   const addPlateLayer = useCallback(
     async (title: string) => {
-      const layer: CartographyLayer = {
-        id: "",
+      await addCartographyLayer({
+        id: crypto.randomUUID(),
         name: "Map plate",
         visible: true,
         type: "plate",
@@ -635,16 +634,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         northArrow: true,
         scaleBar: true,
         legend: true,
-      };
-      await applyCommand({ type: "addCartographyLayer", layer });
+      });
     },
-    [applyCommand],
+    [addCartographyLayer],
   );
 
   const addLabelLayer = useCallback(
     async (source: string, field: string) => {
-      const layer: CartographyLayer = {
-        id: "",
+      await addCartographyLayer({
+        id: crypto.randomUUID(),
         name: "Labels",
         visible: true,
         type: "labels",
@@ -652,10 +650,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         field,
         colour: [0.08, 0.08, 0.1, 1],
         sizePx: 14,
-      };
-      await applyCommand({ type: "addCartographyLayer", layer });
+      });
     },
-    [applyCommand],
+    [addCartographyLayer],
   );
 
   const updateCartographyLayer = useCallback(

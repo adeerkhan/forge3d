@@ -120,13 +120,6 @@ export interface CartographyLayer {
   scaleBar?: boolean;
 }
 
-export interface TerrainOverlay {
-  asset: string;
-  opacity: number;
-  preserveColors: boolean;
-  /** Clean a single-band class raster's salt-and-pepper before paletting. */
-  despeckle: boolean;
-}
 
 /** Internally tagged enum: the payload is flattened next to `type`. */
 export type ObjectKind =

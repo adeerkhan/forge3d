@@ -305,6 +305,21 @@ impl Project {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        // The map's layers carry the ranges the renderer takes: a project file
+        // edited by hand must not smuggle a width the rasterizer refuses.
+        for layer in &self.cartography {
+            layer
+                .validate()
+                .map_err(|reason| format!("cartography layer: {reason}"))?;
+            if let Some(asset) = layer.kind.asset() {
+                if self.asset(asset).is_none() {
+                    return Err(format!(
+                        "the cartography layer {:?} references missing asset {}",
+                        layer.name, asset
+                    ));
+                }
+            }
+        }
         if self.format != FORMAT {
             return Err(format!(
                 "format tag is {:?}, expected {FORMAT:?}",

@@ -657,7 +657,7 @@ def test_the_vector_reader_reads_a_geopackage_without_a_third_party_package():
     studio's environment has no geopandas, fiona or pyproj (verified)."""
     service = load_service()
     path = Path(__file__).resolve().parents[1] / "assets/gpkg/luxembourg_rail.gpkg"
-    lines, crs = service.read_vector_lines(str(path))
+    lines, points, crs = service.read_vector_features(str(path), "name")
     assert crs == "EPSG:4326"
     assert len(lines) > 2000, "the rail network has 2,035 features"
     points = [point for line in lines for point in line]
@@ -672,7 +672,7 @@ def test_the_vector_reader_reads_a_geopackage_without_a_third_party_package():
 def test_the_vector_reader_rejects_a_file_it_cannot_read():
     service = load_service()
     with pytest.raises(RuntimeError, match="GeoPackage"):
-        service.read_vector_lines("definitely-not-a-vector.tif")
+        service.read_vector_features("definitely-not-a-vector.tif")
 
 
 def test_the_vector_legend_names_the_layer():

@@ -134,3 +134,88 @@ def test_the_model_carries_no_parameter_the_engine_ignores() -> None:
         "these settings were measured at 0 changed samples on Studio's render "
         f"path, so they must not be exposed: {offenders}"
     )
+
+
+# --------------------------------------------------------------- dead code
+#
+# A helper nobody calls is not a helper: it is a promise the code does not
+# keep, and it is how an increment grows a second implementation of something
+# that already exists. The scan is text-level (the shell is TypeScript,
+# Python and Rust, not a compiled library), so it looks for a *reference*
+# rather than proving a call.
+
+SHELL = ROOT / "studio-tauri"
+
+
+def _shell_sources() -> list[Path]:
+    """The studio's sources plus the tests that drive them."""
+    sources = [
+        path
+        for folder in ("src", "src-tauri/src", "crates")
+        for path in (SHELL / folder).rglob("*")
+        if path.suffix in {".ts", ".tsx", ".py", ".rs"}
+    ]
+    sources += [
+        path
+        for path in (ROOT / "tests").glob("test_studio_*.py")
+        if path.is_file()
+    ]
+    return sorted(sources)
+
+
+def _definitions(path: Path, text: str) -> list[tuple[str, int]]:
+    """The helper names a file declares, with the line each is declared on."""
+    if path.suffix in {".ts", ".tsx"}:
+        pattern = r"^export (?:async )?(?:function|const) ([A-Za-z_][A-Za-z0-9_]*)"
+    elif path.suffix == ".py":
+        # The service's public helpers (a leading underscore means it is
+        # internal to the module).
+        pattern = r"^def ([a-z][A-Za-z0-9_]*)\("
+    else:
+        pattern = r"^\s*pub fn ([a-z_][A-Za-z0-9_]*)"
+    found = []
+    for index, line in enumerate(text.splitlines()):
+        match = re.match(pattern, line)
+        if match:
+            name = match.group(1)
+            if path.suffix == ".py" and name.startswith("_"):
+                continue
+            found.append((name, index))
+    return found
+
+
+def test_no_dead_helpers_in_the_shell() -> None:
+    """Every helper the studio declares has a caller.
+
+    A declaration that nothing else mentions is dead code: the rule is to
+    delete it, not to document it. The scan is text-level, so it errs on the
+    side of listing — a name that appears anywhere else (a call, a test, a
+    doc) counts as alive.
+    """
+    sources = _shell_sources()
+    texts = {path: path.read_text(encoding="utf-8") for path in sources}
+    dead: list[str] = []
+
+    for path, text in texts.items():
+        if path.parent == ROOT / "tests":
+            # The tests are the callers, not the scanned code (pytest calls
+            # them by name, so they have no textual reference).
+            continue
+        for name, index in _definitions(path, text):
+            pattern = re.compile(rf"\b{re.escape(name)}\b")
+            mentions = 0
+            for other, other_text in texts.items():
+                for number, line in enumerate(other_text.splitlines()):
+                    if other == path and number == index:
+                        # The declaration itself.
+                        continue
+                    if pattern.search(line):
+                        mentions += 1
+                        break
+            if mentions == 0:
+                dead.append(f"{path.relative_to(ROOT)}:{index + 1}: {name}")
+
+    assert not dead, (
+        "these helpers have no caller anywhere, so they are dead code: "
+        f"{sorted(dead)}"
+    )
