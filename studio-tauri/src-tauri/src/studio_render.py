@@ -208,7 +208,9 @@ class StudioRenderer:
         self.materials = f3d.MaterialSet.terrain_default()
         self.size: Optional[tuple[int, int]] = None
 
-    def quality_frame(self, params, ibl, water_mask, quality, output=None):
+    def quality_frame(
+        self, params, ibl, water_mask, quality, output=None, cartography=None
+    ):
         """The frame through the engine's quality surface.
 
         The CONCORDIA path carries the screen-space effects — the cloud
@@ -225,11 +227,16 @@ class StudioRenderer:
         from forge3d.terrain_params import ScreenSpaceSettings
 
         # A viewport frame is one sample: the temporal history converges as
-        # the camera moves. A still averages several, so it carries the same
-        # smoothness the plain path's supersampling gave it.
-        samples = 1 if not output else 4
+        # the camera moves. A still renders a short sequence and keeps the
+        # converged frame — the engine's own convention for a temporally
+        # filtered image (its recipe goldens warm the history the same way).
+        samples = 1 if not output else 3
         clouds = cloud_settings(quality.get("clouds"))
         frames = []
+        # The engine's GPU cartography: the lines and the labels are drawn by
+        # the engine, in the terrain's own pass, so the ground occludes them.
+        label_batches = getattr(cartography, "label_batches", None) or []
+        vector_batches = getattr(cartography, "vector_batches", None) or []
         for _ in range(samples):
             frame = self.renderer.render_interactive(
                 self.materials,
@@ -238,11 +245,15 @@ class StudioRenderer:
                 self.heights,
                 water_mask=water_mask,
                 clouds=clouds,
+                label_batches=label_batches or None,
+                vector_batches=vector_batches or None,
             )
             frames.append(np.asarray(frame.to_numpy())[:, :, :3].astype(np.float32))
-        if len(frames) == 1:
-            return frames[0].astype(np.uint8)
-        return np.clip(np.rint(np.mean(np.stack(frames), axis=0)), 0, 255).astype(np.uint8)
+        # The last frame is the converged one: the temporal filter keeps
+        # folding the jittered samples into its history (measured on the Mount
+        # Fuji frame: the edge energy falls 3.063 -> 2.558 -> 2.295 over three
+        # frames, against the plain path's 2.582).
+        return frames[-1].astype(np.uint8)
 
     def environment_map(self, path: Optional[str]):
         """The IBL for one frame: the project's HDRI, or the built-in studio sky.
@@ -888,6 +899,18 @@ class StudioRenderer:
         settings.shadows.normal_bias = 0.00001
 
         params = f3d.TerrainRenderParams(settings)
+        # The map's cartography, prepared for whichever path draws it: the
+        # engine's GPU batches (the lines and the labels drawn in the terrain's
+        # own pass) and the numpy overlays the plain path composites.
+        cartography = prepare_cartography(
+            params,
+            visible,
+            width,
+            height,
+            self.dem_bounds,
+            self.heights,
+            self.dem_crs,
+        )
         if want_aov or want_denoise:
             # The engine's AOV renderer is the plain path: it has no quality
             # surface, so the AOV/denoise finals cannot carry the screen-space
@@ -898,10 +921,21 @@ class StudioRenderer:
             image = np.asarray(frame.to_numpy())
             render_path = "plain"
         else:
-            image = self.quality_frame(params, ibl, water_mask, quality, output_path)
+            image = self.quality_frame(
+                params,
+                ibl,
+                water_mask,
+                quality,
+                output_path,
+                cartography=cartography,
+            )
             aov_frame = None
             render_path = "concordia"
         rgb = image[:, :, :3].astype(np.uint8)
+        if render_path == "plain":
+            # The plain path has no GPU cartography: the overlays are
+            # composited over the frame here.
+            rgb = cartography.composite_overlays(rgb)
 
         if want_denoise:
             albedo = aov_frame.albedo() if aov_frame is not None and aov_frame.has_albedo else None
@@ -924,100 +958,6 @@ class StudioRenderer:
                     "denoise requested but the OIDN runtime is not available or failed: %s "
                     "(install it with `pip install oidn` / `pip install pyoidn` next to the engine)" % (exc,)
                 ) from exc
-
-        # The map's vector layers, in draw order: each one's lines are
-        # draped on the terrain and rasterized by the engine.
-        vector_layers = [
-            layer for layer in visible if str(layer.get("type", "")) == "vector"
-        ]
-        label_layers = [
-            layer for layer in visible if str(layer.get("type", "")) == "labels"
-        ]
-        dem_code = crs_code(self.dem_crs)
-        for vector in vector_layers:
-            lines, _points, vector_crs = read_vector_features(str(vector["path"]), "")
-            file_code = crs_code(vector_crs)
-            if dem_code and file_code and dem_code != file_code:
-                raise RuntimeError(
-                    "the vector file is in EPSG:%s and the DEM in EPSG:%s; "
-                    "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
-                )
-            # The width is a cartographic symbol width in pixels: a real rail
-            # is sub-pixel at a country-scale framing (62 m per pixel on a
-            # 65 km DEM at 900 px), so a physical width could not change the
-            # picture at all. The rasterizer's own floor is one pixel: 0.5 and
-            # 1.0 px render identically (0 changed samples, measured), so the
-            # layer's range starts at 1 rather than offering an inert half.
-            stroke_px = max(1.0, float(vector.get("widthPx", 2.0) or 2.0))
-            vector_overlay = vector_overlay_rgba(
-                params,
-                self.heights,
-                self.dem_bounds,
-                lines,
-                width,
-                height,
-                colour=tuple(
-                    float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))
-                ),
-                stroke_px=stroke_px,
-            )
-            if vector_overlay is not None:
-                rgb = composite_overlay(rgb, vector_overlay)
-
-        # The label layers: the engine's own label plan places them and its
-        # text compositor draws them (the packaged MSDF atlas, the halo, the
-        # rasterizer).
-        for label_layer in label_layers:
-            field = str(label_layer.get("field", "") or "")
-            _lines, points, label_crs = read_vector_features(
-                str(label_layer["path"]), field
-            )
-            file_code = crs_code(label_crs)
-            if dem_code and file_code and dem_code != file_code:
-                raise RuntimeError(
-                    "the label file is in EPSG:%s and the DEM in EPSG:%s; "
-                    "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
-                )
-            if not points:
-                continue
-            label_colour = tuple(
-                float(c) for c in label_layer.get("colour", (0.08, 0.08, 0.1, 1.0))
-            )
-            # A halo in the opposite tone keeps the text readable on any
-            # ground: light text gets a dark halo and the other way round.
-            dark_text = sum(label_colour[:3]) / 3.0 < 0.5
-            halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
-            rgb, label_summary = compose_vector_labels(
-                rgb,
-                params,
-                self.heights,
-                self.dem_bounds,
-                points,
-                width,
-                height,
-                colour=label_colour,
-                size_px=float(label_layer.get("sizePx", 14.0) or 14.0),
-                halo_colour=halo,
-            )
-            if not label_summary["accepted"]:
-                # Say why the labels drew nothing: the engine rejected them
-                # (a name outside the packaged atlas, say), and a silent
-                # empty layer looks like a broken control.
-                reasons = ", ".join(
-                    "%s %d" % (reason, count)
-                    for reason, count in sorted(label_summary["rejected"].items())
-                )
-                print(
-                    json.dumps(
-                        {
-                            "event": "warning",
-                            "message": "the label layer drew nothing: %d features named, "
-                            "none accepted (%s)"
-                            % (label_summary["candidates"], reasons or "no reasons given"),
-                        }
-                    ),
-                    flush=True,
-                )
 
         rgb = apply_post_effects(rgb, quality)
         legend_name = str(ramp_layer.get("colormap", "") or "").strip() if ramp_layer else ""
@@ -1113,6 +1053,9 @@ class StudioRenderer:
             # Which engine path made the frame: the quality surface carries the
             # screen-space effects, the plain path is the AOV renderer's.
             "renderPath": render_path,
+            # The quality surface is temporally filtered (the engine's TAA), so
+            # its frame is the converged one; the plain path is byte-stable.
+            "temporal": render_path != "plain",
             "png": base64.b64encode(png).decode("ascii"),
         }
 
@@ -1961,71 +1904,186 @@ def cloud_settings(payload) -> Optional[Any]:
     )
 
 
-def compose_vector_labels(
-    rgb,
+class PreparedCartography:
+    """The map's cartography, prepared for the renderer that will draw it.
+
+    Two forms of the same map: the engine's GPU batches (the lines and the
+    labels drawn by the engine, in the terrain's own pass, with the terrain's
+    depth) and the numpy overlays the plain path composites over the frame.
+    """
+
+    def __init__(self) -> None:
+        # The numpy path: the vector coverages and the label plans.
+        self.vector_overlays: List[Any] = []
+        self.label_plans: List[Any] = []
+        # The engine's GPU path: the batches `render_interactive` takes.
+        self.vector_batches: List[Any] = []
+        self.label_batches: List[Any] = []
+
+    def composite_overlays(self, rgb: "np.ndarray") -> "np.ndarray":
+        """The cartography over a frame (the plain path's compositing)."""
+        import forge3d as f3d
+
+        for overlay in self.vector_overlays:
+            rgb = composite_overlay(rgb, overlay)
+        for layer, plan in self.label_plans:
+            rgb, _rendered = f3d.composite_label_layers(
+                rgb, [layer], {layer.layer_id: plan}
+            )
+        return rgb
+
+
+def prepare_cartography(
     params,
-    heights,
-    bounds,
-    points,
+    visible,
     width: int,
     height: int,
-    *,
-    colour=(0.08, 0.08, 0.1, 1.0),
-    size_px: float = 14.0,
-    halo_colour=(1.0, 1.0, 1.0, 0.8),
-    halo_width: float = 1.5,
+    bounds,
+    heights,
+    dem_crs,
 ):
-    """The engine's own label compositor over the frame.
+    """The map's vector layers and label layers, ready to draw.
 
-    Nothing here lays out glyphs: the engine's `LabelPlan.compile` places the
-    labels, resolves their collisions and shapes their glyphs, and the engine's
-    `composite_label_layers` draws them with the packaged MSDF atlas, the halo
-    and the rasterizer — the same stream `MapScene.render` uses. The studio
-    only supplies the features and the anchors its own camera projected.
-
-    The anchors are screen positions (the studio owns the camera), so the
-    records are the engine's screen-space label records.
+    The lines are draped on the terrain and rasterized by the engine's own
+    OIT bridge; the labels are placed by the engine's label plan and shaped
+    against its packaged atlas. The depth raster the engine draws with is the
+    terrain's own, so a line over the sky is dropped and the engine's GPU
+    cartography can depth-test the lines against the ground.
     """
     import numpy as np
 
-    anchors = vector_label_anchors(params, heights, bounds, points, width, height)
-    if not anchors:
-        return rgb, {"candidates": 0, "accepted": 0, "rejected": {}}
+    prepared = PreparedCartography()
+    vector_layers = [
+        layer for layer in visible if str(layer.get("type", "")) == "vector"
+    ]
+    label_layers = [
+        layer for layer in visible if str(layer.get("type", "")) == "labels"
+    ]
+    dem_code = crs_code(dem_crs)
+    depth = terrain_depth_raster(params, heights, width, height)
 
-    import forge3d as f3d
+    for vector in vector_layers:
+        lines, _points, vector_crs = read_vector_features(str(vector["path"]), "")
+        file_code = crs_code(vector_crs)
+        if dem_code and file_code and dem_code != file_code:
+            raise RuntimeError(
+                "the vector file is in EPSG:%s and the DEM in EPSG:%s; "
+                "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
+            )
+        # The width is a cartographic symbol width in pixels: a real rail is
+        # sub-pixel at a country-scale framing (62 m per pixel on a 65 km DEM
+        # at 900 px), so a physical width could not change the picture at all.
+        # The rasterizer's own floor is one pixel: 0.5 and 1.0 px render
+        # identically (0 changed samples, measured).
+        stroke_px = max(1.0, float(vector.get("widthPx", 2.0) or 2.0))
+        overlay = vector_overlay_rgba(
+            params,
+            heights,
+            bounds,
+            lines,
+            width,
+            height,
+            colour=tuple(
+                float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))
+            ),
+            stroke_px=stroke_px,
+            terrain_depth=depth,
+        )
+        if overlay is None:
+            continue
+        prepared.vector_overlays.append(overlay)
+        # The engine's GPU batch: the coverage plus the depth the lines are
+        # drawn at (the terrain's own, because the lines are draped on it).
+        batch = {
+            "rgba": np.ascontiguousarray(overlay, dtype=np.uint8),
+            "depth_test": depth is not None,
+            "layer": str(vector.get("name", "vector")),
+            "terrain_draped": True,
+        }
+        if depth is not None:
+            batch["depth"] = np.ascontiguousarray(depth, dtype=np.float32)
+        prepared.vector_batches.append(batch)
 
-    layer, plan = vector_label_plan(
-        vector_label_records(anchors),
-        width,
-        height,
-        colour=colour,
-        size_px=size_px,
-        halo_colour=halo_colour,
-        halo_width=halo_width,
-    )
-    rejected: Dict[str, int] = {}
-    for label in plan.rejected:
-        reason = str(getattr(label, "reason", "rejected"))
-        rejected[reason] = rejected.get(reason, 0) + 1
-    summary = {
-        "candidates": len(anchors),
-        "accepted": len(plan.accepted),
-        "rejected": rejected,
-    }
-    if not plan.accepted:
-        return rgb, summary
+    for label_layer in label_layers:
+        field = str(label_layer.get("field", "") or "")
+        _lines, points, label_crs = read_vector_features(
+            str(label_layer["path"]), field
+        )
+        file_code = crs_code(label_crs)
+        if dem_code and file_code and dem_code != file_code:
+            raise RuntimeError(
+                "the label file is in EPSG:%s and the DEM in EPSG:%s; "
+                "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
+            )
+        if not points:
+            continue
+        label_colour = tuple(
+            float(c) for c in label_layer.get("colour", (0.08, 0.08, 0.1, 1.0))
+        )
+        # A halo in the opposite tone keeps the text readable on any ground:
+        # light text gets a dark halo and the other way round.
+        dark_text = sum(label_colour[:3]) / 3.0 < 0.5
+        halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
+        anchors = vector_label_anchors(params, heights, bounds, points, width, height)
+        if not anchors:
+            continue
+        layer, plan = vector_label_plan(
+            vector_label_records(anchors),
+            width,
+            height,
+            colour=label_colour,
+            size_px=float(label_layer.get("sizePx", 14.0) or 14.0),
+            halo_colour=halo,
+        )
+        prepared.label_plans.append((layer, plan))
+        import forge3d as f3d
 
-    composited, rendered = f3d.composite_label_layers(
-        np.ascontiguousarray(rgb, dtype=np.uint8),
-        [layer],
-        {layer.layer_id: plan},
-    )
-    if not rendered:
-        return rgb, summary
-    pixels = np.asarray(composited)
-    if pixels.ndim != 3 or pixels.shape[2] < 3:
-        return rgb, summary
-    return np.ascontiguousarray(pixels[:, :, :3], dtype=np.uint8), summary
+        prepared.label_batches.extend(
+            f3d.label_batches([layer], {layer.layer_id: plan}, int(width), int(height))
+        )
+        if not plan.accepted:
+            # Say why the labels drew nothing: the engine rejected them (a name
+            # outside the packaged atlas, say), and a silent empty layer looks
+            # like a broken control.
+            counts: Dict[str, int] = {}
+            for label in plan.rejected:
+                reason = str(getattr(label, "reason", "rejected"))
+                counts[reason] = counts.get(reason, 0) + 1
+            reasons = ", ".join(
+                "%s %d" % (reason, count) for reason, count in sorted(counts.items())
+            )
+            print(
+                json.dumps(
+                    {
+                        "event": "warning",
+                        "message": "the label layer drew nothing: %d features named, "
+                        "none accepted (%s)"
+                        % (len(anchors), reasons or "no reasons given"),
+                    }
+                ),
+                flush=True,
+            )
+    return prepared
+
+
+def terrain_depth_raster(params, heights, width: int, height: int):
+    """The terrain's depth for the frame, in the engine's own normalized depth.
+
+    The engine rasterizes the DEM's depth with the same camera the frame used,
+    so it answers two questions at once: where the terrain is visible (a line
+    over the sky is dropped) and how deep a draped line is (the engine's GPU
+    cartography depth-tests the lines against it).
+    """
+    import numpy as np
+
+    try:
+        return np.asarray(
+            params.project_terrain_depth(
+                heights, (int(width), int(height)), None, None, True
+            )
+        )
+    except Exception:  # noqa: BLE001 - the depth is optional
+        return None
 
 
 def vector_overlay_rgba(
@@ -2038,6 +2096,7 @@ def vector_overlay_rgba(
     colour=(1.0, 0.29, 0.1, 1.0),
     stroke_px: float = 3.0,
     densify: int = 256,
+    terrain_depth=None,
 ):
     """The engine's projection and the engine's own vector rasterizer.
 
@@ -2097,19 +2156,7 @@ def vector_overlay_rgba(
     if not any(projected):
         return None
 
-    # 3. where is the terrain visible? The engine rasterizes the DEM's depth
-    #    with the same camera, so a line over the sky is dropped.
-    terrain_depth = None
-    try:
-        terrain_depth = np.asarray(
-            params.project_terrain_depth(
-                heights, (int(width), int(height)), None, None, True
-            )
-        )
-    except Exception:  # noqa: BLE001 - the overlay is optional
-        terrain_depth = None
-
-    # 4. the rasterizer works in NDC; the engine's projection returns pixels.
+    # 3. the rasterizer works in NDC; the engine's projection returns pixels.
     polylines = []
     for values in projected:
         current = []

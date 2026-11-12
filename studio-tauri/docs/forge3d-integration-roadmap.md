@@ -64,6 +64,7 @@ be a payload field: vector layers and meshes.
 | 5.24 the cartography workspace — the map as a layer stack | done (the stack; the engine's MapScene next) |
 | 5.25 the quality surface: the still on the engine's CONCORDIA path | done (the clouds are real; the GPU cartography next) |
 | 5.26 the gallery's starter scenes, and the plate's furniture | done |
+| 5.27 the engine's GPU cartography | done (the lines and labels in the terrain's pass) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -807,6 +808,41 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - Check: the recipes' own tests (the layers, the camera, the sun; the label
   layer naming the vector layer), the plate's furniture switches in the service,
   and the three scenes rendered end to end.
+
+### 5.27 The engine's GPU cartography (2 days) — **done**
+- **The map's cartography was composited in numpy over the frame**, so the
+  ground never occluded it: a label floated over the mountain in front of it,
+  and the lines were drawn on top of the ridges that hid them. The engine
+  already draws both in the terrain's own pass — `render_interactive` takes
+  the label and vector batches and the shared cartographic depth — so the
+  studio hands its map over instead of compositing it itself.
+- **The engine gained one public entry for it**: `forge3d.label_batches(layers,
+  plans, width, height)` is the public twin of the compositor, the glyph
+  stream `render_interactive` takes (the public surface is 383 names now). The
+  studio's vector layers become the engine's vector batches: the OIT coverage
+  plus the terrain's own depth raster (the lines are draped on it).
+- **Measured** (Mount Fuji 30 m DEM, 900×700): the labels drawn by the engine
+  in the terrain's pass change **69,770 samples** (mean 3.205) against the
+  plain terrain; the engine's label batches carry 230 glyph rects for the
+  scene's 16 accepted labels.
+- **The quality surface is temporally filtered**, and the still is its
+  converged frame: the temporal filter folds the jittered samples into its
+  history, so the edge energy falls **3.063 → 2.558 → 2.295** over three
+  frames against the plain path's 2.582 — the quality path is the smoother of
+  the two, and the frame the studio keeps is the converged one. The frame's
+  reply says so (`temporal`), and the byte-stability claim moved to the plain
+  path (the AOV/denoise finals), which still is.
+- **Still open**: the lines' own depth. The engine's own vector path computes
+  the per-pixel depth of the projected geometry (so a line behind a ridge is
+  hidden by it); the studio's coverage comes from the OIT rasterizer, which
+  returns no depth, so the studio's lines are depth-tested against the
+  terrain's depth — the terrain's own — and are not occluded by a ridge in
+  front of them. Closing it is either an OIT bridge that also returns the
+  depth or the MapScene convergence below.
+- Check: the engine's public batch builder, the studio's cartography
+  preparation (the batches' shape, the depth, the glyph rects), the e2e tests
+  (the labels and the clouds reach the pixels), and the determinism claim
+  moved to the path that keeps it.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

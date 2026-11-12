@@ -524,6 +524,9 @@ export interface RenderFrame {
   /** Which engine path made the frame: `concordia` (the quality surface, with
    *  the screen-space effects) or `plain` (the AOV renderer). */
   renderPath: string;
+  /** Whether the frame is temporally filtered (the engine's TAA): the quality
+   *  surface's frame is the converged one, not byte-stable. */
+  temporal: boolean;
   /** Base64 PNG. */
   png: string;
   /** Where a still was written, when it went to disk. */

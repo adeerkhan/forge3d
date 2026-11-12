@@ -687,6 +687,7 @@ from .label_plan import (
 # -----------------------------------------------------------------------------
 from .map_scene import (
     RenderPassInput,
+    label_batches,
     RenderPassSpec,
     CompiledScenePlan,
     composite_label_layers,
@@ -1067,6 +1068,7 @@ __all__ = [
     "RejectedLabel",
     # Typed MapScene recipe contract
     "RenderPassInput",
+    "label_batches",
     "RenderPassSpec",
     "MapScene",
     "MapSceneNativeUnavailable",

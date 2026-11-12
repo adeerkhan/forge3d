@@ -35,6 +35,9 @@ pub struct RenderFrame {
     /// Which engine path made the frame: `concordia` (the quality surface,
     /// with the screen-space effects) or `plain` (the AOV renderer).
     pub render_path: String,
+    /// Whether the frame is temporally filtered (the engine's TAA): the
+    /// quality surface's frame is the converged one, not byte-stable.
+    pub temporal: bool,
     /// PNG bytes, base64: the viewport shows it directly.
     pub png: String,
     /// Where a still was written, when it was written to disk.
@@ -188,6 +191,10 @@ impl RenderState {
                 .and_then(|path| path.as_str())
                 .unwrap_or("plain")
                 .to_owned(),
+            temporal: reply
+                .get("temporal")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false),
             png: reply
                 .get("png")
                 .and_then(|png| png.as_str())
@@ -1259,10 +1266,20 @@ mod tests {
         };
 
         let plain = frame(json!({"sky": false}), json!([]));
-        // The same request twice is the same bytes, so any difference below
-        // belongs to the setting under test.
-        let again = frame(json!({"sky": false}), json!([]));
-        assert_eq!(plain.png, again.png, "the service is deterministic");
+        // The quality surface is temporally filtered (the engine's TAA), so
+        // its frames are the converged one, not byte-stable. The plain path —
+        // the one the AOV finals use — is byte-stable, and that is where the
+        // determinism claim is checked.
+        assert!(
+            plain.temporal,
+            "the quality surface reports itself as temporally filtered"
+        );
+        let stable = frame(json!({"sky": false, "aov": {"depth": true}}), json!([]));
+        let stable_again = frame(json!({"sky": false, "aov": {"depth": true}}), json!([]));
+        assert_eq!(
+            stable.png, stable_again.png,
+            "the plain path is byte-stable: the same request twice is the same bytes"
+        );
 
         // The elevation ramp is a layer now: the stack carries it.
         let ramp = frame(

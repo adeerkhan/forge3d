@@ -798,3 +798,71 @@ def test_the_clouds_are_the_engines_own_settings():
     # The engine refuses a coverage outside 0..1; the studio must not hide it.
     with pytest.raises(ValueError):
         service.cloud_settings({"enabled": True, "coverage": 1.5})
+
+
+def test_the_cartography_is_prepared_for_the_engine_own_pass():
+    """The map's lines and labels become the engine's GPU batches.
+
+    The engine draws them in the terrain's own pass, so the ground occludes
+    them; the numpy overlays are the plain path's fallback (the AOV renderer
+    has no quality surface).
+    """
+    service = load_service()
+    points = "assets/gpkg/Mount_Fuji_places.gpkg"
+    visible = [
+        {
+            "id": "v",
+            "name": "Places",
+            "visible": True,
+            "type": "vector",
+            "path": "assets/gpkg/luxembourg_rail.gpkg",
+            "colour": [0.87, 0.1, 0.1, 1.0],
+            "widthPx": 2.0,
+        },
+        {
+            "id": "l",
+            "name": "Labels",
+            "visible": True,
+            "type": "labels",
+            "source": "v",
+            "path": points,
+            "field": "name.en",
+            "colour": [0.08, 0.08, 0.1, 1.0],
+            "sizePx": 16.0,
+        },
+    ]
+
+    class _Params:
+        """The projection the service uses, without a GPU: the anchors are
+        placed by the engine's own camera, so the test needs one."""
+
+        def project_terrain_points(self, batch, shared_frame=False):
+            return [[100.0 + index, 100.0 + index, 0.5] for index, _point in enumerate(batch)]
+
+        def project_terrain_depth(self, heights, size_px, a, b, c):
+            return np.zeros((size_px[1], size_px[0]), dtype=np.float32)
+
+    class _Renderer:
+        pass
+
+    prepared = service.prepare_cartography(
+        _Params(),
+        visible,
+        320,
+        240,
+        (138.6, 35.2, 138.9, 35.5),
+        np.zeros((64, 64), dtype=np.float32),
+        "EPSG:4326",
+    )
+    # The vector layer's coverage became a GPU batch with the terrain's depth.
+    assert len(prepared.vector_batches) == 1
+    batch = prepared.vector_batches[0]
+    assert batch["rgba"].shape == (240, 320, 4)
+    assert batch["depth"].shape == (240, 320)
+    assert batch["depth_test"] is True
+    assert batch["layer"] == "Places"
+    # The label layer became a plan the engine can draw.
+    assert len(prepared.label_plans) == 1
+    assert prepared.label_batches, "the engine's glyph batches must be built"
+    assert "atlas" in prepared.label_batches[0]
+    assert prepared.label_batches[0]["rects"], "the labels must have glyph rects"

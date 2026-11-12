@@ -3504,11 +3504,25 @@ def _composite_native_label_layers(
     return _composite_native_label_batches(base, batches, scene_factory=scene_factory)
 
 
+def label_batches(
+    layers: Sequence["LabelLayer"], plans: Mapping[str, Any], width: int, height: int,
+) -> list[dict[str, Any]]:
+    """The engine's own glyph batches for compiled label plans.
+
+    The public twin of `composite_label_layers`: the same glyph stream the
+    compositor draws, in the shape `TerrainRenderer.render_interactive` takes.
+    A caller that drives the quality path hands these batches to the engine
+    and the labels are drawn by the engine, in the terrain's own pass, with the
+    atlas, the halo and the rasterizer the engine ships.
+
+    `layers` are `LabelLayer` objects (the plans are keyed by layer id) and
+    `plans` maps each layer id to its compiled `LabelPlan`.
+    """
+    return _label_batches_for_layers(layers, plans, int(width), int(height))
+
+
 def composite_label_layers(
-    base: Any, layers: Sequence["LabelLayer"], plans: Mapping[str, Any], *,
-    atlas_sources: Mapping[str, tuple[Path, Path, bool]] | None = None,
-    scene_factory: Any | None = None,
-    atlas_data: Mapping[str, tuple[Any, Mapping[str, Any]]] | None = None,
+    base: Any, layers: Sequence["LabelLayer"], plans: Mapping[str, Any],
 ) -> tuple[Any, bool]:
     """Composite compiled label plans over an image with the engine's text compositor.
 
@@ -3522,11 +3536,8 @@ def composite_label_layers(
     composited image and whether any glyph was drawn.
     """
     height, width = base.shape[:2]
-    batches = _label_batches_for_layers(
-        layers, plans, int(width), int(height),
-        atlas_sources=atlas_sources, atlas_data=atlas_data,
-    )
-    return _composite_native_label_batches(base, batches, scene_factory=scene_factory)
+    batches = _label_batches_for_layers(layers, plans, int(width), int(height))
+    return _composite_native_label_batches(base, batches)
 
 
 def _needs_native_vector_composite(recipe: "SceneRecipe") -> bool:

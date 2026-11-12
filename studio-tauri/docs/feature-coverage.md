@@ -48,7 +48,7 @@ needs from those.
 | Terrain inputs (`mini_dem`, `fetch_dem`, datasets, COG) | partial | local GeoTIFF only; no dataset fetching, no COG streaming |
 | Raster overlays (`ViewerHandle.load_overlay`) | **full** | the drape, in the Material preview and in Rendered, at the source's resolution |
 | Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
-| Vector overlays and labels | **lines and labels** | the engine's projection + OIT rasterizer for the lines; the engine's label plan + text compositor for the labels; furniture is the rest of the tier |
+| Vector overlays and labels | **lines and labels** | the engine's projection + OIT rasterizer for the lines; the engine's label plan + text compositor for the labels; on the quality surface both are drawn by the engine in the terrain's own pass, with the ground's depth; furniture is the rest of the tier |
 | The map as a layer stack | **full** | the studio's own ordered stack (relief, ramp, imagery, vector, labels, plate), drawn back to front by the render service |
 | The gallery's recipes as starter scenes | **full** | the Swiss land-cover, the Luxembourg rail network and the Mount Fuji labels, with their layers, camera and sun |
 | Map furniture (title, caption, north arrow, scale bar, legend) | **full** | the plate layer's own switches, drawn by the studio's page compositor |
