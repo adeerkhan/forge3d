@@ -55,6 +55,14 @@ fn concordia_defer_atmosphere(color: vec3<f32>, world: vec3<f32>, camera: vec3<f
         "let combined_shadow = shadow_clamped * sun_vis_clamped;",
         "let combined_shadow = shadow_clamped * sun_vis_clamped * concordia_cloud_visibility(input.world_position);",
     )?;
+    // The physical lighting model (OD-9c) takes its visibility from the
+    // production estimators, not from `combined_shadow`, so the cloud
+    // visibility has to reach it too — otherwise the clouds are invisible to
+    // every surface that uses the physical model.
+    source = replace_once(source,
+        "let terrain_visibility = det_barrier(shadow_visibility * sun_vis_sample);",
+        "let terrain_visibility = det_barrier(shadow_visibility * sun_vis_sample * concordia_cloud_visibility(input.world_position));",
+    )?;
     source.push_str(include_str!("../../../shaders/concordia_surface.wgsl"));
     source.push_str(
         r#"

@@ -49,6 +49,11 @@ struct ComposeUniforms {
 
 /// One owner for geometry data and temporal history. Moved into RenderTargets
 /// while encoding and returned to TerrainScene after the complete submission.
+/// The cloud field's world period, metres. The pattern is a world feature,
+/// not a fraction of the scene: the same clouds must look the same on a
+/// 256 m plot and on a 350 km DEM.
+const CLOUD_WORLD_PERIOD_M: f32 = 2_000.0;
+
 pub(super) struct ConcordiaFrame {
     settings_key: String,
     height_ao_active: bool,
@@ -611,7 +616,11 @@ impl ConcordiaFrame {
         } else {
             [0.0, 0.0]
         };
-        let scale = 1.0 / params.terrain_span.max(f32::MIN_POSITIVE);
+        // The cloud field's world scale is absolute, not the terrain's span:
+        // a pattern stretched over the whole terrain is invisible on a
+        // country-sized DEM (the same settings produced a different pattern
+        // at every scene size).
+        let scale = 1.0 / CLOUD_WORLD_PERIOD_M.max(f32::MIN_POSITIVE);
         let cloud_scale_bias = [scale, scale, 0.5, 0.5];
         let uniforms = FrameUniforms {
             view: view.to_cols_array_2d(),
