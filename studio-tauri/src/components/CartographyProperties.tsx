@@ -14,12 +14,38 @@ export function CartographyProperties() {
   const layer = layers.find((entry) => entry.id === selectedLayerId) ?? null;
 
   if (!layer) {
+    // No layer picked: the stack itself is the list to pick from, so the
+    // properties panel works in the scene workspace too (where the layer
+    // panel is not on screen).
     return (
-      <p className="hint">
-        Pick a layer in the stack to edit it. A map is a stack of layers: the
-        terrain's relief at the bottom, the elevation ramp and the imagery over
-        it, the vector layers and their labels, and the plate at the front.
-      </p>
+      <Section title="Map layers" id="cartography-list">
+        <div className="readout readout--compact">
+          <dt>Layers</dt>
+          <dd>{layers.length}</dd>
+        </div>
+        {layers.length === 0 && (
+          <p className="hint">
+            This map has no layers yet. Add one in the Cartography workspace.
+          </p>
+        )}
+        <div className="inline-actions">
+          {[...layers].reverse().map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              className="button button--small"
+              onClick={() => actions.selectCartographyLayer(entry.id)}
+            >
+              {entry.name}
+            </button>
+          ))}
+        </div>
+        <p className="hint">
+          A map is a stack of layers: the terrain&apos;s relief at the bottom,
+          the elevation ramp and the imagery over it, the vector layers and
+          their labels, and the plate at the front.
+        </p>
+      </Section>
     );
   }
 
