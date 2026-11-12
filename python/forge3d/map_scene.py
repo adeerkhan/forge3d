@@ -3269,11 +3269,32 @@ def _mapscene_native_label_batches(
     This authoring step never renders, reads back a texture, or changes a plan.
     The ordinary compositor and the unified frame share this exact glyph stream.
     """
+    return _label_batches_for_layers(
+        recipe.layers,
+        plans,
+        width,
+        height,
+        atlas_sources=atlas_sources,
+        atlas_data=atlas_data,
+    )
+
+
+def _label_batches_for_layers(
+    layers: Sequence[Any], plans: Mapping[str, Any], width: int, height: int, *,
+    atlas_sources: Mapping[str, tuple[Path, Path, bool]] | None = None,
+    atlas_data: Mapping[str, tuple[Any, Mapping[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    """The glyph stream of every label layer with an accepted plan.
+
+    The layers and their plans are the only inputs: a caller that owns its
+    pixels (and has compiled its own plan) gets the same glyph stream the
+    unified frame uses.
+    """
     from ._png import load_png_rgba
     from .text_atlas import default_latin_atlas_paths, load_atlas_metrics
 
     batches: list[dict[str, Any]] = []
-    for layer in (item for item in recipe.layers if isinstance(item, LabelLayer)):
+    for layer in (item for item in layers if isinstance(item, LabelLayer)):
         layer_id = _layer_id(layer, "layer")
         plan = plans.get(layer_id)
         if plan is None or not plan.accepted:
@@ -3500,12 +3521,14 @@ def _mapscene_native_label_batches(
     return batches
 
 
-def _composite_native_label_layers(
-    base: Any, recipe: "SceneRecipe", plans: Mapping[str, Any], *,
-    atlas_sources: Mapping[str, tuple[Path, Path, bool]] | None = None,
-    scene_factory: Any | None = None,
-    atlas_data: Mapping[str, tuple[Any, Mapping[str, Any]]] | None = None,
+def _composite_native_label_batches(
+    base: Any, batches: Sequence[Mapping[str, Any]], *, scene_factory: Any | None = None,
 ) -> tuple[Any, bool]:
+    """Draw the glyph batches over `base` with the engine's text compositor."""
+    if not batches:
+        # No accepted label, no native scene: a scene without labels must not
+        # reach for the legacy compositor at all.
+        return base, False
     scene_cls = _native_scene_class()
     if scene_cls is None:
         return base, False
@@ -3516,8 +3539,7 @@ def _composite_native_label_layers(
     rendered_any = False
     required = ("set_raster_overlay", "set_native_text_atlas", "enable_native_text",
                 "add_native_text_rect_uv_halo", "render_rgba")
-    for batch in _mapscene_native_label_batches(recipe, plans, int(width), int(height),
-                                               atlas_sources=atlas_sources, atlas_data=atlas_data):
+    for batch in batches:
         native_scene = (scene_cls(int(width), int(height)) if scene_factory is None else
                         scene_factory(scene_cls, int(width), int(height)))
         if not all(hasattr(native_scene, name) for name in required):
@@ -3536,6 +3558,45 @@ def _composite_native_label_layers(
         composited = opaque if batch["alpha"] >= 1.0 else _fade_label_run(composited, opaque, batch["alpha"])
         rendered_any = True
     return composited, rendered_any
+
+
+def _composite_native_label_layers(
+    base: Any, recipe: "SceneRecipe", plans: Mapping[str, Any], *,
+    atlas_sources: Mapping[str, tuple[Path, Path, bool]] | None = None,
+    scene_factory: Any | None = None,
+    atlas_data: Mapping[str, tuple[Any, Mapping[str, Any]]] | None = None,
+) -> tuple[Any, bool]:
+    height, width = base.shape[:2]
+    batches = _mapscene_native_label_batches(
+        recipe, plans, int(width), int(height),
+        atlas_sources=atlas_sources, atlas_data=atlas_data,
+    )
+    return _composite_native_label_batches(base, batches, scene_factory=scene_factory)
+
+
+def composite_label_layers(
+    base: Any, layers: Sequence["LabelLayer"], plans: Mapping[str, Any], *,
+    atlas_sources: Mapping[str, tuple[Path, Path, bool]] | None = None,
+    scene_factory: Any | None = None,
+    atlas_data: Mapping[str, tuple[Any, Mapping[str, Any]]] | None = None,
+) -> tuple[Any, bool]:
+    """Composite compiled label plans over an image with the engine's text compositor.
+
+    The public entry for a caller that owns its pixels: the label plans come
+    from `LabelPlan.compile`, and this draws their accepted glyphs with the
+    engine's own atlas, halo and rasterizer — the same stream `MapScene.render`
+    uses, over an image the caller already has.
+
+    `layers` are `LabelLayer` objects (the plans are keyed by layer id) and
+    `plans` maps each layer id to its compiled `LabelPlan`. The result is the
+    composited image and whether any glyph was drawn.
+    """
+    height, width = base.shape[:2]
+    batches = _label_batches_for_layers(
+        layers, plans, int(width), int(height),
+        atlas_sources=atlas_sources, atlas_data=atlas_data,
+    )
+    return _composite_native_label_batches(base, batches, scene_factory=scene_factory)
 
 
 def _needs_native_vector_composite(recipe: "SceneRecipe") -> bool:
