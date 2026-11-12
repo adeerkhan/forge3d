@@ -93,7 +93,7 @@ const TABS: {
 
 const STORAGE_KEY = "studio.propsTab";
 
-export function SettingsSidebar() {
+export function SettingsSidebar({ fixedTab }: { fixedTab?: PropsTab }) {
   const { state } = useSession();
   const [tab, setTab] = useState<PropsTab>(() => {
     try {
@@ -113,20 +113,27 @@ export function SettingsSidebar() {
     }
   };
 
-  const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
+  // The cartography workspace shows one tab: the selected layer's properties.
+  const shown = fixedTab ?? tab;
+  const active = TABS.find((entry) => entry.id === shown) ?? TABS[0];
 
   return (
     <div className="props">
-      <div className="props__rail" role="tablist" aria-orientation="vertical" aria-label="Properties">
-        {TABS.map(({ id, label, Icon, title }) => (
+      <div
+        className="props__rail"
+        role="tablist"
+        aria-orientation="vertical"
+        aria-label="Properties"
+      >
+        {TABS.filter((entry) => !fixedTab || entry.id === fixedTab).map(({ id, label, Icon, title }) => (
           <button
             key={id}
             type="button"
             role="tab"
-            aria-selected={tab === id}
+            aria-selected={shown === id}
             aria-label={label}
             title={title}
-            className={`props__tab${tab === id ? " is-active" : ""}`}
+            className={`props__tab${shown === id ? " is-active" : ""}`}
             onClick={() => select(id)}
           >
             <Icon size={16} />
@@ -146,22 +153,22 @@ export function SettingsSidebar() {
             </p>
           ) : (
             <>
-              {tab === "render" && <RenderSettingsEditor />}
-              {tab === "scene" && <ProjectFacts />}
-              {tab === "light" && (
+              {shown === "render" && <RenderSettingsEditor />}
+              {shown === "scene" && <ProjectFacts />}
+              {shown === "light" && (
                 <>
                   <LightRig />
                   <SkySection />
                   <EnvironmentSettings />
                 </>
               )}
-              {tab === "atmosphere" && <AtmosphereSection />}
-              {tab === "map" && <MapSection />}
-              {tab === "object" && <ObjectProperties />}
-              {tab === "animation" && <Timeline />}
+              {shown === "atmosphere" && <AtmosphereSection />}
+              {shown === "map" && <MapSection />}
+              {shown === "object" && <ObjectProperties />}
+              {shown === "animation" && <Timeline />}
             </>
           )}
-          {tab === "object" && (
+          {shown === "object" && (
             <p className="hint props__note">
               Press <kbd>N</kbd> to hide this sidebar.
             </p>

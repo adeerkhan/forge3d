@@ -10,7 +10,13 @@ import {
 } from "./icons";
 import { AboutDialog } from "./AboutDialog";
 
-export function TopBar() {
+export function TopBar({
+  workspace,
+  onWorkspace,
+}: {
+  workspace: "scene" | "cartography";
+  onWorkspace(workspace: "scene" | "cartography"): void;
+}) {
   const { state, actions, busy } = useSession();
   const [menuOpen, setMenuOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -129,6 +135,27 @@ export function TopBar() {
             </button>
           </div>
         )}
+      </div>
+
+      <div className="segmented" role="tablist" aria-label="Workspace">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspace === "scene"}
+          className={workspace === "scene" ? "is-active" : ""}
+          onClick={() => onWorkspace("scene")}
+        >
+          Scene
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspace === "cartography"}
+          className={workspace === "cartography" ? "is-active" : ""}
+          onClick={() => onWorkspace("cartography")}
+        >
+          Cartography
+        </button>
       </div>
 
       <div className="project-identity">

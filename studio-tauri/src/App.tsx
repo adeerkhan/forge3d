@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { EmptyState } from "./components/EmptyState";
+import { LayerStack } from "./components/Cartography";
 import { SettingsSidebar } from "./components/Sidebar";
 import { NewProjectDialog } from "./components/NewProjectDialog";
 import { RecoveryBanner } from "./components/RecoveryBanner";
@@ -16,12 +17,16 @@ export default function App() {
   const { state, error, notice, actions } = useSession();
   // Properties sidebar visibility (N). UI state, like the timeline.
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  // The two workspaces: the scene (objects, materials, light) and the
+  // cartography (the map's layer stack and the layer being edited).
+  const [workspace, setWorkspace] = useState<"scene" | "cartography">("scene");
+  const cartography = workspace === "cartography";
 
   useKeyboardShortcuts({ sidebarOpen, setSidebarOpen });
 
   return (
     <div className="app">
-      <TopBar />
+      <TopBar workspace={workspace} onWorkspace={setWorkspace} />
 
       <main
         className={`workspace${state ? "" : " workspace--empty"}${
@@ -31,7 +36,7 @@ export default function App() {
         {state ? (
           <>
             <aside className="workspace__panel workspace__panel--left">
-              <SceneTree />
+              {cartography ? <LayerStack /> : <SceneTree />}
             </aside>
             <section className="workspace__center">
               <RecoveryBanner />
@@ -40,7 +45,7 @@ export default function App() {
             </section>
             {sidebarOpen && (
               <aside className="workspace__panel workspace__panel--right">
-                <SettingsSidebar />
+                <SettingsSidebar fixedTab={cartography ? "map" : undefined} />
               </aside>
             )}
           </>
