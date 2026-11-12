@@ -62,6 +62,7 @@ be a payload field: vector layers and meshes.
 | 5.22 vector layers — the rail network on the terrain | done (lines; labels next) |
 | 5.23 vector labels — the engine's own text compositor | done (labels; furniture next) |
 | 5.24 the cartography workspace — the map as a layer stack | done (the stack; the engine's MapScene next) |
+| 5.25 the quality surface: the still on the engine's CONCORDIA path | done (the clouds are real; the GPU cartography next) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -740,6 +741,44 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   the migration (a v4 document becomes a stack), the payload (the stack, with
   every layer's own settings), the wire shapes, and the end-to-end engine
   tests that the ramp, the vector layer and the labels reach the pixels.
+
+### 5.25 The quality surface: the still on the engine's CONCORDIA path (2 days) — **done**
+- **The still rendered on the plain path** (`render_terrain_pbr_pom`), so the
+  engine's whole screen-space tier — SSAO, SSGI, SSR, the cloud shadows, the
+  volumetrics, the atmospheres — was unreachable from the studio, and the
+  clouds measured **0 changed samples**. The still now renders through the
+  engine's quality surface (`render_interactive`), and the frame's reply says
+  which path made it.
+- **The quality path is equal-resolution**: the engine refuses to supersample
+  on it (`CONCORDIA equal-resolution TAA requires render_scale=1; TAAU is
+  unavailable`), so the temporal anti-aliasing does the work the plain path's
+  2× supersampling did. A still averages four frames; the measured edge
+  energy is **2.496** against the plain 2× still's **2.582** — the quality
+  path is the smoother of the two. The cost is 0.45 s against 0.30 s for the
+  900×700 frame.
+- **Two engine gaps had to be closed first**, and both are the engine's:
+  - the clouds multiplied the *stylized* lighting path's shadow only, so the
+    physical model (OD-9c — the one the studio renders with) never saw them:
+    **0 changed samples**. The CONCORDIA specialization now rewrites the
+    physical path's visibility too: the clouds change **368,996 samples**
+    (mean 0.498, max 16) on the studio's own Mount Fuji frame;
+  - the cloud field's world scale was the terrain's span, so the same clouds
+    looked different at every scene size and vanished on a country-sized DEM
+    (the flat-plane probe: 446,523 changed samples at a 256 m span, 12,607 at
+    an 18.7 km span). The pattern is now an absolute 2 km period.
+- **The AOV/denoise finals stay on the plain path**: the engine's AOV renderer
+  has no quality surface, so a still that exports AOVs cannot carry the
+  screen-space effects. The path is reported in the frame, so the studio says
+  which one made the picture.
+- **Still open**: the studio's cartography is composited in numpy on top of the
+  quality surface (the OIT rasterizer + the label compositor); the engine's
+  own GPU cartography (`render_interactive`'s label/vector/furniture batches)
+  would draw them in the same pass, with the terrain's occlusion — that is the
+  next increment, and it wants the MapScene convergence under it.
+- Check: the engine's source contracts (the physical path's cloud visibility,
+  the absolute world scale), the engine's GPU measurement (the clouds reach the
+  physical model), the studio's payload and its e2e test (`the_clouds_reach_the_pixels`),
+  and the service's own clouds settings.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

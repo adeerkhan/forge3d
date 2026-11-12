@@ -211,6 +211,8 @@ export interface RenderSettings {
   plateTitle: string;
   /** Atmospheric fog on the terrain. */
   fog: FogSettings;
+  /** The cloud shadows on the terrain. */
+  clouds: CloudSettings;
   /** Bloom on the finished frame: the bright pixels glow. */
   bloom: BloomSettings;
   /** Vignette: corner darkening, 0..=1. */
@@ -219,6 +221,21 @@ export interface RenderSettings {
 
 /** Atmospheric fog on the terrain: the engine applies height-based
  *  exponential fog after the PBR pass and before the tonemap. */
+/** The cloud shadows on the terrain: the engine's own cloud field, projected
+ *  along the sun onto the ground. */
+export interface CloudSettings {
+  enabled: boolean;
+  shadowsEnabled: boolean;
+  /** How much of the sky is covered, 0..1. */
+  coverage: number;
+  /** How dense the covered part is, 0..1. */
+  density: number;
+  /** How dark the shadows are, 0..1. */
+  shadowStrength: number;
+  /** The engine's field resolution. */
+  quality: "low" | "medium" | "high" | "ultra";
+}
+
 export interface FogSettings {
   enabled: boolean;
   /** Fog density; 0 is no fog. */
@@ -503,6 +520,9 @@ export interface RenderFrame {
   height: number;
   /** Render time in milliseconds. */
   ms: number;
+  /** Which engine path made the frame: `concordia` (the quality surface, with
+   *  the screen-space effects) or `plain` (the AOV renderer). */
+  renderPath: string;
   /** Base64 PNG. */
   png: string;
   /** Where a still was written, when it went to disk. */

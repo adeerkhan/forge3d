@@ -32,6 +32,9 @@ pub struct RenderFrame {
     pub width: u32,
     pub height: u32,
     pub ms: f64,
+    /// Which engine path made the frame: `concordia` (the quality surface,
+    /// with the screen-space effects) or `plain` (the AOV renderer).
+    pub render_path: String,
     /// PNG bytes, base64: the viewport shows it directly.
     pub png: String,
     /// Where a still was written, when it was written to disk.
@@ -180,6 +183,11 @@ impl RenderState {
             width: reply.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             height: reply.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
             ms: reply.get("ms").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            render_path: reply
+                .get("renderPath")
+                .and_then(|path| path.as_str())
+                .unwrap_or("plain")
+                .to_owned(),
             png: reply
                 .get("png")
                 .and_then(|png| png.as_str())
@@ -490,6 +498,13 @@ pub struct RenderRequest {
     pub water_level: f32,
     pub water_slope_threshold: f32,
     pub water_roughness: f32,
+    /// The cloud shadows on the terrain (the engine's own cloud field).
+    pub clouds_enabled: bool,
+    pub clouds_shadows_enabled: bool,
+    pub clouds_coverage: f32,
+    pub clouds_density: f32,
+    pub clouds_shadow_strength: f32,
+    pub clouds_quality: String,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -528,6 +543,12 @@ impl RenderRequest {
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
         self.water_roughness = settings.water.roughness;
+        self.clouds_enabled = settings.clouds.enabled;
+        self.clouds_shadows_enabled = settings.clouds.shadows_enabled;
+        self.clouds_coverage = settings.clouds.coverage;
+        self.clouds_density = settings.clouds.density;
+        self.clouds_shadow_strength = settings.clouds.shadow_strength;
+        self.clouds_quality = settings.clouds.quality.clone();
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -645,6 +666,14 @@ impl RenderRequest {
                     "slopeThreshold": self.water_slope_threshold,
                     "roughness": self.water_roughness,
                 },
+                "clouds": {
+                    "enabled": self.clouds_enabled,
+                    "shadowsEnabled": self.clouds_shadows_enabled,
+                    "coverage": self.clouds_coverage,
+                    "density": self.clouds_density,
+                    "shadowStrength": self.clouds_shadow_strength,
+                    "quality": self.clouds_quality,
+                },
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
@@ -759,6 +788,12 @@ impl RenderRequest {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
+            clouds_enabled: false,
+            clouds_shadows_enabled: true,
+            clouds_coverage: 0.5,
+            clouds_density: 0.5,
+            clouds_shadow_strength: 0.35,
+            clouds_quality: "medium".to_owned(),
             fog_enabled: false,
             fog_density: 0.05,
             fog_reach: 0.5,
@@ -815,6 +850,12 @@ mod tests {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
+            clouds_enabled: false,
+            clouds_shadows_enabled: true,
+            clouds_coverage: 0.5,
+            clouds_density: 0.5,
+            clouds_shadow_strength: 0.35,
+            clouds_quality: "medium".to_owned(),
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -1379,6 +1420,59 @@ mod tests {
             plain.png, labelled.png,
             "the vector labels must reach the pixels"
         );
+
+        state.stop();
+    }
+
+    /// End-to-end proof that the clouds reach the frame through the real
+    /// payload: the same Mount Fuji frame, with and without them.
+    #[test]
+    #[ignore = "spawns the engine Python session and the GPU"]
+    fn the_clouds_reach_the_pixels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = root.join(".venv/bin/python");
+        let dem = root.join("assets/tif/Mount_Fuji_30m.tif");
+        if !python.exists() || !dem.exists() {
+            eprintln!("skipping: this checkout has no .venv/engine DEM pair");
+            return;
+        }
+
+        let state = RenderState::new();
+        let frame = |clouds: serde_json::Value| {
+            let payload = json!({
+                "width": 320,
+                "height": 240,
+                "camera": {"phiDeg": 75.0, "thetaDeg": 45.0, "radius": 14000.0, "target": [0, 0, 0], "fovDeg": 40.0},
+                "sun": {"azimuthDeg": 315.0, "elevationDeg": 28.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
+                "quality": {"sky": false, "clouds": clouds},
+                "exposure": 1.35,
+                "iblIntensity": 1.0,
+                "environmentBackgroundIntensity": 1.0
+            });
+            state
+                .render(
+                    python.to_str().expect("utf-8 python path"),
+                    dem.to_str().expect("utf-8 dem path"),
+                    payload,
+                    FRAME_TIMEOUT,
+                )
+                .expect("one frame from the service")
+        };
+
+        let plain = frame(json!({"enabled": false}));
+        let cloudy = frame(json!({
+            "enabled": true,
+            "shadowsEnabled": true,
+            "coverage": 0.9,
+            "density": 0.9,
+            "shadowStrength": 1.0,
+            "quality": "high"
+        }));
+        assert_ne!(
+            plain.png, cloudy.png,
+            "the cloud shadows must reach the pixels"
+        );
+        assert_eq!(plain.render_path, "concordia");
 
         state.stop();
     }

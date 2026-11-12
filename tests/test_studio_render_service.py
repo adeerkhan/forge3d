@@ -765,3 +765,36 @@ def test_a_name_outside_the_packaged_atlas_is_rejected_by_the_engine():
     )
     assert list(plan.accepted) == []
     assert [label.reason for label in plan.rejected] == ["missing_glyph"]
+
+
+def test_the_clouds_are_the_engines_own_settings():
+    """The clouds are the engine's `CloudSettings`, built from the request.
+
+    Off means no settings at all (the engine's no-op), and the ranges are the
+    engine's: the studio does not clamp them.
+    """
+    service = load_service()
+    assert service.cloud_settings(None) is None
+    assert service.cloud_settings({"enabled": False}) is None
+
+    clouds = service.cloud_settings(
+        {
+            "enabled": True,
+            "shadowsEnabled": True,
+            "coverage": 0.7,
+            "density": 0.4,
+            "shadowStrength": 0.6,
+            "quality": "high",
+        }
+    )
+    assert clouds is not None
+    assert clouds.enabled is True
+    assert clouds.shadows_enabled is True
+    assert abs(clouds.coverage - 0.7) < 1e-6
+    assert abs(clouds.density - 0.4) < 1e-6
+    assert abs(clouds.shadow_strength - 0.6) < 1e-6
+    assert clouds.quality == "high"
+
+    # The engine refuses a coverage outside 0..1; the studio must not hide it.
+    with pytest.raises(ValueError):
+        service.cloud_settings({"enabled": True, "coverage": 1.5})

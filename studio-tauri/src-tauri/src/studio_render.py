@@ -208,6 +208,42 @@ class StudioRenderer:
         self.materials = f3d.MaterialSet.terrain_default()
         self.size: Optional[tuple[int, int]] = None
 
+    def quality_frame(self, params, ibl, water_mask, quality, output=None):
+        """The frame through the engine's quality surface.
+
+        The CONCORDIA path carries the screen-space effects — the cloud
+        shadows among them — and the GPU cartography. It is equal-resolution,
+        so the temporal anti-aliasing does the work the plain path's 2x
+        supersampling does; a still averages several frames so it keeps the
+        same smoothness (measured: 4 accumulated frames 2.496 edge energy
+        against the plain 2x still's 2.582).
+
+        The path is the engine's, not the studio's: the render scale is forced
+        to 1 because the quality path refuses to supersample (the engine
+        reports `taau_available: false`).
+        """
+        from forge3d.terrain_params import ScreenSpaceSettings
+
+        # A viewport frame is one sample: the temporal history converges as
+        # the camera moves. A still averages several, so it carries the same
+        # smoothness the plain path's supersampling gave it.
+        samples = 1 if not output else 4
+        clouds = cloud_settings(quality.get("clouds"))
+        frames = []
+        for _ in range(samples):
+            frame = self.renderer.render_interactive(
+                self.materials,
+                ibl,
+                params,
+                self.heights,
+                water_mask=water_mask,
+                clouds=clouds,
+            )
+            frames.append(np.asarray(frame.to_numpy())[:, :, :3].astype(np.float32))
+        if len(frames) == 1:
+            return frames[0].astype(np.uint8)
+        return np.clip(np.rint(np.mean(np.stack(frames), axis=0)), 0, 255).astype(np.uint8)
+
     def environment_map(self, path: Optional[str]):
         """The IBL for one frame: the project's HDRI, or the built-in studio sky.
 
@@ -748,9 +784,26 @@ class StudioRenderer:
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
 
+        # The engine's quality surface (CONCORDIA) carries the screen-space
+        # effects and the GPU cartography; it is equal-resolution, so the
+        # render scale is 1 there (the engine refuses to supersample on that
+        # path and reports `taau_available: false`).
+        output_path = request.get("output")
+        quality_path = "plain" if (want_aov or want_denoise) else "concordia"
+        screen_space = None
+        if quality_path == "concordia":
+            from forge3d.terrain_params import ScreenSpaceSettings
+
+            screen_space = ScreenSpaceSettings(enabled=True, taa_enabled=True)
+
         settings = make_terrain_params_config(
             size_px=(width, height),
-            render_scale=float((request.get("quality") or {}).get("renderScale", 1.0)),
+            render_scale=(
+                1.0
+                if quality_path == "concordia"
+                else float((request.get("quality") or {}).get("renderScale", 1.0))
+            ),
+            screen_space=screen_space,
             msaa_samples=1,
             terrain_span=span,
             z_scale=float(request.get("zScale", 1.0)),
@@ -836,15 +889,18 @@ class StudioRenderer:
 
         params = f3d.TerrainRenderParams(settings)
         if want_aov or want_denoise:
+            # The engine's AOV renderer is the plain path: it has no quality
+            # surface, so the AOV/denoise finals cannot carry the screen-space
+            # effects. The path is reported in the reply.
             frame, aov_frame = self.renderer.render_with_aov(
                 self.materials, ibl, params, self.heights, water_mask=water_mask
             )
+            image = np.asarray(frame.to_numpy())
+            render_path = "plain"
         else:
-            frame = self.renderer.render_terrain_pbr_pom(
-                self.materials, ibl, params, self.heights, water_mask=water_mask
-            )
+            image = self.quality_frame(params, ibl, water_mask, quality, output_path)
             aov_frame = None
-        image = np.asarray(frame.to_numpy())
+            render_path = "concordia"
         rgb = image[:, :, :3].astype(np.uint8)
 
         if want_denoise:
@@ -1046,6 +1102,9 @@ class StudioRenderer:
         return {
             "width": width,
             "height": height,
+            # Which engine path made the frame: the quality surface carries the
+            # screen-space effects, the plain path is the AOV renderer's.
+            "renderPath": render_path,
             "png": base64.b64encode(png).decode("ascii"),
         }
 
@@ -1867,6 +1926,31 @@ def vector_label_plan(
         },
     )
     return layer, plan
+
+
+def cloud_settings(payload) -> Optional[Any]:
+    """The engine's cloud settings from the request, or None when off.
+
+    The clouds are the engine's own (`CloudSettings`): a coverage, a density
+    and a shadow strength that the quality path composites into the terrain's
+    direct sun.
+    """
+    if not isinstance(payload, dict):
+        return None
+    from forge3d.terrain_params import CloudSettings
+
+    enabled = bool(payload.get("enabled", False))
+    shadows = bool(payload.get("shadowsEnabled", enabled))
+    if not enabled and not shadows:
+        return None
+    return CloudSettings(
+        enabled=enabled,
+        shadows_enabled=shadows,
+        coverage=float(payload.get("coverage", 0.5)),
+        density=float(payload.get("density", 0.5)),
+        shadow_strength=float(payload.get("shadowStrength", 0.35)),
+        quality=str(payload.get("quality", "medium")),
+    )
 
 
 def compose_vector_labels(

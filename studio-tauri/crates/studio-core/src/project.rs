@@ -483,6 +483,10 @@ impl Project {
         if !(8..=64).contains(&self.render.sun_visibility_steps) {
             return Err("sun visibility steps must be between 8 and 64".to_owned());
         }
+        self.render
+            .clouds
+            .validate()
+            .map_err(|reason| reason.to_string())?;
         if !self.render.fog.density.is_finite() || !(0.0..=100.0).contains(&self.render.fog.density)
         {
             return Err("fog density must be between 0 and 100".to_owned());
@@ -682,6 +686,63 @@ impl Default for WaterSettings {
     }
 }
 
+/// The cloud shadows on the terrain: the engine's own cloud field, projected
+/// along the sun onto the ground.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudSettings {
+    /// Draw the clouds.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Cast the clouds' shadows onto the terrain.
+    #[serde(default = "default_true")]
+    pub shadows_enabled: bool,
+    /// How much of the sky is covered, 0..=1.
+    #[serde(default = "default_cloud_coverage")]
+    pub coverage: f32,
+    /// How dense the covered part is, 0..=1.
+    #[serde(default = "default_cloud_density")]
+    pub density: f32,
+    /// How dark the shadows are, 0..=1.
+    #[serde(default = "default_cloud_shadow_strength")]
+    pub shadow_strength: f32,
+    /// The engine's field resolution: `low` | `medium` | `high` | `ultra`.
+    #[serde(default = "default_cloud_quality")]
+    pub quality: String,
+}
+
+impl Default for CloudSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            shadows_enabled: true,
+            coverage: default_cloud_coverage(),
+            density: default_cloud_density(),
+            shadow_strength: default_cloud_shadow_strength(),
+            quality: default_cloud_quality(),
+        }
+    }
+}
+
+impl CloudSettings {
+    /// The values the engine accepts.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("coverage", self.coverage),
+            ("density", self.density),
+            ("shadow strength", self.shadow_strength),
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(format!("the clouds' {name} must be between 0 and 1"));
+            }
+        }
+        if !matches!(self.quality.as_str(), "low" | "medium" | "high" | "ultra") {
+            return Err("the clouds' quality must be low, medium, high or ultra".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// Atmospheric fog on the terrain.
 ///
 /// The engine applies height-based exponential fog after the PBR pass and
@@ -841,6 +902,9 @@ pub struct RenderSettings {
     /// Atmospheric fog on the terrain.
     #[serde(default)]
     pub fog: FogSettings,
+    /// The cloud shadows on the terrain (the engine's own cloud field).
+    #[serde(default)]
+    pub clouds: CloudSettings,
     /// Bloom on the finished frame: the bright pixels glow.
     #[serde(default)]
     pub bloom: BloomSettings,
@@ -934,6 +998,22 @@ fn default_sun_visibility_steps() -> u32 {
     32
 }
 
+fn default_cloud_coverage() -> f32 {
+    0.5
+}
+
+fn default_cloud_density() -> f32 {
+    0.5
+}
+
+fn default_cloud_shadow_strength() -> f32 {
+    0.35
+}
+
+fn default_cloud_quality() -> String {
+    "medium".to_owned()
+}
+
 fn default_fog_density() -> f32 {
     // 0.5 veiled 72% of a 922x795 frame; 0.05 is a haze you can see through.
     0.05
@@ -993,6 +1073,7 @@ impl Default for RenderSettings {
             sky_exposure: default_sky_exposure(),
             water: WaterSettings::default(),
             fog: FogSettings::default(),
+            clouds: CloudSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,
         }

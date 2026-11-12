@@ -55,6 +55,7 @@ needs from those.
 | Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |
 | Terrain quality controls (`terrain_params`, `presets`) | partial | 28 settings are wired; the engine's presets are not exposed |
 | Water surfaces and optics | **full** | the mask, the physical surface, the roughness |
+| Screen-space effects (SSAO, SSGI, SSR, clouds) | **full** | the engine's quality surface; the still renders on it (the AOV finals cannot) |
 | Native/offscreen rendering | **full** | `TerrainRenderer.render_terrain_pbr_pom` |
 | Reference-scene matching (`recover_scene`) | none | a research tool |
 | Typed map scenes (`MapScene`, `LabelLayer`, buildings, 3D Tiles) | **none** | the phase-14/15 target |

@@ -31,6 +31,10 @@ SERVICE = ROOT / "studio-tauri/src-tauri/src/studio_render.py"
 #: Engine parameters measured to change **0** channel samples through Studio's
 #: render path. They are engine features, not shell bugs — the shell must not
 #: offer them until the engine's path can draw them.
+# The clouds left this registry when the engine's quality surface reached the
+# studio's still: they measured 0 changed samples while the clouds were
+# multiplied into the stylized lighting model only, and 368,996 (mean 0.498)
+# after the physical model consumed the cloud visibility too.
 INERT_ENGINE_PARAMETERS = {
     "ambient_occlusion",
     "shadow_softness",
@@ -48,8 +52,6 @@ INERT_ENGINE_PARAMETERS = {
     "snow_layer",
     "rock_layer",
     "wetness_layer",
-    "clouds",
-    "cloud_shadow",
 }
 
 

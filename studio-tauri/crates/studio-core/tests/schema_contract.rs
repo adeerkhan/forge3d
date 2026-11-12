@@ -77,6 +77,7 @@ fn project_document_key_shape_is_stable() {
             "skyExposure",
             "water",
             "fog",
+            "clouds",
             "bloom",
             "vignette",
         ],
