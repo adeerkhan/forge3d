@@ -28,13 +28,17 @@ Two rules govern the table:
 | 11 | Colormaps, sun visibility, vertical scale, despeckle | done |
 | 12 | Map plate, map furniture, categorical legend | done |
 | 13 | The map look (one button), the release audit as a CI gate | done |
-| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped, lines only (labels/furniture blocked on the label plan) |
+| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped: lines and labels (furniture next) |
 | 15 | Convergence on `MapScene` as the scene model | design increment, trigger-gated |
 
-Studio exposes **68 controls** over 28 render settings, the scene model
-(terrain, mesh, camera, light), the timeline and the map plate. The engine's
-public Python surface is **381 names**; the table below is the honest
-breakdown of what a *terrain and cartography studio* needs from those.
+Studio exposes **74 controls** — the Inspector's 49 numeric fields, 3 range
+sliders, 14 toggles, 5 choice fields and 3 text fields (the earlier count,
+68, predated the vector layer's colour, width and label controls) — over 28
+render settings, the scene model (terrain, mesh, camera, light), the timeline
+and the map plate. The engine's
+public Python surface is **382 names** (the label compositor joined it); the
+table below is the honest breakdown of what a *terrain and cartography studio*
+needs from those.
 
 ## 2. The inventory
 
@@ -44,7 +48,7 @@ breakdown of what a *terrain and cartography studio* needs from those.
 | Terrain inputs (`mini_dem`, `fetch_dem`, datasets, COG) | partial | local GeoTIFF only; no dataset fetching, no COG streaming |
 | Raster overlays (`ViewerHandle.load_overlay`) | **full** | the drape, in the Material preview and in Rendered, at the source's resolution |
 | Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
-| Vector overlays and labels | **lines only** | the engine's projection + OIT rasterizer, composed in the service; labels and furniture are the rest of the tier |
+| Vector overlays and labels | **lines and labels** | the engine's projection + OIT rasterizer for the lines; the engine's label plan + text compositor for the labels; furniture is the rest of the tier |
 | Picking and selection | partial | the Solid view picks objects; the engine's terrain picking is not used |
 | Point clouds | none | a different product tier |
 | Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |
@@ -114,19 +118,22 @@ Still open, in order of value:
 
 ## 5. The phases
 
-**Phase 14 — the engine's cartographic tier** — **shipped, lines only**
+**Phase 14 — the engine's cartographic tier** — **shipped: lines and labels**
 (`docs/goal-phase-14-cartographic-tier.md`): the rail network draws on the
-Luxembourg DEM and on the plate, through the engine's own projection and OIT
-rasterizer. Still open in the tier: labels, furniture, polygons, and a legend
-for the vector attributes.
+Luxembourg DEM and on the plate through the engine's own projection and OIT
+rasterizer, and the place names draw through the engine's label plan and its
+text compositor (`forge3d.composite_label_layers`, made public for callers
+that own their pixels). Still open in the tier: furniture, polygons, a legend
+for the vector attributes, and labels occluded by the terrain's ridges.
 
 **Phase 15 — converge on `MapScene`.** The engine's typed map scene carries
 labels, buildings, 3D Tiles, furniture, graticules and bundles; Studio has its
 own model and its own service. Every cartographic feature added to Studio's
 own model is a second implementation. The convergence is the only way the
 cartographic tier grows without doubling. *Trigger:* the first vector layer
-landed (phase 14, shipped); labels are the first work that needs the engine's
-recipe-bound label plan, so the trigger is now live.
+landed (phase 14, shipped), and the labels adopted the engine's own plan and
+compositor rather than a second implementation — the convergence is now live
+for the label tier.
 
 **Phase 16 — the preview matches the still.** The preview's shadows, the
 hillshade and the plate's crop in the viewport, so authoring shows the output.

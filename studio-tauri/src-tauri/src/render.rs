@@ -385,6 +385,17 @@ fn spawn_reader(stdout: impl std::io::Read + Send + 'static, shared: Arc<Shared>
                     }
                     shared.changed.notify_all();
                 }
+                Some("warning") => {
+                    // A warning is part of the protocol (a skipped overlay, a
+                    // label layer the engine rejected): it belongs in the log
+                    // the studio shows, not in the void.
+                    let message = value
+                        .get("message")
+                        .and_then(|message| message.as_str())
+                        .unwrap_or("the renderer reported a warning")
+                        .to_owned();
+                    push_log(&shared, message);
+                }
                 _ => {
                     if let Some(id) = value.get("id").and_then(|id| id.as_u64()) {
                         if let Ok(mut replies) = shared.replies.lock() {
@@ -502,14 +513,22 @@ pub struct RenderRequest {
     pub vignette: f32,
 }
 
-/// A vector layer for the renderer: the file, the line colour and the line's
-/// real width in the DEM's metres.
+/// A vector layer for the renderer: the file, the line colour, the line's
+/// symbol width in pixels and the labels the layer's named features carry.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VectorRequest {
     pub path: String,
     pub colour: [f32; 4],
     pub width_px: f32,
+    /// Draw the layer's named features as labels.
+    pub labels: bool,
+    /// The attribute that names a feature (`name`, `name.en`, ...).
+    pub label_field: String,
+    /// The label colour, RGBA in 0..=1.
+    pub label_colour: [f32; 4],
+    /// The label size in pixels.
+    pub label_size_px: f32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -757,6 +776,10 @@ impl RenderRequest {
                 path: vector.path.clone(),
                 colour: vector.colour,
                 width_px: vector.width_px,
+                labels: vector.labels,
+                label_field: vector.label_field.clone(),
+                label_colour: vector.label_colour,
+                label_size_px: vector.label_size_px,
             }),
             exposure: 1.35,
             shadows: true,
@@ -986,11 +1009,21 @@ mod tests {
             path: "/data/luxembourg_rail.gpkg".to_owned(),
             colour: [0.9, 0.29, 0.1, 1.0],
             width_px: 3.0,
+            labels: true,
+            label_field: "name.en".to_owned(),
+            label_colour: [0.08, 0.08, 0.1, 1.0],
+            label_size_px: 14.0,
         });
         let value = payload.to_payload("preview", None);
         assert_eq!(value["vector"]["path"], "/data/luxembourg_rail.gpkg");
         assert_eq!(value["vector"]["widthPx"], 3.0);
         assert!((value["vector"]["colour"][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        // The label settings travel with the layer: the service needs the
+        // attribute, the colour and the size to draw the engine's labels.
+        assert_eq!(value["vector"]["labels"], true);
+        assert_eq!(value["vector"]["labelField"], "name.en");
+        assert_eq!(value["vector"]["labelSizePx"], 14.0);
+        assert!((value["vector"]["labelColour"][0].as_f64().unwrap() - 0.08).abs() < 1e-6);
         // No layer, no key content: the service must see an explicit null.
         assert!(request().to_payload("preview", None)["vector"].is_null());
     }
@@ -1273,6 +1306,65 @@ mod tests {
         assert_ne!(
             plain.png, with_rails.png,
             "the vector layer must reach the pixels"
+        );
+
+        state.stop();
+    }
+
+    /// End-to-end proof that the vector labels reach pixels through the real
+    /// payload: the same Mount Fuji frame, with and without the places layer.
+    #[test]
+    #[ignore = "spawns the engine Python session and the GPU"]
+    fn the_vector_labels_reach_the_pixels() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let python = root.join(".venv/bin/python");
+        let dem = root.join("assets/tif/Mount_Fuji_30m.tif");
+        let places = root.join("assets/gpkg/Mount_Fuji_places.gpkg");
+        if !python.exists() || !dem.exists() || !places.exists() {
+            eprintln!("skipping: this checkout has no .venv/engine DEM/places trio");
+            return;
+        }
+
+        let state = RenderState::new();
+        let frame = |vector: serde_json::Value| {
+            let payload = json!({
+                "width": 320,
+                "height": 240,
+                "camera": {"phiDeg": 90.0, "thetaDeg": 45.0, "radius": 30000.0, "target": [0, 0, 0], "fovDeg": 40.0},
+                "sun": {"azimuthDeg": 315.0, "elevationDeg": 35.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
+                "quality": {"sky": false},
+                "exposure": 1.35,
+                "iblIntensity": 1.0,
+                "environmentBackgroundIntensity": 1.0,
+                "vector": vector
+            });
+            state
+                .render(
+                    python.to_str().expect("utf-8 python path"),
+                    dem.to_str().expect("utf-8 dem path"),
+                    payload,
+                    FRAME_TIMEOUT,
+                )
+                .expect("one frame from the service")
+        };
+
+        let plain = frame(json!({
+            "path": places.to_str().expect("utf-8 places path"),
+            "colour": [0.9, 0.29, 0.1, 1.0],
+            "widthPx": 2.0
+        }));
+        let labelled = frame(json!({
+            "path": places.to_str().expect("utf-8 places path"),
+            "colour": [0.9, 0.29, 0.1, 1.0],
+            "widthPx": 2.0,
+            "labels": true,
+            "labelField": "name.en",
+            "labelColour": [0.08, 0.08, 0.1, 1.0],
+            "labelSizePx": 14.0
+        }));
+        assert_ne!(
+            plain.png, labelled.png,
+            "the vector labels must reach the pixels"
         );
 
         state.stop();

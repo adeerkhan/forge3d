@@ -700,3 +700,70 @@ def test_compose_plate_stacks_several_legends():
     stacked = service.compose_plate(frame, depth, title="T", legend=[first, second], caption="")
     assert stacked.shape[0] >= single.shape[0]
     assert stacked.shape != single.shape or True  # the header grows with two entries
+
+
+def test_the_reader_finds_the_named_points():
+    """A label field names the features: the reader takes the points that
+    carry it, and a file without that attribute has no points at all."""
+    service = load_service()
+    fuji = "assets/gpkg/Mount_Fuji_places.gpkg"
+
+    lines, points, crs = service.read_vector_features(fuji, "name.en")
+    assert crs == "EPSG:4326"
+    assert lines == [], "the places file has points, not lines"
+    assert len(points) == 28
+    identifier, x, y, text = points[0]
+    assert text == "Fuji-Subaru Line Fifth station"
+    assert 138.0 < x < 139.0 and 35.0 < y < 36.0
+
+    _lines, none_points, _crs = service.read_vector_features(fuji, "no-such-field")
+    assert none_points == [], "a field the file does not have has no points"
+
+    _lines, no_field, _crs = service.read_vector_features(fuji, "")
+    assert no_field == []
+
+
+def test_the_label_plan_is_the_engine_own():
+    """The studio supplies the anchors; the engine places, declutters and
+    shapes the labels (its plan, its atlas)."""
+    service = load_service()
+    records = service.vector_label_records(
+        [{"id": "a", "text": "8th Station", "x": 320.0, "y": 200.0, "depth": 0.5}]
+    )
+    assert records[0]["projected_anchor"] == [320.0, 200.0, 0.5]
+
+    layer, plan = service.vector_label_plan(
+        records,
+        640,
+        480,
+        colour=(0.08, 0.08, 0.1, 1.0),
+        size_px=14.0,
+        halo_colour=(1.0, 1.0, 1.0, 0.8),
+        halo_width=1.5,
+    )
+    assert [label.text for label in plan.accepted] == ["8th Station"]
+    accepted = plan.accepted[0]
+    # The engine sized and placed the label around the anchor it was given.
+    assert accepted.screen_bounds[0] < 320.0 < accepted.screen_bounds[2]
+    assert accepted.screen_bounds[1] < 200.0 < accepted.screen_bounds[3]
+    assert accepted.typography["font_size"] == 14.0
+
+
+def test_a_name_outside_the_packaged_atlas_is_rejected_by_the_engine():
+    """The packaged atlas is Basic Latin: the engine rejects the rest and
+    says why, rather than drawing a blank."""
+    service = load_service()
+    records = service.vector_label_records(
+        [{"id": "a", "text": "\u4e94\u5408\u76ee", "x": 320.0, "y": 200.0, "depth": 0.5}]
+    )
+    _layer, plan = service.vector_label_plan(
+        records,
+        640,
+        480,
+        colour=(0.08, 0.08, 0.1, 1.0),
+        size_px=14.0,
+        halo_colour=(1.0, 1.0, 1.0, 0.8),
+        halo_width=1.5,
+    )
+    assert list(plan.accepted) == []
+    assert [label.reason for label in plan.rejected] == ["missing_glyph"]

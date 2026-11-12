@@ -1014,21 +1014,21 @@ impl Command {
             }
 
             Command::SetTerrainVector { id, layer } => {
-                let layer = *layer;
+                let layer = layer.clone();
                 let object = project
                     .scene
                     .object(*id)
                     .ok_or(CommandError::ObjectNotFound { id: *id })?;
                 let previous = match &object.kind {
-                    crate::scene::ObjectKind::Terrain(terrain) => terrain.vector,
+                    crate::scene::ObjectKind::Terrain(terrain) => terrain.vector.clone(),
                     _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
                 };
-                if let Some(layer) = layer {
+                if let Some(layer) = layer.as_ref() {
                     if project.asset(layer.asset).is_none() {
                         return Err(CommandError::AssetNotFound { id: layer.asset });
                     }
-                    // The colour and the width are the shell's units; reject a
-                    // value the renderer's rasterizer cannot take.
+                    // The colour, the width and the label settings are the
+                    // shell's units; reject a value the renderer cannot take.
                     layer
                         .validate()
                         .map_err(|reason| CommandError::invalid("vector layer", reason))?;

@@ -314,6 +314,14 @@ pub struct TerrainVectorHandoff {
     pub colour: [f32; 4],
     /// The line's symbol width in pixels.
     pub width_px: f32,
+    /// Draw the layer's named features as labels.
+    pub labels: bool,
+    /// The attribute that names a feature (`name`, `name.en`, ...).
+    pub label_field: String,
+    /// The label colour, RGBA in 0..=1.
+    pub label_colour: [f32; 4],
+    /// The label size in pixels.
+    pub label_size_px: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -600,7 +608,7 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
                     despeckle: overlay.despeckle,
                 })
         }),
-        vector: terrain.vector.and_then(|vector| {
+        vector: terrain.vector.clone().and_then(|vector| {
             project
                 .asset(vector.asset)
                 .map(|asset| TerrainVectorHandoff {
@@ -608,6 +616,10 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
                     name: asset.name.clone(),
                     colour: vector.colour,
                     width_px: vector.width_px,
+                    labels: vector.labels,
+                    label_field: vector.label_field,
+                    label_colour: vector.label_colour,
+                    label_size_px: vector.label_size_px,
                 })
         }),
     })

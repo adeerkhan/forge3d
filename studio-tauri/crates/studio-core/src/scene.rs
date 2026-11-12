@@ -396,7 +396,7 @@ pub struct TerrainObject {
 /// physical width could never change the picture. A symbol width does, at
 /// every zoom. The rasterizer's own floor is one pixel (0.5 px and 1 px render
 /// identically — 0 changed samples, measured), so the range starts at 1.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TerrainVectorLayer {
     pub asset: AssetId,
@@ -406,6 +406,18 @@ pub struct TerrainVectorLayer {
     /// The line's symbol width in pixels.
     #[serde(default = "default_vector_width")]
     pub width_px: f32,
+    /// Draw the layer's named features as labels.
+    #[serde(default)]
+    pub labels: bool,
+    /// The attribute that names a feature (`name`, `name.en`, ...).
+    #[serde(default = "default_vector_label_field")]
+    pub label_field: String,
+    /// The label colour, RGBA in 0..=1.
+    #[serde(default = "default_vector_label_colour")]
+    pub label_colour: [f32; 4],
+    /// The label size in pixels.
+    #[serde(default = "default_vector_label_size")]
+    pub label_size_px: f32,
 }
 
 fn default_vector_colour() -> [f32; 4] {
@@ -414,6 +426,18 @@ fn default_vector_colour() -> [f32; 4] {
 
 fn default_vector_width() -> f32 {
     2.0
+}
+
+fn default_vector_label_field() -> String {
+    "name".to_owned()
+}
+
+fn default_vector_label_colour() -> [f32; 4] {
+    [0.08, 0.08, 0.1, 1.0]
+}
+
+fn default_vector_label_size() -> f32 {
+    14.0
 }
 
 /// A raster draped over the terrain, e.g. land cover or an orthophoto.
@@ -441,6 +465,19 @@ fn default_opacity() -> f32 {
 }
 
 impl TerrainVectorLayer {
+    /// A layer with the studio's defaults for everything but its asset.
+    pub fn new(asset: AssetId) -> Self {
+        Self {
+            asset,
+            colour: default_vector_colour(),
+            width_px: default_vector_width(),
+            labels: false,
+            label_field: default_vector_label_field(),
+            label_colour: default_vector_label_colour(),
+            label_size_px: default_vector_label_size(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.asset.is_nil() {
             return Err("vector layer has no asset".to_owned());
@@ -454,6 +491,21 @@ impl TerrainVectorLayer {
         }
         if !self.width_px.is_finite() || !(1.0..=20.0).contains(&self.width_px) {
             return Err("vector width must be between 1 and 20 pixels".to_owned());
+        }
+        if self.labels && self.label_field.trim().is_empty() {
+            return Err(
+                "the vector label field cannot be empty while the labels are on".to_owned(),
+            );
+        }
+        if !self
+            .label_colour
+            .iter()
+            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        {
+            return Err("vector label colour channels must be between 0 and 1".to_owned());
+        }
+        if !self.label_size_px.is_finite() || !(8.0..=48.0).contains(&self.label_size_px) {
+            return Err("vector label size must be between 8 and 48 pixels".to_owned());
         }
         Ok(())
     }

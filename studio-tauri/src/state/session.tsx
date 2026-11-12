@@ -603,6 +603,27 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [applyCommand, state],
   );
 
+  const setTerrainVectorLabels = useCallback(
+    async (
+      labels: boolean,
+      labelField: string,
+      labelColour: [number, number, number, number],
+      labelSizePx: number,
+    ) => {
+      const project = state?.project;
+      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
+      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.vector) {
+        return;
+      }
+      await applyCommand({
+        type: "setTerrainVector",
+        id: terrain.id,
+        layer: { ...terrain.kind.vector, labels, labelField, labelColour, labelSizePx },
+      });
+    },
+    [applyCommand, state],
+  );
+
   const applyMapLook = useCallback(async () => {
     const project = state?.project;
     const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
@@ -1063,6 +1084,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importTerrainVector,
       clearTerrainVector,
       setTerrainVectorStyle,
+      setTerrainVectorLabels,
       applyMapLook,
       importTerrainOverlay,
       setTerrainOverlayOpacity,
@@ -1122,6 +1144,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       importTerrainVector,
       clearTerrainVector,
       setTerrainVectorStyle,
+      setTerrainVectorLabels,
       importTerrainOverlay,
       clearTerrainOverlay,
       refreshEngine,

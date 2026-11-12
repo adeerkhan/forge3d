@@ -85,14 +85,22 @@ export interface TerrainObject {
   vector: TerrainVectorLayer | null;
 }
 
-/** A vector layer drawn on the terrain: the file, the line colour and the
- *  line's real width in the DEM's metres. */
+/** A vector layer drawn on the terrain: the file, the line colour, the line's
+ *  symbol width and the labels its named features carry. */
 export interface TerrainVectorLayer {
   asset: string;
   /** RGBA in 0..=1. */
   colour: [number, number, number, number];
   /** The line's symbol width in pixels. */
   widthPx: number;
+  /** Draw the layer's named features as labels. */
+  labels: boolean;
+  /** The attribute that names a feature (`name`, `name.en`, ...). */
+  labelField: string;
+  /** RGBA in 0..=1. */
+  labelColour: [number, number, number, number];
+  /** The label size in pixels. */
+  labelSizePx: number;
 }
 
 export interface TerrainOverlay {

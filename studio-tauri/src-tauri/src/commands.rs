@@ -788,11 +788,15 @@ pub fn set_terrain_vector(
                 .filter(|channels| channels.len() == 4)
                 .map(|channels| [channels[0], channels[1], channels[2], channels[3]])
                 .unwrap_or([0.9, 0.29, 0.1, 1.0]);
-            Some(studio_core::scene::TerrainVectorLayer {
-                asset: asset.id,
-                colour,
-                width_px: width_px.unwrap_or(2.0).clamp(1.0, 20.0),
-            })
+            // The layer's label settings are edited in the Inspector (one
+            // command each); attaching a layer starts with the labels off.
+            let mut layer = studio_core::scene::TerrainVectorLayer::new(asset.id);
+            layer.colour = colour;
+            layer.width_px = width_px.unwrap_or(2.0).clamp(1.0, 20.0);
+            layer
+                .validate()
+                .map_err(|reason| format!("vector layer: {reason}"))?;
+            Some(layer)
         }
     };
     commands.push(Command::SetTerrainVector {

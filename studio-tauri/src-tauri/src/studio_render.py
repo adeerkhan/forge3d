@@ -847,7 +847,10 @@ class StudioRenderer:
 
         vector = request.get("vector") or None
         if vector:
-            lines, vector_crs = read_vector_lines(str(vector["path"]))
+            label_field = str(vector.get("labelField", "") or "")
+            lines, points, vector_crs = read_vector_features(
+                str(vector["path"]), label_field
+            )
             dem_code = crs_code(self.dem_crs)
             file_code = crs_code(vector_crs)
             if dem_code and file_code and dem_code != file_code:
@@ -873,6 +876,49 @@ class StudioRenderer:
                 stroke_px=stroke_px,
             )
             rgb = composite_overlay(rgb, vector_overlay)
+
+            if bool(vector.get("labels", False)) and points:
+                # The labels are the engine's: its label plan places them, its
+                # text compositor draws them (the packaged MSDF atlas, the
+                # halo, the rasterizer).
+                label_colour = tuple(
+                    float(c) for c in vector.get("labelColour", (0.08, 0.08, 0.1, 1.0))
+                )
+                # A halo in the opposite tone keeps the text readable on any
+                # ground: light text gets a dark halo and the other way round.
+                dark_text = sum(label_colour[:3]) / 3.0 < 0.5
+                halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
+                rgb, label_summary = compose_vector_labels(
+                    rgb,
+                    params,
+                    self.heights,
+                    self.dem_bounds,
+                    points,
+                    width,
+                    height,
+                    colour=label_colour,
+                    size_px=float(vector.get("labelSizePx", 14.0) or 14.0),
+                    halo_colour=halo,
+                )
+                if not label_summary["accepted"]:
+                    # Say why the labels drew nothing: the engine rejected them
+                    # (a name outside the packaged atlas, say), and a silent
+                    # empty layer looks like a broken control.
+                    reasons = ", ".join(
+                        "%s %d" % (reason, count)
+                        for reason, count in sorted(label_summary["rejected"].items())
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "event": "warning",
+                                "message": "the vector labels drew nothing: %d features named, "
+                                "none accepted (%s)"
+                                % (label_summary["candidates"], reasons or "no reasons given"),
+                            }
+                        ),
+                        flush=True,
+                    )
 
         rgb = apply_post_effects(rgb, quality)
         legend_name = str(quality.get("colormap") or "").strip()
@@ -1374,6 +1420,66 @@ def _wkb_line_strings(data: bytes) -> list[list[tuple[float, float]]]:
     return lines
 
 
+def _wkb_points(data: bytes) -> list[tuple[float, float]]:
+    """The points inside a WKB geometry (Point/MultiPoint/Polygon/LineString)."""
+    import struct
+
+    points: list[tuple[float, float]] = []
+
+    def parse(offset: int, depth: int = 0):
+        if offset + 5 > len(data) or depth > 4:
+            return offset
+        order = data[offset]
+        prefix = "<" if order == 1 else ">"
+        (geometry_type,) = struct.unpack_from(prefix + "I", data, offset + 1)
+        offset += 5
+        base = geometry_type % 1000
+        if base == 1:  # Point
+            x, y = struct.unpack_from(prefix + "dd", data, offset)
+            points.append((x, y))
+            offset += 16
+        elif base == 2:  # LineString
+            (count,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4 + count * 16
+        elif base == 3:  # Polygon
+            (rings,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            for _ in range(rings):
+                (count,) = struct.unpack_from(prefix + "I", data, offset)
+                offset += 4 + count * 16
+        elif base == 4:  # MultiPoint
+            (parts,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            for _ in range(parts):
+                offset = parse(offset, depth + 1)
+        elif base in (5, 6, 7):  # Multi* / GeometryCollection
+            (parts,) = struct.unpack_from(prefix + "I", data, offset)
+            offset += 4
+            for _ in range(parts):
+                offset = parse(offset, depth + 1)
+        return offset
+
+    parse(0)
+    return points
+
+
+def _gpkg_geometry_points(blob: bytes) -> list[tuple[float, float]]:
+    """The points inside a GeoPackage binary geometry blob."""
+    import struct
+
+    if len(blob) < 8 or blob[:2] != _GPKG_MAGIC:
+        return []
+    flags = blob[3]
+    offset = 8
+    if flags & 0x20:  # the srs id is present
+        offset += 4
+    envelope = (flags >> 1) & 0x07
+    offset += {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get(envelope, 0)
+    if offset >= len(blob):
+        return []
+    return _wkb_points(blob[offset:])
+
+
 def _gpkg_geometry_lines(blob: bytes) -> list[list[tuple[float, float]]]:
     """The lines inside a GeoPackage binary geometry blob."""
     import struct
@@ -1391,25 +1497,33 @@ def _gpkg_geometry_lines(blob: bytes) -> list[list[tuple[float, float]]]:
     return _wkb_line_strings(blob[offset:])
 
 
-def read_vector_lines(path: str):
-    """The polylines of a vector file, in the file's own coordinates.
+def read_vector_features(path: str, label_field: str = ""):
+    """The features of a vector file, in the file's own coordinates.
 
-    Returns `(lines, crs)` where `crs` is the file's CRS (an EPSG string for a
-    GeoPackage, whatever the GeoJSON says) or `None` when the file declares
-    none. A GeoPackage's CRS comes from `gpkg_geometry_columns`; a GeoJSON's
-    is only trusted when it names one.
+    Returns `(lines, points, crs)`:
+
+    * `lines` — the polylines, as `read_vector_lines` returns them;
+    * `points` — `(id, x, y, text)` for the point features that carry a
+      non-empty value in `label_field`; the text is what a label would say,
+      and a file without that attribute simply has no points;
+    * `crs` — the file's CRS (an EPSG string for a GeoPackage, whatever the
+      GeoJSON says) or `None` when the file declares none. A GeoPackage's CRS
+      comes from `gpkg_geometry_columns`; a GeoJSON's is only trusted when it
+      names one.
     """
     import json
     import os
     import sqlite3
 
+    field = str(label_field or "").strip()
     lowered = path.lower()
     if lowered.endswith((".json", ".geojson")):
         with open(path, "r", encoding="utf-8") as handle:
             document = json.load(handle)
         lines: list[list[tuple[float, float]]] = []
+        points: list[tuple[str, float, float, str]] = []
         crs = None
-        for feature in document.get("features", []) or []:
+        for index, feature in enumerate(document.get("features", []) or []):
             geometry = feature.get("geometry") or {}
             kind = str(geometry.get("type", "")).lower()
             coordinates = geometry.get("coordinates") or []
@@ -1418,7 +1532,18 @@ def read_vector_lines(path: str):
             elif kind == "multilinestring":
                 for part in coordinates:
                     lines.append([(float(x), float(y)) for x, y in part])
-        return lines, crs
+            elif kind == "point":
+                text = _feature_text(feature, field)
+                if text:
+                    points.append(
+                        (
+                            str(feature.get("id", "feature-%d" % index)),
+                            float(coordinates[0]),
+                            float(coordinates[1]),
+                            text,
+                        )
+                    )
+        return lines, points, crs
 
     if not lowered.endswith((".gpkg", ".sqlite", ".db")):
         raise RuntimeError(
@@ -1448,16 +1573,63 @@ def read_vector_lines(path: str):
                 geometry_column, srs_id = row[0], row[1]
         except sqlite3.Error:
             pass
+        quoted_table = table.replace('"', '""')
+        quoted_geometry = geometry_column.replace('"', '""')
+        # The label attribute is read only when it exists: a file without it
+        # has no labels, and the column list says so before the query runs.
+        columns = set()
+        try:
+            for row in cursor.execute('PRAGMA table_info("%s")' % quoted_table):
+                columns.add(str(row[1]))
+        except sqlite3.Error:
+            columns = set()
+        selected = [quoted_geometry]
+        if field and field in columns:
+            selected.append('"%s"' % field.replace('"', '""'))
         lines = []
-        for (blob,) in cursor.execute(
-            'SELECT "%s" FROM "%s"' % (geometry_column.replace('"', '""'), table.replace('"', '""'))
+        points = []
+        for row in cursor.execute(
+            'SELECT %s FROM "%s"' % (", ".join(selected), quoted_table)
         ):
-            if isinstance(blob, (bytes, bytearray)):
-                lines.extend(_gpkg_geometry_lines(bytes(blob)))
+            blob = row[0]
+            if not isinstance(blob, (bytes, bytearray)):
+                continue
+            lines.extend(_gpkg_geometry_lines(bytes(blob)))
+            if len(row) > 1 and field:
+                text = str(row[1] or "").strip()
+                if text:
+                    for x, y in _gpkg_geometry_points(bytes(blob)):
+                        points.append(("feature-%s" % len(points), x, y, text))
         crs = "EPSG:%d" % int(srs_id) if srs_id is not None else None
-        return lines, crs
+        return lines, points, crs
     finally:
         connection.close()
+
+
+def _feature_text(feature, field: str) -> str:
+    """A feature's value in `field`, or "" when it has none."""
+    if not field:
+        return ""
+    properties = feature.get("properties")
+    if isinstance(properties, dict):
+        value = properties.get(field)
+    else:
+        value = feature.get(field)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def read_vector_lines(path: str):
+    """The polylines of a vector file, in the file's own coordinates.
+
+    Returns `(lines, crs)` where `crs` is the file's CRS (an EPSG string for a
+    GeoPackage, whatever the GeoJSON says) or `None` when the file declares
+    none. A GeoPackage's CRS comes from `gpkg_geometry_columns`; a GeoJSON's
+    is only trusted when it names one.
+    """
+    lines, _points, crs = read_vector_features(path)
+    return lines, crs
 
 
 def crs_code(crs) -> str:
@@ -1483,6 +1655,215 @@ def _sample_height(heights, u: float, v: float) -> float:
     top = float(heights[y0, x0]) * (1.0 - tx) + float(heights[y0, x1]) * tx
     bottom = float(heights[y1, x0]) * (1.0 - tx) + float(heights[y1, x1]) * tx
     return top * (1.0 - ty) + bottom * ty
+
+
+def vector_label_anchors(params, heights, bounds, points, width: int, height: int):
+    """The screen anchors of the labelled points, through the engine's camera.
+
+    Each point is placed on the terrain (its own coordinates become the
+    terrain's UV, the height is sampled there) and projected with the engine's
+    own camera (`project_terrain_points`), so a label sits on its feature
+    rather than near it. A point whose anchor lands over the sky — where the
+    engine's terrain depth says there is no ground — is dropped: a label must
+    not float in the air.
+    """
+    import numpy as np
+
+    if not points or bounds is None:
+        return []
+    west, south, east, north = (float(value) for value in bounds)
+    if not east > west or not north > south:
+        return []
+
+    placed = []
+    for identifier, x, y, text in points:
+        u = (float(x) - west) / (east - west)
+        v = (north - float(y)) / (north - south)
+        if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            continue
+        placed.append((identifier, u, v, text))
+    if not placed:
+        return []
+
+    batch = [[u, v, _sample_height(heights, u, v), 0.0] for _id, u, v, _text in placed]
+    projected = params.project_terrain_points(batch, shared_frame=True)
+    if not projected:
+        return []
+
+    # Where is the terrain visible? The engine rasterizes the DEM's depth with
+    # the same camera, so an anchor over the sky has no ground under it.
+    terrain_depth = None
+    try:
+        terrain_depth = np.asarray(
+            params.project_terrain_depth(
+                heights, (int(width), int(height)), None, None, True
+            )
+        )
+    except Exception:  # noqa: BLE001 - the depth test is optional
+        terrain_depth = None
+
+    anchors = []
+    for (identifier, _u, _v, text), value in zip(placed, projected):
+        if value is None:
+            continue
+        px, py, depth = float(value[0]), float(value[1]), float(value[2])
+        if terrain_depth is not None:
+            column = int(px)
+            row = int(py)
+            if 0 <= row < terrain_depth.shape[0] and 0 <= column < terrain_depth.shape[1]:
+                # The raster's background is exactly 1.0 (the far plane); the
+                # terrain's depth is just below it, so the test is "is this
+                # pixel the background", not "is it far away".
+                if float(terrain_depth[row, column]) >= 1.0 - 1e-6:
+                    continue
+        anchors.append({"id": identifier, "text": text, "x": px, "y": py, "depth": depth})
+    return anchors
+
+
+def vector_label_records(anchors):
+    """The engine's label records for the projected anchors.
+
+    The records are the engine's screen-space label records: the geometry is
+    the anchor in pixels and the projected anchor carries the engine's own
+    depth, so the plan can reason about the label's place in the frame.
+    """
+    records = []
+    for anchor in anchors:
+        records.append(
+            {
+                "id": anchor["id"],
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [float(anchor["x"]), float(anchor["y"])],
+                },
+                "properties": {"name": anchor["text"]},
+                "projected_anchor": [
+                    float(anchor["x"]),
+                    float(anchor["y"]),
+                    float(anchor["depth"]),
+                ],
+            }
+        )
+    return records
+
+
+def vector_label_plan(
+    records,
+    width: int,
+    height: int,
+    *,
+    colour=(0.08, 0.08, 0.1, 1.0),
+    size_px: float = 14.0,
+    halo_colour=(1.0, 1.0, 1.0, 0.8),
+    halo_width: float = 1.5,
+):
+    """The engine's own label plan for the layer's named features.
+
+    The engine places the labels, resolves their collisions and shapes their
+    glyphs (the packaged Latin atlas); the studio supplies the records and the
+    typography, and nothing else.
+    """
+    import forge3d as f3d
+
+    features = [
+        {
+            "id": record["id"],
+            "geometry": record["geometry"],
+            "properties": record["properties"],
+        }
+        for record in records
+    ]
+    layer = f3d.LabelLayer.from_features(
+        features,
+        text="name",
+        crs=None,
+        target_crs=None,
+        occlusion="none",
+        layer_id="vector-labels",
+        atlas=f3d.FontAtlas.default_latin(),
+    )
+    for record, source in zip(layer.labels, records):
+        record["projected_anchor"] = list(source["projected_anchor"])
+    plan = f3d.LabelPlan.compile(
+        labels=layer.labels,
+        camera=None,
+        viewport=(int(width), int(height)),
+        glyph_atlas=layer.glyph_atlas,
+        typography={
+            "font_size": float(size_px),
+            "color": [float(channel) for channel in colour],
+            "halo_color": [float(channel) for channel in halo_colour],
+            "halo_width_px": float(halo_width),
+        },
+    )
+    return layer, plan
+
+
+def compose_vector_labels(
+    rgb,
+    params,
+    heights,
+    bounds,
+    points,
+    width: int,
+    height: int,
+    *,
+    colour=(0.08, 0.08, 0.1, 1.0),
+    size_px: float = 14.0,
+    halo_colour=(1.0, 1.0, 1.0, 0.8),
+    halo_width: float = 1.5,
+):
+    """The engine's own label compositor over the frame.
+
+    Nothing here lays out glyphs: the engine's `LabelPlan.compile` places the
+    labels, resolves their collisions and shapes their glyphs, and the engine's
+    `composite_label_layers` draws them with the packaged MSDF atlas, the halo
+    and the rasterizer — the same stream `MapScene.render` uses. The studio
+    only supplies the features and the anchors its own camera projected.
+
+    The anchors are screen positions (the studio owns the camera), so the
+    records are the engine's screen-space label records.
+    """
+    import numpy as np
+
+    anchors = vector_label_anchors(params, heights, bounds, points, width, height)
+    if not anchors:
+        return rgb, {"candidates": 0, "accepted": 0, "rejected": {}}
+
+    import forge3d as f3d
+
+    layer, plan = vector_label_plan(
+        vector_label_records(anchors),
+        width,
+        height,
+        colour=colour,
+        size_px=size_px,
+        halo_colour=halo_colour,
+        halo_width=halo_width,
+    )
+    rejected: Dict[str, int] = {}
+    for label in plan.rejected:
+        reason = str(getattr(label, "reason", "rejected"))
+        rejected[reason] = rejected.get(reason, 0) + 1
+    summary = {
+        "candidates": len(anchors),
+        "accepted": len(plan.accepted),
+        "rejected": rejected,
+    }
+    if not plan.accepted:
+        return rgb, summary
+
+    composited, rendered = f3d.composite_label_layers(
+        np.ascontiguousarray(rgb, dtype=np.uint8),
+        [layer],
+        {layer.layer_id: plan},
+    )
+    if not rendered:
+        return rgb, summary
+    pixels = np.asarray(composited)
+    if pixels.ndim != 3 or pixels.shape[2] < 3:
+        return rgb, summary
+    return np.ascontiguousarray(pixels[:, :, :3], dtype=np.uint8), summary
 
 
 def vector_overlay_rgba(

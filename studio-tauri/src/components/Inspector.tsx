@@ -1387,6 +1387,80 @@ export function MapSection() {
             </div>
           </>
         )}
+        {terrain.vector && (
+          <>
+            <Toggle
+              label="Labels"
+              checked={terrain.vector.labels}
+              onChange={(checked) =>
+                void actions.setTerrainVectorLabels(
+                  checked,
+                  terrain.vector!.labelField,
+                  terrain.vector!.labelColour,
+                  terrain.vector!.labelSizePx,
+                )
+              }
+            />
+            {terrain.vector.labels && (
+              <>
+                <TextField
+                  label="Label field"
+                  value={terrain.vector.labelField}
+                  onCommit={(value) =>
+                    void actions.setTerrainVectorLabels(
+                      true,
+                      value,
+                      terrain.vector!.labelColour,
+                      terrain.vector!.labelSizePx,
+                    )
+                  }
+                />
+                <NumberField
+                  label="Label size (px)"
+                  value={terrain.vector.labelSizePx}
+                  step={1}
+                  min={8}
+                  max={48}
+                  onCommit={(labelSizePx) =>
+                    void actions.setTerrainVectorLabels(
+                      true,
+                      terrain.vector!.labelField,
+                      terrain.vector!.labelColour,
+                      labelSizePx,
+                    )
+                  }
+                />
+                <div className="pair">
+                  {(["R", "G", "B"] as const).map((channel, index) => (
+                    <NumberField
+                      key={channel}
+                      label={channel}
+                      value={terrain.vector!.labelColour[index]}
+                      step={0.05}
+                      min={0}
+                      max={1}
+                      onCommit={(value) => {
+                        const labelColour = [...terrain.vector!.labelColour] as [
+                          number,
+                          number,
+                          number,
+                          number,
+                        ];
+                        labelColour[index] = value;
+                        void actions.setTerrainVectorLabels(
+                          true,
+                          terrain.vector!.labelField,
+                          labelColour,
+                          terrain.vector!.labelSizePx,
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
+          </>
+        )}
         <div className="inline-actions">
           <button
             type="button"
@@ -1410,7 +1484,9 @@ export function MapSection() {
           on the terrain by the engine's own camera projection and drawn with
           the engine's anti-aliased vector rasterizer. The width is a symbol
           width in pixels: a real rail is sub-pixel at a country scale, so a
-          physical width could not change the picture.
+          physical width could not change the picture. Labels are drawn by the
+          engine's own text compositor: the layer's named features are placed,
+          decluttered and shaped by the engine's label plan.
         </p>
       </Section>
 

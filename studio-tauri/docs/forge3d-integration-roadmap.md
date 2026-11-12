@@ -59,7 +59,8 @@ be a payload field: vector layers and meshes.
 | 5.19 plate furniture: scale bar and north arrow | done |
 | 5.20 the categorical legend (class maps snap back to the palette) | done |
 | 5.21 the interactive path's stale shader contract | repaired (measured; not a swap) |
-| 5.22 vector layers — the rail network on the terrain | done (lines; labels/furniture next) |
+| 5.22 vector layers — the rail network on the terrain | done (lines; labels next) |
+| 5.23 vector labels — the engine's own text compositor | done (labels; furniture next) |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -653,16 +654,55 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 - The layer is a terrain field (`TerrainVectorLayer`: asset, RGBA colour,
   symbol width in pixels), one undoable command (`SetTerrainVector`), a payload
   key (`vector`) and a Map-tab section.
-- **Still lacking** (14.5): labels, furniture, polygons and a legend for the
-  *vector* attributes; the layer is lines only, one layer, drawn over the
-  terrain rather than occluded by its ridges. Labels are blocked on the
-  engine's label plan, which is recipe-bound: the compositor takes MapScene's
-  compiled glyph batches, so adopting it is the Phase 15 convergence, and
-  laying out glyphs again in the shell would be a second implementation.
+- **Still lacking**: furniture, polygons and a legend for the *vector*
+  attributes; the layer is lines plus labels, one layer, drawn over the
+  terrain rather than occluded by its ridges.
 - Check: the reader (a real GeoPackage), the vector legend, the stacked plate
   legends, the command's undo and its pixel-width range rejections, the
   payload and wire shape, and an end-to-end engine test that the layer reaches
   the pixels (`the_vector_layer_reaches_the_pixels`).
+
+### 5.23 Vector labels — the engine's own text compositor (1 day) — **done**
+- **The labels are the engine's, not the shell's.** The engine already had the
+  whole cartography: `LabelPlan.compile` places the labels, resolves their
+  collisions, shapes their glyphs against the packaged MSDF atlas, and the
+  native text compositor draws them with the halo and the rasterizer. The
+  studio supplies the features and the anchors its own camera projected — and
+  nothing else. Laying out glyphs in the shell would have been a second
+  implementation, so the engine's compositor was made public instead:
+  `forge3d.composite_label_layers(base, layers, plans)` draws a compiled plan
+  over an image the caller owns, with the same glyph stream `MapScene.render`
+  uses (the private path now calls it, so the two cannot drift).
+- **The anchors come from the engine's camera.** A named point becomes the
+  terrain's UV, the height is sampled there, and
+  `TerrainRenderParams.project_terrain_points` projects it through the exact
+  camera the frame was rendered with, so a label sits on its feature. An
+  anchor over the sky — where the engine's terrain depth says there is no
+  ground — is dropped.
+- **Measured** (Mount Fuji 30 m DEM, 900×700, 30 km radius, `name.en`): 28
+  named features → 28 anchors → the engine's plan accepts **10** (13 rejected
+  `priority_lost`, 5 `collision`). Labels off → on: **30,261** changed samples
+  (mean 1.367). Label colour dark → blue: **20,114** (mean 0.375). Label size
+  14 → 24 px: **78,312** (mean 2.722). Label field `name.en` → `name` (the
+  file's Japanese names): **30,261** — the labels vanish, because the engine
+  rejects 37 of them as `missing_glyph` and 2 as `shaping_failed`: the
+  packaged atlas is Basic Latin. A field the file does not have: **30,261**
+  (no points, no labels).
+- **A layer that cannot draw says so.** When the labels are asked for and the
+  engine accepts none, the service reports it (`the vector labels drew
+  nothing: 39 features named, none accepted (missing_glyph 37, shaping_failed
+  2)`), and the shell's reader now logs the warning events the protocol
+  already had — a skipped overlay or water layer was being dropped on the
+  floor before.
+- **Still lacking**: the labels are not occluded by the terrain's ridges (the
+  engine's MapScene has a depth occlusion sampler; the studio's vector layer
+  has the sky test), the engine's solver runs with a zero margin, so dense
+  labels may touch, and the packaged atlas is Latin only — a CJK place name
+  needs a baked atlas.
+- Check: the reader (the named points, a missing field), the engine's plan
+  (the accepted label, its bounds, a rejected name), the model's label
+  defaults and refusals, the payload, and an end-to-end engine test that the
+  labels reach the pixels (`the_vector_labels_reach_the_pixels`).
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

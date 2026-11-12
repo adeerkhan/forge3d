@@ -102,6 +102,13 @@ export interface SessionApi {
     clearTerrainVector(): Promise<void>;
     /** Recolour or rewidth the terrain's vector layer (one command). */
     setTerrainVectorStyle(colour: [number, number, number, number], widthPx: number): Promise<void>;
+    /** Change the terrain's vector labels (one command). */
+    setTerrainVectorLabels(
+      labels: boolean,
+      labelField: string,
+      labelColour: [number, number, number, number],
+      labelSizePx: number,
+    ): Promise<void>;
     /** The map look in one undoable step: relief, map camera, north-west sun,
      *  ray-marched hillshade — and the viewport switches to the camera. */
     applyMapLook(): Promise<void>;
