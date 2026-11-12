@@ -116,6 +116,7 @@ export interface CartographyLayer {
   sizePx?: number;
   /** plate */
   title?: string;
+  caption?: string;
   northArrow?: boolean;
   scaleBar?: boolean;
 }

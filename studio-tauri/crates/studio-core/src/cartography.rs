@@ -85,11 +85,16 @@ pub enum CartographyLayerKind {
         /// The label size in pixels.
         size_px: f32,
     },
-    /// The map plate: the page the map is cut out on.
+    /// The map plate: the page the map is cut out on, with its furniture.
     Plate {
         title: String,
+        /// The line along the bottom of the page.
+        caption: String,
+        /// The north arrow (only where the view is north-up).
         north_arrow: bool,
+        /// The scale bar (only where the ground scale is known).
         scale_bar: bool,
+        /// The legends of the layers below.
         legend: bool,
     },
 }

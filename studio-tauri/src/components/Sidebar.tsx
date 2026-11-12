@@ -93,7 +93,15 @@ const TABS: {
 
 const STORAGE_KEY = "studio.propsTab";
 
-export function SettingsSidebar({ fixedTab }: { fixedTab?: PropsTab }) {
+export function SettingsSidebar({
+  fixedTab,
+  hiddenTabs = [],
+}: {
+  /** The one tab to show (the cartography workspace shows the map's layers). */
+  fixedTab?: PropsTab;
+  /** Tabs that belong to another workspace. */
+  hiddenTabs?: PropsTab[];
+}) {
   const { state } = useSession();
   const [tab, setTab] = useState<PropsTab>(() => {
     try {
@@ -125,7 +133,10 @@ export function SettingsSidebar({ fixedTab }: { fixedTab?: PropsTab }) {
         aria-orientation="vertical"
         aria-label="Properties"
       >
-        {TABS.filter((entry) => !fixedTab || entry.id === fixedTab).map(({ id, label, Icon, title }) => (
+        {TABS.filter(
+          (entry) =>
+            (!fixedTab || entry.id === fixedTab) && !hiddenTabs.includes(entry.id),
+        ).map(({ id, label, Icon, title }) => (
           <button
             key={id}
             type="button"

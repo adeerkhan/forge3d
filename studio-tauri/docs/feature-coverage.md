@@ -50,6 +50,8 @@ needs from those.
 | Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
 | Vector overlays and labels | **lines and labels** | the engine's projection + OIT rasterizer for the lines; the engine's label plan + text compositor for the labels; furniture is the rest of the tier |
 | The map as a layer stack | **full** | the studio's own ordered stack (relief, ramp, imagery, vector, labels, plate), drawn back to front by the render service |
+| The gallery's recipes as starter scenes | **full** | the Swiss land-cover, the Luxembourg rail network and the Mount Fuji labels, with their layers, camera and sun |
+| Map furniture (title, caption, north arrow, scale bar, legend) | **full** | the plate layer's own switches, drawn by the studio's page compositor |
 | Picking and selection | partial | the Solid view picks objects; the engine's terrain picking is not used |
 | Point clouds | none | a different product tier |
 | Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |

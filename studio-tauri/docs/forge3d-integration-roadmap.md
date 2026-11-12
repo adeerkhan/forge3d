@@ -63,6 +63,7 @@ be a payload field: vector layers and meshes.
 | 5.23 vector labels — the engine's own text compositor | done (labels; furniture next) |
 | 5.24 the cartography workspace — the map as a layer stack | done (the stack; the engine's MapScene next) |
 | 5.25 the quality surface: the still on the engine's CONCORDIA path | done (the clouds are real; the GPU cartography next) |
+| 5.26 the gallery's starter scenes, and the plate's furniture | done |
 | Release audit as a CI gate (`tests/test_studio_surface_audit.py`, fast lane) | done |
 | 5.15 vector overlays (rail network) | **blocked, measured**: the offscreen path has no vector geometry (0 changed samples) |
 | Cartography: map plate | **blocked** (Pro-gated: `_check_pro_access`), and a class legend needs a class scheme |
@@ -779,6 +780,33 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   the absolute world scale), the engine's GPU measurement (the clouds reach the
   physical model), the studio's payload and its e2e test (`the_clouds_reach_the_pixels`),
   and the service's own clouds settings.
+
+### 5.26 The gallery's starter scenes, and the plate's furniture (2 days) — **done**
+- **The New Project dialog now offers the gallery's recipes**, not just the
+  bare DEMs: **Swiss land-cover** (the national DEM with the land-cover
+  classification draped on it, the class legend, the title, the caption and the
+  north arrow — the gallery's 03), **Luxembourg rail network** (the DEM with
+  the 2,035 rail features draped in red — the gallery's 04), and **Mount Fuji
+  labels** (the cone with the climbing stations named — the gallery's 02).
+  Each recipe is data: the files it draws, the layers it builds, the camera
+  direction and the sun. The whole recipe is **one undo step**, and a file the
+  checkout does not have is skipped rather than faked.
+- **The map's own settings live in the Cartography workspace.** The Map tab is
+  the cartography's properties (the layer stack's), so it is hidden in the scene
+  workspace and pinned in the cartography one.
+- **The furniture belongs to the plate layer.** The north arrow, the scale bar
+  and the legend were drawn unconditionally (the arrow only where the view is
+  north-up, the bar only where the ground scale is known); they are now the
+  plate layer's own switches, and the plate has a caption of its own. Measured
+  on the Swiss plate: the north arrow **663 changed samples**, the scale bar
+  **2,292**, the legend turns the page from 750×683 into 900×915 (the legend
+  column), the whole furniture **2,955**. The land cover itself: **1,176,000**
+  changed samples (mean 28.6).
+- The plate's caption is drawn with the packaged Latin atlas, which has no
+  middot: the recipes use a plain dash.
+- Check: the recipes' own tests (the layers, the camera, the sun; the label
+  layer naming the vector layer), the plate's furniture switches in the service,
+  and the three scenes rendered end to end.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

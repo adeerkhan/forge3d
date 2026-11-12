@@ -347,6 +347,7 @@ pub enum CartographyLayerHandoffKind {
     },
     Plate {
         title: String,
+        caption: String,
         north_arrow: bool,
         scale_bar: bool,
         legend: bool,
@@ -669,11 +670,13 @@ pub fn cartography_handoff(project: &Project) -> Vec<CartographyLayerHandoff> {
             }
             crate::cartography::CartographyLayerKind::Plate {
                 title,
+                caption,
                 north_arrow,
                 scale_bar,
                 legend,
             } => CartographyLayerHandoffKind::Plate {
                 title: title.clone(),
+                caption: caption.clone(),
                 north_arrow: *north_arrow,
                 scale_bar: *scale_bar,
                 legend: *legend,

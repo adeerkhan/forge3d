@@ -1087,6 +1087,7 @@ mod tests {
             visible: true,
             kind: CartographyLayerHandoffKind::Plate {
                 title: "Land cover".to_owned(),
+                caption: "Swiss Alps".to_owned(),
                 north_arrow: true,
                 scale_bar: true,
                 legend: true,

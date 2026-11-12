@@ -227,6 +227,11 @@ export function CartographyProperties() {
               value={layer.title ?? ""}
               onCommit={(title) => update({ title })}
             />
+            <TextField
+              label="Caption"
+              value={layer.caption ?? ""}
+              onCommit={(caption) => update({ caption })}
+            />
             <Toggle
               label="North arrow"
               checked={layer.northArrow ?? true}

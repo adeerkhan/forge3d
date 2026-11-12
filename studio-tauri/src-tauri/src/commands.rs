@@ -71,12 +71,12 @@ pub struct ScenePreset {
 #[tauri::command(async)]
 pub fn scene_presets(forge: State<'_, Forge3dState>) -> Vec<ScenePreset> {
     let mut presets = Vec::new();
-    for (id, name, _dem_file, description) in crate::forge3d::SCENE_PRESETS {
-        let seed = forge.terrain_seed(Some(id));
+    for recipe in &crate::forge3d::SCENE_PRESETS {
+        let seed = forge.terrain_seed(Some(recipe.id));
         presets.push(ScenePreset {
-            id: id.to_owned(),
-            name: name.to_owned(),
-            description: description.to_owned(),
+            id: recipe.id.to_owned(),
+            name: recipe.name.to_owned(),
+            description: recipe.description.to_owned(),
             dem_name: seed.as_ref().map(|seed| seed.name.clone()),
             grid: seed.as_ref().and_then(|seed| seed.dimensions),
             elevation_range: seed.as_ref().and_then(|seed| seed.elevation_range),
@@ -101,7 +101,229 @@ pub fn new_project(
         Some("empty") => None,
         other => forge.terrain_seed(other),
     };
-    Ok(lock(&state)?.new_project_seeded(name, seed))
+    let recipe = forge.scene_recipe(preset.as_deref());
+    let mut session = lock(&state)?;
+    let mut snapshot = session.new_project_seeded(name, seed);
+    if let Some(recipe) = recipe {
+        let commands = recipe_commands(recipe, &snapshot);
+        if !commands.is_empty() {
+            let (_, next) = session
+                .apply(studio_core::Command::Batch { commands })
+                .map_err(|error| error.to_string())?;
+            snapshot = next;
+        }
+    }
+    Ok(snapshot)
+}
+
+/// The commands that build a starter scene's cartography.
+///
+/// The recipe's files become assets and layers (one command each, so the whole
+/// recipe is one undo step), and the camera and the sun are placed where the
+/// gallery's recipe says.
+fn recipe_commands(
+    recipe: &crate::forge3d::SceneRecipe,
+    snapshot: &SessionState,
+) -> Vec<studio_core::Command> {
+    use studio_core::cartography::{CartographyLayer, CartographyLayerKind};
+    use studio_core::command::Command;
+    use studio_core::ids::new_id;
+    use studio_core::project::AssetKind;
+
+    let project = &snapshot.project;
+    let mut commands = Vec::new();
+
+    // The layers, back to front. A file the checkout does not have is skipped
+    // rather than faked: the scene is the data it has.
+    let mut vector_layer_id: Option<studio_core::cartography::CartographyLayerId> = None;
+    for layer in recipe.layers {
+        match layer {
+            crate::forge3d::RecipeLayer::Imagery {
+                relative,
+                opacity,
+                preserve_colors,
+                despeckle,
+            } => {
+                let Some(file) = resolve_asset(relative) else {
+                    continue;
+                };
+                let asset_id = new_id();
+                commands.push(Command::AddAsset {
+                    asset: studio_core::Asset {
+                        id: asset_id,
+                        name: file.name.clone(),
+                        path: file.path.clone(),
+                        kind: AssetKind::Orthophoto,
+                        byte_size: file.byte_size,
+                    },
+                });
+                commands.push(Command::AddCartographyLayer {
+                    layer: CartographyLayer::new(CartographyLayerKind::Imagery {
+                        asset: asset_id,
+                        opacity: *opacity,
+                        preserve_colors: *preserve_colors,
+                        despeckle: *despeckle,
+                    }),
+                    index: None,
+                });
+            }
+            crate::forge3d::RecipeLayer::Vector {
+                relative,
+                colour,
+                width_px,
+            } => {
+                let Some(file) = resolve_asset(relative) else {
+                    continue;
+                };
+                let asset_id = new_id();
+                commands.push(Command::AddAsset {
+                    asset: studio_core::Asset {
+                        id: asset_id,
+                        name: file.name.clone(),
+                        path: file.path.clone(),
+                        kind: AssetKind::Vector,
+                        byte_size: file.byte_size,
+                    },
+                });
+                // The layer's id is minted here so the label layer below can
+                // name this one: a label layer without its source is dropped.
+                let id = new_id();
+                let mut layer = CartographyLayer::new(CartographyLayerKind::Vector {
+                    asset: asset_id,
+                    colour: *colour,
+                    width_px: *width_px,
+                });
+                layer.id = id;
+                commands.push(Command::AddCartographyLayer { layer, index: None });
+                vector_layer_id = Some(id);
+            }
+            crate::forge3d::RecipeLayer::Labels {
+                relative,
+                field,
+                colour,
+                size_px,
+            } => {
+                let Some(file) = resolve_asset(relative) else {
+                    continue;
+                };
+                // The labels name the vector layer's features: the file is the
+                // same one, so the asset is reused when it is already there.
+                let asset_id = project
+                    .assets
+                    .iter()
+                    .find(|asset| asset.path == file.path)
+                    .map(|asset| asset.id)
+                    .unwrap_or_else(new_id);
+                if project.asset(asset_id).is_none() {
+                    commands.push(Command::AddAsset {
+                        asset: studio_core::Asset {
+                            id: asset_id,
+                            name: file.name.clone(),
+                            path: file.path.clone(),
+                            kind: AssetKind::Vector,
+                            byte_size: file.byte_size,
+                        },
+                    });
+                }
+                let Some(source) = vector_layer_id else {
+                    continue;
+                };
+                commands.push(Command::AddCartographyLayer {
+                    layer: CartographyLayer::new(CartographyLayerKind::Labels {
+                        source,
+                        field: (*field).to_owned(),
+                        colour: *colour,
+                        size_px: *size_px,
+                    }),
+                    index: None,
+                });
+            }
+            crate::forge3d::RecipeLayer::Plate { title, caption } => {
+                commands.push(Command::AddCartographyLayer {
+                    layer: CartographyLayer::new(CartographyLayerKind::Plate {
+                        title: (*title).to_owned(),
+                        caption: (*caption).to_owned(),
+                        north_arrow: true,
+                        scale_bar: true,
+                        legend: true,
+                    }),
+                    index: None,
+                });
+            }
+        }
+    }
+
+    // The camera and the sun.
+    if let (Some((azimuth, polar)), Some(terrain)) = (recipe.camera, project.terrain_object()) {
+        let Some(terrain) = terrain.terrain() else {
+            return commands;
+        };
+        let Some(camera) = project.scene.camera() else {
+            return commands;
+        };
+        let studio_core::ObjectKind::Camera(camera_kind) = camera.kind else {
+            return commands;
+        };
+        let Some((transform, fov)) = studio_core::workspace::map_camera_transform(
+            terrain,
+            azimuth,
+            polar,
+            f64::from(camera_kind.fov_deg),
+        ) else {
+            return commands;
+        };
+        commands.push(Command::SetTransform {
+            id: camera.id,
+            transform,
+        });
+        commands.push(Command::SetCamera {
+            id: camera.id,
+            camera: studio_core::CameraObject {
+                fov_deg: fov,
+                ..camera_kind
+            },
+        });
+    }
+    if let Some((azimuth, elevation)) = recipe.sun {
+        if let Some(sun) = project.scene.objects.iter().find(|object| {
+            matches!(&object.kind, studio_core::ObjectKind::Light(light) if light.kind == studio_core::LightKind::Directional)
+        }) {
+            commands.push(Command::SetTransform {
+                id: sun.id,
+                transform: studio_core::Transform {
+                    translation: sun.transform.translation,
+                    rotation_deg: studio_core::workspace::sun_rotation(
+                        studio_core::workspace::map_sun_direction(azimuth, elevation),
+                    ),
+                    scale: sun.transform.scale,
+                },
+            });
+        }
+    }
+    commands
+}
+
+/// A bundled file, resolved against the checkout.
+struct BundledFile {
+    name: String,
+    path: String,
+    byte_size: u64,
+}
+
+fn resolve_asset(relative: &str) -> Option<BundledFile> {
+    let path = crate::forge3d::resolve_bundled(relative)?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    if metadata.len() == 0 {
+        return None;
+    }
+    Some(BundledFile {
+        name: path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| relative.to_owned()),
+        path: path.to_string_lossy().into_owned(),
+        byte_size: metadata.len(),
+    })
 }
 
 #[tauri::command(async)]
@@ -1126,5 +1348,128 @@ mod tests {
         assert_eq!(sidecar["frameMs"], 12.5);
         assert_eq!(sidecar["revision"], 4);
         assert_eq!(sidecar["handoffKey"], handoff.idempotency_key);
+    }
+    /// A starter scene builds its cartography: the gallery's recipes become
+    /// layers, and the camera and the sun are placed where the recipe says.
+    #[test]
+    fn a_starter_scene_carries_its_layers_camera_and_sun() {
+        let project = studio_core::Project::starter(
+            "Swiss",
+            Some(studio_core::TerrainSeed {
+                title: Some("Swiss Alps".to_owned()),
+                name: "switzerland_dem.tif".to_owned(),
+                path: "/data/switzerland_dem.tif".to_owned(),
+                byte_size: 1,
+                dimensions: Some([1024, 1024]),
+                elevation_range: Some([400.0, 4000.0]),
+                world_origin_xz: Some([0.0, 0.0]),
+                world_span_xz: Some([352_000.0, 226_000.0]),
+                overlay: None,
+            }),
+        );
+        let snapshot = SessionState {
+            project,
+            revision: 0,
+            dirty: false,
+            path: None,
+            can_undo: false,
+            can_redo: false,
+            undo_label: None,
+            redo_label: None,
+            history_len: 0,
+        };
+
+        let recipe = crate::forge3d::SCENE_PRESETS
+            .iter()
+            .find(|recipe| recipe.id == "swiss-landcover")
+            .expect("the land-cover recipe");
+        let commands = recipe_commands(recipe, &snapshot);
+        let kinds: Vec<String> = commands
+            .iter()
+            .filter_map(|command| match command {
+                studio_core::Command::AddCartographyLayer { layer, .. } => Some(
+                    format!("{:?}", layer.kind)
+                        .split(['(', ' '])
+                        .next()
+                        .unwrap_or("")
+                        .to_owned(),
+                ),
+                _ => None,
+            })
+            .collect();
+        // The land cover is an imagery layer and the plate is a plate layer;
+        // the camera and the sun are transforms.
+        assert!(
+            kinds.iter().any(|kind| kind.contains("Imagery")),
+            "the land cover must be a layer: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|kind| kind.contains("Plate")),
+            "the plate must be a layer: {kinds:?}"
+        );
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, studio_core::Command::SetTransform { .. })),
+            "the recipe places the camera and the sun"
+        );
+    }
+
+    /// The Fujiyama recipe names the vector layer's features with a label
+    /// layer: the label layer's source is the vector layer's id.
+    #[test]
+    fn the_label_layer_names_the_vector_layers_features() {
+        let project = studio_core::Project::starter(
+            "Fuji",
+            Some(studio_core::TerrainSeed {
+                title: Some("Mount Fuji".to_owned()),
+                name: "Mount_Fuji_30m.tif".to_owned(),
+                path: "/data/Mount_Fuji_30m.tif".to_owned(),
+                byte_size: 1,
+                dimensions: Some([2594, 2594]),
+                elevation_range: Some([300.0, 3775.0]),
+                world_origin_xz: Some([0.0, 0.0]),
+                world_span_xz: Some([18_000.0, 18_000.0]),
+                overlay: None,
+            }),
+        );
+        let snapshot = SessionState {
+            project,
+            revision: 0,
+            dirty: false,
+            path: None,
+            can_undo: false,
+            can_redo: false,
+            undo_label: None,
+            redo_label: None,
+            history_len: 0,
+        };
+        let recipe = crate::forge3d::SCENE_PRESETS
+            .iter()
+            .find(|recipe| recipe.id == "fuji-labels")
+            .expect("the labels recipe");
+        let commands = recipe_commands(recipe, &snapshot);
+        let mut vector_id = None;
+        let mut label_source = None;
+        for command in &commands {
+            if let studio_core::Command::AddCartographyLayer { layer, .. } = command {
+                match &layer.kind {
+                    studio_core::CartographyLayerKind::Vector { .. } => vector_id = Some(layer.id),
+                    studio_core::CartographyLayerKind::Labels { source, field, .. } => {
+                        label_source = Some((*source, field.clone()))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        assert_eq!(
+            label_source.as_ref().map(|(_, field)| field.clone()),
+            Some("name.en".to_owned())
+        );
+        assert_eq!(
+            label_source.as_ref().map(|(source, _)| *source),
+            vector_id,
+            "the label layer must name the vector layer above it"
+        );
     }
 }

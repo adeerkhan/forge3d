@@ -16,26 +16,144 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use serde::Serialize;
 
-/// Bundled DEMs offered as starter scenes. `id` is what the UI sends back.
-pub const SCENE_PRESETS: [(&str, &str, &str, &str); 2] = [
-    (
-        "bryce",
-        "Bryce Canyon",
-        "Bryce_Canyon_1024.tif",
-        "4 x 3.8 km · 1024² DEM · hoodoo amphitheatre",
-    ),
-    (
-        "swiss",
-        "Swiss Alps",
-        "switzerland_dem.tif",
-        "353 x 226 km · national DEM · Alps to Jura",
-    ),
+/// One layer of a starter scene: the file it draws and its own style.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecipeLayer {
+    /// A raster draped on the terrain (the land cover, an orthophoto).
+    Imagery {
+        relative: &'static str,
+        opacity: f32,
+        preserve_colors: bool,
+        despeckle: bool,
+    },
+    /// A vector layer draped on the terrain (the rail network).
+    Vector {
+        relative: &'static str,
+        colour: [f32; 4],
+        width_px: f32,
+    },
+    /// The labels of the vector layer above it (the place names).
+    Labels {
+        relative: &'static str,
+        field: &'static str,
+        colour: [f32; 4],
+        size_px: f32,
+    },
+    /// The map plate around the map, with its furniture.
+    Plate {
+        title: &'static str,
+        caption: &'static str,
+    },
+}
+
+/// A starter scene: a DEM and the cartography that goes with it.
+///
+/// The gallery's recipes are the source: the Swiss land-cover, the Luxembourg
+/// rail network and the Mount Fuji labels. The framing is the studio's own map
+/// camera (the terrain's footprint, from the given direction) because the
+/// studio's still and its viewport have to agree on what they show.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SceneRecipe {
+    /// What the UI sends back.
+    pub id: &'static str,
+    pub name: &'static str,
+    /// The DEM, relative to the repo root.
+    pub dem: &'static str,
+    pub description: &'static str,
+    /// The map's layers, back to front.
+    pub layers: &'static [RecipeLayer],
+    /// The map's camera: the azimuth (from east towards north) and the polar
+    /// angle from straight down.
+    pub camera: Option<(f64, f64)>,
+    /// The sun: the azimuth (from north, clockwise) and the elevation.
+    pub sun: Option<(f64, f64)>,
+}
+
+/// The starter scenes offered in the New Project dialog.
+pub const SCENE_PRESETS: [SceneRecipe; 5] = [
+    SceneRecipe {
+        id: "bryce",
+        name: "Bryce Canyon",
+        dem: "assets/tif/Bryce_Canyon_1024.tif",
+        description: "4 x 3.8 km · 1024² DEM · the NAIP orthophoto draped on the hoodoos",
+        layers: &[RecipeLayer::Imagery {
+            relative: "assets/tif/Bryce_Canyon_naip.tif",
+            opacity: 0.82,
+            preserve_colors: true,
+            despeckle: false,
+        }],
+        camera: None,
+        sun: None,
+    },
+    SceneRecipe {
+        id: "swiss",
+        name: "Swiss Alps",
+        dem: "assets/tif/switzerland_dem.tif",
+        description: "353 x 226 km · national DEM · Alps to Jura",
+        layers: &[],
+        camera: None,
+        sun: None,
+    },
+    SceneRecipe {
+        id: "swiss-landcover",
+        name: "Swiss land-cover",
+        dem: "assets/tif/switzerland_dem.tif",
+        description: "the gallery recipe: land cover draped on the Alps, with the plate",
+        layers: &[
+            RecipeLayer::Imagery {
+                relative: "assets/tif/switzerland_land_cover.tif",
+                opacity: 0.82,
+                preserve_colors: true,
+                despeckle: true,
+            },
+            RecipeLayer::Plate {
+                title: "Swiss land cover",
+                // The plate's caption is drawn with the packaged Latin atlas,
+                // which has no middot: a plain dash keeps it readable.
+                caption: "Swiss Alps - land cover draped on the national DEM",
+            },
+        ],
+        camera: Some((270.0, 10.0)),
+        sun: Some((315.0, 17.0)),
+    },
+    SceneRecipe {
+        id: "luxembourg-rail",
+        name: "Luxembourg rail network",
+        dem: "assets/tif/luxembourg_dem.tif",
+        description: "the gallery recipe: 2,035 rail features draped on the country",
+        layers: &[RecipeLayer::Vector {
+            relative: "assets/gpkg/luxembourg_rail.gpkg",
+            colour: [0.87, 0.1, 0.1, 1.0],
+            width_px: 3.0,
+        }],
+        camera: Some((270.0, 31.0)),
+        sun: None,
+    },
+    SceneRecipe {
+        id: "fuji-labels",
+        name: "Mount Fuji labels",
+        dem: "assets/tif/Mount_Fuji_30m.tif",
+        description: "the gallery recipe: the climbing stations named on the cone",
+        layers: &[
+            RecipeLayer::Vector {
+                relative: "assets/gpkg/Mount_Fuji_places.gpkg",
+                colour: [0.87, 0.1, 0.1, 1.0],
+                width_px: 2.0,
+            },
+            RecipeLayer::Labels {
+                relative: "assets/gpkg/Mount_Fuji_places.gpkg",
+                field: "name.en",
+                colour: [0.08, 0.08, 0.1, 1.0],
+                size_px: 16.0,
+            },
+        ],
+        camera: Some((342.0, 54.0)),
+        sun: None,
+    },
 ];
 
 /// Bundled DEM used as the default scene. Overridable with `FORGE3D_STUDIO_DEM`.
 const DEFAULT_DEM_RELATIVE: &str = "assets/tif/Bryce_Canyon_1024.tif";
-/// NAIP orthophoto draped on the Bryce starter (the Bryce "material").
-const BRYCE_NAIP_RELATIVE: &str = "assets/tif/Bryce_Canyon_naip.tif";
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -316,10 +434,15 @@ impl Forge3dState {
     /// A starter DEM by preset id ("bryce" | "swiss"), else the default.
     pub fn terrain_seed(&self, preset: Option<&str>) -> Option<studio_core::TerrainSeed> {
         let relative = preset
-            .and_then(|id| SCENE_PRESETS.iter().find(|(key, ..)| *key == id))
-            .map(|(_, _, file, _)| format!("assets/tif/{file}"))
+            .and_then(|id| SCENE_PRESETS.iter().find(|recipe| recipe.id == id))
+            .map(|recipe| recipe.dem.to_owned())
             .unwrap_or_else(|| DEFAULT_DEM_RELATIVE.to_owned());
         self.seed_for_relative(&relative)
+    }
+
+    /// The starter scene's recipe, when the id names one.
+    pub fn scene_recipe(&self, preset: Option<&str>) -> Option<&'static SceneRecipe> {
+        preset.and_then(|id| SCENE_PRESETS.iter().find(|recipe| recipe.id == id))
     }
 
     fn seed_for_relative(&self, relative: &str) -> Option<studio_core::TerrainSeed> {
@@ -341,8 +464,8 @@ impl Forge3dState {
             .unwrap_or_else(|| "terrain.tif".to_owned());
         let title = SCENE_PRESETS
             .iter()
-            .find(|(_, _, file, _)| format!("assets/tif/{file}") == relative)
-            .map(|(_, name, _, _)| (*name).to_owned());
+            .find(|recipe| recipe.dem == relative)
+            .map(|recipe| recipe.name.to_owned());
         let mut seed = studio_core::TerrainSeed {
             title,
             name,
@@ -352,7 +475,7 @@ impl Forge3dState {
             elevation_range: None,
             world_origin_xz: None,
             world_span_xz: None,
-            overlay: bryce_naip_overlay(relative),
+            overlay: None,
         };
 
         let python = self.probe(false).python;
@@ -393,30 +516,6 @@ impl Forge3dState {
 /// The Bryce starter ships its NAIP orthophoto as the terrain's albedo. Only
 /// the untouched default Bryce scene gets it: an explicit `FORGE3D_STUDIO_DEM`
 /// override or another preset means the user brought their own DEM, and
-/// draping Bryce imagery on it would be wrong.
-fn bryce_naip_overlay(dem_relative: &str) -> Option<studio_core::TerrainSeedOverlay> {
-    if dem_relative != DEFAULT_DEM_RELATIVE {
-        return None;
-    }
-    if std::env::var_os("FORGE3D_STUDIO_DEM").is_some() {
-        return None;
-    }
-    let path = resolve_bundled(BRYCE_NAIP_RELATIVE)?;
-    let metadata = std::fs::metadata(&path).ok()?;
-    if metadata.len() == 0 {
-        return None;
-    }
-    Some(studio_core::TerrainSeedOverlay {
-        name: path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Bryce_Canyon_naip.tif".to_owned()),
-        path: path.to_string_lossy().into_owned(),
-        byte_size: metadata.len(),
-        opacity: 0.82,
-    })
-}
-
 /// Resolve a bundled file: `FORGE3D_STUDIO_DEM` overrides the default sample,
 /// otherwise the named file is searched from the executable and the working
 /// directory.
@@ -434,7 +533,7 @@ fn resolve_dem(relative: &str) -> Option<PathBuf> {
 
 /// Search the executable's and the working directory's ancestors for a file
 /// relative to the repo root (`assets/…`).
-fn resolve_bundled(relative: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_bundled(relative: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {

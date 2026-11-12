@@ -45,7 +45,12 @@ export default function App() {
             </section>
             {sidebarOpen && (
               <aside className="workspace__panel workspace__panel--right">
-                <SettingsSidebar fixedTab={cartography ? "map" : undefined} />
+                <SettingsSidebar
+                  fixedTab={cartography ? "map" : undefined}
+                  // The map's own settings belong to the cartography
+                  // workspace: the Map tab is the layer stack's properties.
+                  hiddenTabs={cartography ? [] : ["map"]}
+                />
               </aside>
             )}
           </>

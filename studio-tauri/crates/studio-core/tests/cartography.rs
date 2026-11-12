@@ -81,6 +81,7 @@ fn a_layer_moves_within_the_stack_and_undoes_its_place() {
         .expect("the layer is added");
     let other = CartographyLayer::new(CartographyLayerKind::Plate {
         title: "Luxembourg".to_owned(),
+        caption: "Luxembourg".to_owned(),
         north_arrow: true,
         scale_bar: true,
         legend: true,

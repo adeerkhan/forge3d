@@ -1058,24 +1058,32 @@ class StudioRenderer:
                         Path(str(vector.get("path", "vector"))).name,
                     )
                 )
+            # The furniture is the plate layer's business: each piece is
+            # drawn only when the layer asks for it, and only where it is
+            # true (the scale bar needs a known ground scale, the north arrow
+            # a north-up view).
+            caption = str(plate_layer.get("caption", "") or "")
+            if not caption:
+                caption = "Forge3D Studio - %s" % Path(self.dem_path).stem
             legend = legends or None
-            # The scale bar is only true for a near-vertical view (the ground
-            # scale varies across an oblique frame), and the north arrow only
-            # for a north-up one.
+            if not bool(plate_layer.get("legend", True)):
+                legend = None
             fov = math.radians(float(camera.get("fovDeg", 45.0) or 45.0))
             visible_metres = 2.0 * radius * math.tan(fov * 0.5) / max(self.scale, 1e-9)
             metres_per_pixel = visible_metres / max(width, 1)
             theta = float(camera.get("thetaDeg", 45.0) or 45.0)
             phi = float(camera.get("phiDeg", 135.0) or 135.0)
             north_up = theta <= 45.0 and min(abs(phi - 90.0), abs(phi - 450.0)) <= 3.0
+            if not bool(plate_layer.get("scaleBar", True)):
+                metres_per_pixel = None
             plate_rgb = compose_plate(
                 rgb,
                 depth,
                 title=title,
                 legend=legend,
-                caption="Forge3D Studio - %s" % Path(self.dem_path).stem,
+                caption=caption,
                 metres_per_pixel=metres_per_pixel if theta <= 45.0 else None,
-                north_up=north_up,
+                north_up=north_up and bool(plate_layer.get("northArrow", True)),
             )
 
         png = encode_png(rgb)
