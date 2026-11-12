@@ -12,18 +12,6 @@ from ._map_scene_common import _stable_hash
 from .style import evaluate_color_expr, evaluate_number_expr
 
 
-def _render_payload(recipe: "SceneRecipe") -> dict[str, Any]:
-    payload = recipe.to_dict()
-    output = dict(payload.get("output") or {})
-    output["path"] = None
-    payload["output"] = output
-    return payload
-
-
-def _hash_int(value: Any, *, salt: str = "") -> int:
-    return int(_stable_hash({"salt": salt, "value": value})[:8], 16)
-
-
 def _rgb(value: Any, *, salt: str = "") -> tuple[int, int, int]:
     digest = _stable_hash({"salt": salt, "value": value})
     return int(digest[0:2], 16), int(digest[2:4], 16), int(digest[4:6], 16)
@@ -680,38 +668,6 @@ def _draw_building_roof(
             _draw_polyline(image, [point, (cx, cy)], roof_line, width_px=1.0, cap="butt")
 
 
-def _draw_buildings(image: Any, layer: Any, width: int, height: int) -> None:
-    features = _building_features(layer)
-    if not features:
-        return
-    for feature in features:
-        geometry = feature.get("geometry") if isinstance(feature.get("geometry"), Mapping) else {}
-        properties = _building_properties(feature)
-        height_m = _building_height(properties)
-        roof_type = _building_roof_type(properties)
-        fill = _building_fill_color(properties)
-        roof = (min(255, fill[0] + 28), min(255, fill[1] + 28), min(255, fill[2] + 28), fill[3])
-        shadow = (28, 26, 24, min(150, int(55 + min(height_m, 60.0))))
-        shadow_offset = max(1, min(10, int(round(height_m / 8.0))))
-        for ring in _building_rings(geometry):
-            points = [_point_to_pixel(point, width, height) for point in ring]
-            if len(points) < 3:
-                continue
-            shadow_points = [
-                (max(0, min(width - 1, x + shadow_offset)), max(0, min(height - 1, y + shadow_offset)))
-                for x, y in points
-            ]
-            _draw_polygon_fill(image, shadow_points, shadow)
-            _draw_polygon_fill(image, points, fill)
-            inset_points = points[:: max(1, len(points) // 8)]
-            _draw_polygon_fill(image, inset_points if len(inset_points) >= 3 else points, roof)
-            outline = (70, 64, 58, 210)
-            if points and points[0] != points[-1]:
-                points = [*points, points[0]]
-            _draw_polyline(image, points, outline, width_px=1.0, cap="butt", join="miter")
-            _draw_building_roof(image, points[:-1], roof_type, roof)
-
-
 def _label_anchor(label: Any, width: int, height: int) -> tuple[int, int]:
     candidate = getattr(label, "candidate", None)
     anchor = getattr(candidate, "anchor", None)
@@ -1043,15 +999,6 @@ def _coord_to_pixel(
     px = int(round(x * (width - 1)))
     py = int(round(y * (height - 1)))
     return max(0, min(width - 1, px)), max(0, min(height - 1, py))
-
-
-def _lonlat_to_pixel(
-    point: Sequence[Any],
-    bounds: tuple[float, float, float, float],
-    width: int,
-    height: int,
-) -> tuple[int, int]:
-    return _coord_to_pixel(point, bounds, width, height)
 
 
 def _overlay_position(

@@ -459,71 +459,6 @@ def _mapscene_thematic_surface(recipe: "SceneRecipe", shape: Sequence[int]) -> A
     return result
 
 
-def _load_python_raster_overlays(
-    recipe: "SceneRecipe",
-    *,
-    target_grid: Mapping[str, Any] | None,
-) -> tuple[list[tuple["RasterOverlay", Any]], list[dict[str, Any]]]:
-    """Load RasterOverlay payloads for the deterministic Python compositor.
-
-    Returns (loaded (layer, rgba) pairs in recipe order, diagnostic blocks).
-    A missing or unreadable source is a fatal diagnostic: the compositor is an
-    honest CPU implementation for loaded pixels, never a placeholder source.
-    """
-
-    raster_layers = [layer for layer in recipe.layers if isinstance(layer, RasterOverlay) and layer.style is None]
-    if not raster_layers:
-        return [], []
-    overlays: list[tuple["RasterOverlay", Any]] = []
-    blocks: list[dict[str, Any]] = []
-    for layer in raster_layers:
-        layer_id = _layer_id(layer, "layer")
-        overlay = _load_native_raster_overlay(layer, target_grid=target_grid)
-        if overlay is None:
-            blocks.append(
-                diagnostic_block(
-                    layer=layer_id,
-                    reason=(
-                        "raster overlay data is unavailable (missing path, unreadable "
-                        "file, or unsupported format); no placeholder pixels are permitted"
-                    ),
-                    required_native="readable RasterOverlay source",
-                )
-            )
-            continue
-        overlays.append((layer, overlay))
-    return overlays, blocks
-
-
-def _composite_python_raster_overlays(
-    base: Any,
-    raster_overlays: list[tuple["RasterOverlay", Any]],
-) -> Any:
-    """Composite loaded overlays deterministically in Python, in recipe order."""
-    if not raster_overlays:
-        return base
-
-    import numpy as np
-
-    out = np.ascontiguousarray(base.copy())
-    height, width = out.shape[:2]
-    yy, xx = np.mgrid[0:height, 0:width]
-    for layer, overlay in raster_overlays:
-        source = np.asarray(overlay, dtype=np.uint8)
-        source_height, source_width = source.shape[:2]
-        sample_y = np.clip((yy * source_height // max(height, 1)), 0, source_height - 1)
-        sample_x = np.clip((xx * source_width // max(width, 1)), 0, source_width - 1)
-        sampled = source[sample_y, sample_x]
-        alpha = max(0.0, min(1.0, float(layer.opacity)))
-        sampled_alpha = (sampled[..., 3:4].astype(np.float32) / 255.0) * alpha
-        blended = (
-            out[..., :3].astype(np.float32) * (1.0 - sampled_alpha)
-            + sampled[..., :3].astype(np.float32) * sampled_alpha
-        )
-        out[..., :3] = np.clip(blended, 0.0, 255.0).astype(np.uint8)
-    return out
-
-
 def _numpy_to_exr_writer() -> Any | None:
     from ._native import get_native_symbol
 
@@ -2162,11 +2097,6 @@ def _render_terrain_renderer_result_impl(
         source_map=source_map,
         contributing_tiles=contributing_tiles,
     )
-
-
-def _render_terrain_renderer_rgba(recipe: "SceneRecipe", heightmap: Any) -> Any | None:
-    result = _render_terrain_renderer_result(recipe, heightmap)
-    return None if result is None else result.rgba
 
 
 def _rgba01(color: tuple[int, int, int, int]) -> tuple[float, float, float, float]:
@@ -3894,33 +3824,6 @@ def _terrain_scatter_building_batches_for_recipe(
         "building_roof_types": roof_types,
         "building_shadow_model": "terrain_csm_mesh_cast_receive",
     }
-
-
-def _native_building_mesh_for_layers(
-    layers: Sequence["BuildingLayer"],
-) -> tuple[Any, Any, Any, tuple[float, float, float, float]] | None:
-    batches = _native_building_mesh_batches_for_layers(layers)
-    if not batches:
-        return None
-
-    import numpy as np
-
-    all_positions: list[Any] = []
-    all_normals: list[Any] = []
-    all_indices: list[Any] = []
-    color = tuple(float(value) for value in batches[-1]["color"])
-    for batch in batches:
-        offset = sum(len(np.asarray(item)) for item in all_positions)
-        positions = np.asarray(batch["positions"], dtype=np.float32)
-        all_positions.append(positions)
-        all_normals.append(np.asarray(batch["normals"], dtype=np.float32))
-        all_indices.append(np.asarray(batch["indices"], dtype=np.uint32) + offset)
-    return (
-        np.ascontiguousarray(np.vstack(all_positions), dtype=np.float32),
-        np.ascontiguousarray(np.vstack(all_indices), dtype=np.uint32),
-        np.ascontiguousarray(np.vstack(all_normals), dtype=np.float32),
-        color,  # type: ignore[return-value]
-    )
 
 
 def _native_building_projected_shadow_mesh(

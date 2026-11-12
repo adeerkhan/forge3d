@@ -13,7 +13,7 @@ from pathlib import Path
 import tempfile
 import threading
 import types
-from typing import Any, Mapping
+from typing import Mapping
 
 import numpy as np
 
@@ -236,10 +236,6 @@ def _cache_bypass_reason(scene):
     if water is not None and water.mask_path is not None:
         return "scene_water_mask"
     return None
-
-
-def _eligible(scene):
-    return _cache_bypass_reason(scene) is None
 
 
 def _path_free(recipe):

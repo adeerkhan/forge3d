@@ -873,24 +873,6 @@ class TracerEngine:
 
 
 # BSDF utility functions
-def _fresnel_schlick(cos_theta: float, f0: float) -> float:
-    """Fresnel-Schlick approximation."""
-    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0)
-
-def _smith_g1(cos_theta: float, alpha: float) -> float:
-    """Smith G1 masking/shadowing function."""
-    cos_theta2 = cos_theta * cos_theta
-    tan_theta2 = (1.0 - cos_theta2) / cos_theta2
-    return 2.0 / (1.0 + np.sqrt(1.0 + alpha * alpha * tan_theta2))
-
-def _ggx_distribution(cos_theta_h: float, alpha: float) -> float:
-    """GGX/Trowbridge-Reitz normal distribution function."""
-    alpha2 = alpha * alpha
-    cos_theta_h2 = cos_theta_h * cos_theta_h
-    denom = cos_theta_h2 * (alpha2 - 1.0) + 1.0
-    return alpha2 / (np.pi * denom * denom)
-
-
 def hybrid_render_terrain_reference(
     heightmap: "np.ndarray",
     width: int,

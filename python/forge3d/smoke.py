@@ -6,7 +6,7 @@ import sys
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Sequence
 
 import numpy as np
 
@@ -844,38 +844,6 @@ def _smoke_local_min_max_volume(
         src[z1c, y1c, x1c],
     )
     return np.minimum.reduce(corners).astype(np.float32), np.maximum.reduce(corners).astype(np.float32)
-
-
-def _smoke_light_transmittance(
-    density: np.ndarray,
-    soot: np.ndarray,
-    layer_index: int,
-    sun_dir: np.ndarray,
-    settings: Any,
-) -> np.ndarray:
-    depth, _altitude_count, width = density.shape
-    z_grid, x_grid = np.mgrid[0:depth, 0:width].astype(np.float32)
-    y_grid = np.full((depth, width), float(layer_index), dtype=np.float32)
-    step_size = float(getattr(settings, "shadow_step_size", 0.0))
-    if step_size <= 0.0:
-        step_size = 1.0
-    steps = int(max(1, getattr(settings, "shadow_steps", 20)))
-    optical_depth = np.zeros((depth, width), dtype=np.float32)
-    for step_index in range(1, steps + 1):
-        distance = float(step_index) * step_size
-        sample_x = x_grid + float(sun_dir[0]) * distance
-        sample_y = y_grid + float(sun_dir[1]) * distance
-        sample_z = z_grid + float(sun_dir[2]) * distance
-        sample_density = _smoke_sample_volume(density, sample_x, sample_y, sample_z)
-        sample_soot = _smoke_sample_volume(soot, sample_x, sample_y, sample_z)
-        optical_depth += (
-            sample_density
-            * float(settings.density_scale)
-            * float(settings.extinction)
-            * (1.0 + sample_soot * float(settings.soot_absorption) * 0.85)
-            * step_size
-        ).astype(np.float32)
-    return np.exp(-np.clip(optical_depth, 0.0, 9.0)).astype(np.float32)
 
 
 def _smoke_shadow_grid(
