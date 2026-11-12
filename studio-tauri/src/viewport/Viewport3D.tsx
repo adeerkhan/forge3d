@@ -24,6 +24,7 @@ import {
   loadAssetScene,
 } from "./assets";
 import { viewStore } from "./viewStore";
+import { topImagery, topRamp } from "../state/cartography";
 import { lightingRig } from "./lighting";
 import { rampColor } from "./colormap";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
@@ -522,6 +523,7 @@ function contentSignature(
   object: SceneObject,
   terrainResolution: number,
   ramp: string,
+  imagery: { asset: string; opacity: number } | null,
 ): string {
   switch (object.kind.type) {
     case "mesh":
@@ -532,7 +534,7 @@ function contentSignature(
       // what used to be ignored.
       // The elevation ramp is baked into the mesh's vertex colours, so a
       // colormap change is a rebuild — not just a shading swap.
-      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}:${object.kind.overlay?.asset ?? "none"}:${object.kind.overlay?.opacity ?? ""}:${ramp}`;
+      return `terrain:${object.kind.asset}:${object.kind.zScale}:${terrainResolution}:${imagery?.asset ?? "none"}:${imagery?.opacity ?? ""}:${ramp}`;
     case "camera":
       return `camera:${object.kind.fovDeg}`;
     case "light":
@@ -1283,11 +1285,16 @@ export function Viewport3D() {
       // The preview's elevation ramp: the engine's own LUT, sampled by the
       // shell and applied to the mesh, so Material shows the map without a
       // Rendered frame.
-      const rampName =
-        object.kind.type === "terrain" ? project.render.colormap : "";
-      const rampStrength = project.render.colormapStrength;
+      // The preview follows the map's stack: the topmost visible ramp is the
+      // one the map shows.
+      const ramp = object.kind.type === "terrain" ? topRamp(project) : null;
+      const rampName = ramp?.colormap ?? "";
+      const rampStrength = ramp?.strength ?? 1;
       const rampKey = rampName ? `${rampName}:${rampStrength}` : "none";
-      const signature = contentSignature(object, terrainResolution, rampKey);
+      const signature = contentSignature(object, terrainResolution, rampKey, {
+        asset: topImagery(project)?.asset ?? "",
+        opacity: topImagery(project)?.opacity ?? 0,
+      });
       if (group.userData.signature !== signature) {
         group.userData.signature = signature;
         disposeChildren(group);
@@ -1358,7 +1365,11 @@ export function Viewport3D() {
           );
           continue;
         }
-        const overlay = terrainKind.overlay ?? null;
+        // The draped imagery is the topmost visible imagery layer now.
+        const imagery = topImagery(project);
+        const overlay = imagery
+          ? { asset: imagery.asset ?? "", opacity: imagery.opacity ?? 0.82 }
+          : null;
         const overlayAsset = overlay
           ? project.assets.find((entry) => entry.id === overlay.asset)
           : undefined;

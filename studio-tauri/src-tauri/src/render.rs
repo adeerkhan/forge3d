@@ -450,9 +450,8 @@ pub struct RenderRequest {
     /// Linear RGB colour of the scene's directional light.
     pub sun_color: [f64; 3],
     pub z_scale: f64,
-    pub overlay: Option<OverlayRequest>,
-    /// The vector layer drawn on the terrain (rail, river, boundary).
-    pub vector: Option<VectorRequest>,
+    /// The map's layer stack, in draw order (the first is drawn first).
+    pub cartography: Vec<studio_core::workspace::CartographyLayerHandoff>,
     pub exposure: f64,
     pub shadows: bool,
     /// Render the sky background; the project can turn it off for Rendered.
@@ -491,15 +490,6 @@ pub struct RenderRequest {
     pub water_level: f32,
     pub water_slope_threshold: f32,
     pub water_roughness: f32,
-    /// Elevation colormap for the terrain; empty means none.
-    pub colormap: String,
-    pub colormap_strength: f32,
-    /// Draw the engine's elevation legend in the frame's corner.
-    pub legend: bool,
-    /// Export a map plate next to the still (white page, title, legend) and
-    /// the depth mask its cut-out needs.
-    pub plate: bool,
-    pub plate_title: String,
     /// Atmospheric fog on the terrain.
     pub fog_enabled: bool,
     pub fog_density: f32,
@@ -511,34 +501,6 @@ pub struct RenderRequest {
     pub bloom_softness: f32,
     pub bloom_intensity: f32,
     pub vignette: f32,
-}
-
-/// A vector layer for the renderer: the file, the line colour, the line's
-/// symbol width in pixels and the labels the layer's named features carry.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VectorRequest {
-    pub path: String,
-    pub colour: [f32; 4],
-    pub width_px: f32,
-    /// Draw the layer's named features as labels.
-    pub labels: bool,
-    /// The attribute that names a feature (`name`, `name.en`, ...).
-    pub label_field: String,
-    /// The label colour, RGBA in 0..=1.
-    pub label_colour: [f32; 4],
-    /// The label size in pixels.
-    pub label_size_px: f32,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OverlayRequest {
-    pub path: String,
-    pub opacity: f32,
-    pub preserve_colors: bool,
-    /// Despeckle a single-band classification before paletting it.
-    pub despeckle: bool,
 }
 
 impl RenderRequest {
@@ -566,11 +528,6 @@ impl RenderRequest {
         self.water_level = settings.water.level;
         self.water_slope_threshold = settings.water.slope_threshold;
         self.water_roughness = settings.water.roughness;
-        self.colormap = settings.colormap.clone();
-        self.colormap_strength = settings.colormap_strength;
-        self.legend = settings.legend;
-        self.plate = settings.plate;
-        self.plate_title = settings.plate_title.clone();
         self.fog_enabled = settings.fog.enabled;
         self.fog_density = settings.fog.density;
         self.fog_reach = settings.fog.reach;
@@ -581,6 +538,18 @@ impl RenderRequest {
         self.bloom_intensity = settings.bloom.intensity;
         self.vignette = settings.vignette;
         self
+    }
+
+    /// Whether the map's stack has a plate: the plate is a final artifact, so
+    /// its cut-out asks for the depth AOV it borrows.
+    pub fn has_plate(&self) -> bool {
+        self.cartography.iter().any(|layer| {
+            layer.visible
+                && matches!(
+                    layer.kind,
+                    studio_core::workspace::CartographyLayerHandoffKind::Plate { .. }
+                )
+        })
     }
 
     pub fn with_view(mut self, view: Option<&RenderView>) -> Self {
@@ -654,7 +623,7 @@ impl RenderRequest {
                 "aov": {
                     "albedo": final_quality && self.aov_albedo,
                     "normal": final_quality && self.aov_normal,
-                    "depth": final_quality && (self.aov_depth || self.plate),
+                    "depth": final_quality && (self.aov_depth || self.has_plate()),
                 },
                 "denoise": final_quality && self.still_denoise,
                 "shadowTechnique": self.shadow_technique,
@@ -676,13 +645,6 @@ impl RenderRequest {
                     "slopeThreshold": self.water_slope_threshold,
                     "roughness": self.water_roughness,
                 },
-                "colormap": self.colormap,
-                "colormapStrength": self.colormap_strength,
-                "legend": self.legend,
-                // A plate is a final artifact: its cut-out is the depth buffer,
-                // so asking for one asks for that AOV too.
-                "plate": final_quality && self.plate,
-                "plateTitle": self.plate_title,
                 "fog": {
                     "enabled": self.fog_enabled,
                     "density": self.fog_density,
@@ -697,8 +659,10 @@ impl RenderRequest {
                 },
                 "vignette": self.vignette,
             },
-            "overlay": self.overlay,
-            "vector": self.vector,
+            // The map's layer stack, in draw order. The service draws it
+            // back to front: the relief, the ramp or the imagery, the vector
+            // layers and their labels, the plate.
+            "cartography": self.cartography,
             "exposure": self.exposure,
             "shadows": self.shadows,
             "iblIntensity": self.ibl_intensity,
@@ -766,21 +730,8 @@ impl RenderRequest {
                 })
                 .unwrap_or([1.0, 0.97, 0.92]),
             z_scale: f64::from(terrain.z_scale),
-            overlay: terrain.overlay.as_ref().map(|overlay| OverlayRequest {
-                path: overlay.path.clone(),
-                opacity: overlay.opacity,
-                preserve_colors: overlay.preserve_colors,
-                despeckle: overlay.despeckle,
-            }),
-            vector: terrain.vector.as_ref().map(|vector| VectorRequest {
-                path: vector.path.clone(),
-                colour: vector.colour,
-                width_px: vector.width_px,
-                labels: vector.labels,
-                label_field: vector.label_field.clone(),
-                label_colour: vector.label_colour,
-                label_size_px: vector.label_size_px,
-            }),
+            // The map's layer stack, in draw order.
+            cartography: handoff.cartography.clone(),
             exposure: 1.35,
             shadows: true,
             sky: true,
@@ -808,11 +759,6 @@ impl RenderRequest {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
-            colormap: String::new(),
-            colormap_strength: 1.0,
-            legend: false,
-            plate: false,
-            plate_title: String::new(),
             fog_enabled: false,
             fog_density: 0.05,
             fog_reach: 0.5,
@@ -845,8 +791,7 @@ mod tests {
             sun_intensity: 3.0,
             sun_color: [1.0, 0.97, 0.92],
             z_scale: 1.0,
-            overlay: None,
-            vector: None,
+            cartography: Vec::new(),
             exposure: 1.35,
             shadows: true,
             sky: true,
@@ -870,11 +815,6 @@ mod tests {
             water_level: 0.0,
             water_slope_threshold: 0.18,
             water_roughness: 0.35,
-            colormap: String::new(),
-            colormap_strength: 1.0,
-            legend: false,
-            plate: false,
-            plate_title: String::new(),
             fog_enabled: false,
             fog_density: 0.5,
             fog_reach: 0.5,
@@ -1003,43 +943,77 @@ mod tests {
     }
 
     #[test]
-    fn payload_carries_the_vector_layer() {
-        let mut payload = request();
-        payload.vector = Some(VectorRequest {
-            path: "/data/luxembourg_rail.gpkg".to_owned(),
-            colour: [0.9, 0.29, 0.1, 1.0],
-            width_px: 3.0,
-            labels: true,
-            label_field: "name.en".to_owned(),
-            label_colour: [0.08, 0.08, 0.1, 1.0],
-            label_size_px: 14.0,
-        });
-        let value = payload.to_payload("preview", None);
-        assert_eq!(value["vector"]["path"], "/data/luxembourg_rail.gpkg");
-        assert_eq!(value["vector"]["widthPx"], 3.0);
-        assert!((value["vector"]["colour"][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
-        // The label settings travel with the layer: the service needs the
-        // attribute, the colour and the size to draw the engine's labels.
-        assert_eq!(value["vector"]["labels"], true);
-        assert_eq!(value["vector"]["labelField"], "name.en");
-        assert_eq!(value["vector"]["labelSizePx"], 14.0);
-        assert!((value["vector"]["labelColour"][0].as_f64().unwrap() - 0.08).abs() < 1e-6);
-        // No layer, no key content: the service must see an explicit null.
-        assert!(request().to_payload("preview", None)["vector"].is_null());
-    }
+    fn payload_carries_the_cartography_stack() {
+        use studio_core::workspace::{CartographyLayerHandoff, CartographyLayerHandoffKind};
 
-    #[test]
-    fn payload_carries_the_overlay_despeckle() {
         let mut payload = request();
-        payload.overlay = Some(OverlayRequest {
-            path: "/data/land_cover.tif".to_owned(),
-            opacity: 0.82,
-            preserve_colors: true,
-            despeckle: true,
-        });
+        payload.cartography = vec![
+            CartographyLayerHandoff {
+                id: studio_core::ids::new_id(),
+                name: "Terrain relief".to_owned(),
+                visible: true,
+                kind: CartographyLayerHandoffKind::Relief,
+            },
+            CartographyLayerHandoff {
+                id: studio_core::ids::new_id(),
+                name: "Rail network".to_owned(),
+                visible: true,
+                kind: CartographyLayerHandoffKind::Vector {
+                    path: "/data/luxembourg_rail.gpkg".to_owned(),
+                    colour: [0.9, 0.29, 0.1, 1.0],
+                    width_px: 3.0,
+                },
+            },
+            CartographyLayerHandoff {
+                id: studio_core::ids::new_id(),
+                name: "Labels".to_owned(),
+                visible: false,
+                kind: CartographyLayerHandoffKind::Labels {
+                    source: studio_core::ids::new_id(),
+                    path: "/data/luxembourg_rail.gpkg".to_owned(),
+                    field: "name.en".to_owned(),
+                    colour: [0.08, 0.08, 0.1, 1.0],
+                    size_px: 14.0,
+                },
+            },
+            CartographyLayerHandoff {
+                id: studio_core::ids::new_id(),
+                name: "Imagery".to_owned(),
+                visible: true,
+                kind: CartographyLayerHandoffKind::Imagery {
+                    path: "/data/land_cover.tif".to_owned(),
+                    opacity: 0.82,
+                    preserve_colors: true,
+                    despeckle: true,
+                },
+            },
+        ];
         let value = payload.to_payload("preview", None);
-        assert_eq!(value["overlay"]["despeckle"], true);
-        assert_eq!(value["overlay"]["preserveColors"], true);
+        let layers = value["cartography"].as_array().expect("the stack");
+        assert_eq!(layers.len(), 4);
+        assert_eq!(layers[0]["type"], "relief");
+        assert_eq!(layers[1]["type"], "vector");
+        assert_eq!(layers[1]["path"], "/data/luxembourg_rail.gpkg");
+        assert_eq!(layers[1]["widthPx"], 3.0);
+        assert!((layers[1]["colour"][0].as_f64().unwrap() - 0.9).abs() < 1e-6);
+        // The label layer travels with its attribute, its colour and its size:
+        // the service needs all three to draw the engine's labels.
+        assert_eq!(layers[2]["type"], "labels");
+        assert_eq!(layers[2]["field"], "name.en");
+        assert_eq!(layers[2]["sizePx"], 14.0);
+        assert_eq!(layers[2]["visible"], false);
+        // The imagery layer's own settings travel with it.
+        assert_eq!(layers[3]["type"], "imagery");
+        assert_eq!(layers[3]["despeckle"], true);
+        assert_eq!(layers[3]["preserveColors"], true);
+        // No stack, no layers: the service must see an empty list.
+        assert_eq!(
+            request().to_payload("preview", None)["cartography"]
+                .as_array()
+                .expect("an empty stack")
+                .len(),
+            0
+        );
     }
 
     #[test]
@@ -1059,51 +1033,57 @@ mod tests {
         assert_eq!(payload["quality"]["sunVisibility"]["steps"], 48);
     }
 
+    /// A plate is a layer now: the stack carries it, and the cut-out still
+    /// borrows the renderer's depth pass.
     #[test]
-    fn payload_plates_only_finals_and_borrows_the_depth_pass() {
-        let settings = studio_core::RenderSettings {
-            plate: true,
-            plate_title: "Land cover".to_owned(),
-            ..studio_core::RenderSettings::default()
-        };
-        let final_ = request().with_settings(&settings).to_payload("final", None);
-        assert_eq!(final_["quality"]["plate"], true);
-        assert_eq!(final_["quality"]["plateTitle"], "Land cover");
+    fn a_plate_layer_borrows_the_depth_pass() {
+        use studio_core::workspace::{CartographyLayerHandoff, CartographyLayerHandoffKind};
+
+        let mut payload = request();
+        payload.cartography = vec![CartographyLayerHandoff {
+            id: studio_core::ids::new_id(),
+            name: "Map plate".to_owned(),
+            visible: true,
+            kind: CartographyLayerHandoffKind::Plate {
+                title: "Land cover".to_owned(),
+                north_arrow: true,
+                scale_bar: true,
+                legend: true,
+            },
+        }];
+        let final_ = payload.to_payload("final", None);
+        assert_eq!(final_["cartography"][0]["type"], "plate");
+        assert_eq!(final_["cartography"][0]["title"], "Land cover");
         // The cut-out is the renderer's depth buffer: asking for a plate asks
         // for that AOV even when the project's own AOV boxes are off.
         assert_eq!(final_["quality"]["aov"]["depth"], true);
 
-        let preview = request()
-            .with_settings(&settings)
-            .to_payload("preview", None);
-        assert_eq!(preview["quality"]["plate"], false);
+        // A hidden plate is not drawn, so it does not borrow the depth pass.
+        payload.cartography[0].visible = false;
+        let preview = payload.to_payload("preview", None);
         assert_eq!(preview["quality"]["aov"]["depth"], false);
     }
 
     #[test]
-    fn payload_carries_the_legend() {
-        let settings = studio_core::RenderSettings {
-            colormap: "viridis".to_owned(),
-            legend: true,
-            ..studio_core::RenderSettings::default()
-        };
-        let payload = request().with_settings(&settings).to_payload("final", None);
-        assert_eq!(payload["quality"]["colormap"], "viridis");
-        assert_eq!(payload["quality"]["legend"], true);
-    }
+    fn the_ramp_layer_carries_its_colormap_and_legend() {
+        use studio_core::workspace::{CartographyLayerHandoff, CartographyLayerHandoffKind};
 
-    #[test]
-    fn payload_carries_the_colormap() {
-        let settings = studio_core::RenderSettings {
-            colormap: "viridis".to_owned(),
-            colormap_strength: 0.8,
-            ..studio_core::RenderSettings::default()
-        };
-        let payload = request()
-            .with_settings(&settings)
-            .to_payload("preview", None);
-        assert_eq!(payload["quality"]["colormap"], "viridis");
-        assert_eq!(payload["quality"]["colormapStrength"], f64::from(0.8_f32));
+        let mut payload = request();
+        payload.cartography = vec![CartographyLayerHandoff {
+            id: studio_core::ids::new_id(),
+            name: "Elevation ramp".to_owned(),
+            visible: true,
+            kind: CartographyLayerHandoffKind::ElevationRamp {
+                colormap: "viridis".to_owned(),
+                strength: 0.8,
+                legend: true,
+            },
+        }];
+        let value = payload.to_payload("preview", None);
+        assert_eq!(value["cartography"][0]["type"], "elevationRamp");
+        assert_eq!(value["cartography"][0]["colormap"], "viridis");
+        assert!((value["cartography"][0]["strength"].as_f64().unwrap() - 0.8).abs() < 1e-6);
+        assert_eq!(value["cartography"][0]["legend"], true);
     }
 
     #[test]
@@ -1214,13 +1194,14 @@ mod tests {
         }
 
         let state = RenderState::new();
-        let frame = |quality: serde_json::Value| {
+        let frame = |quality: serde_json::Value, cartography: serde_json::Value| {
             let payload = json!({
                 "width": 160,
                 "height": 120,
                 "camera": {"phiDeg": 310.0, "thetaDeg": 60.0, "radius": 6000.0, "target": [0, 0, 0], "fovDeg": 45.0},
                 "sun": {"azimuthDeg": 135.0, "elevationDeg": 12.0, "intensity": 3.0, "color": [1.0, 0.97, 0.92]},
                 "quality": quality,
+                "cartography": cartography,
                 "exposure": 1.35,
                 "iblIntensity": 1.0,
                 "environmentBackgroundIntensity": 1.0
@@ -1235,26 +1216,37 @@ mod tests {
                 .expect("one frame from the service")
         };
 
-        let plain = frame(json!({"sky": false}));
+        let plain = frame(json!({"sky": false}), json!([]));
         // The same request twice is the same bytes, so any difference below
         // belongs to the setting under test.
-        let again = frame(json!({"sky": false}));
+        let again = frame(json!({"sky": false}), json!([]));
         assert_eq!(plain.png, again.png, "the service is deterministic");
 
-        let colormap = frame(json!({
-            "sky": false,
-            "colormap": "viridis",
-            "colormapStrength": 1.0
-        }));
+        // The elevation ramp is a layer now: the stack carries it.
+        let ramp = frame(
+            json!({"sky": false}),
+            json!([{
+                "id": "ramp",
+                "name": "Elevation ramp",
+                "visible": true,
+                "type": "elevationRamp",
+                "colormap": "viridis",
+                "strength": 1.0,
+                "legend": false
+            }]),
+        );
         assert_ne!(
-            plain.png, colormap.png,
-            "the colormap must reach the pixels"
+            plain.png, ramp.png,
+            "the elevation ramp must reach the pixels"
         );
 
-        let sun = frame(json!({
-            "sky": false,
-            "sunVisibility": {"enabled": true, "distance": 4000.0, "steps": 32}
-        }));
+        let sun = frame(
+            json!({
+                "sky": false,
+                "sunVisibility": {"enabled": true, "distance": 4000.0, "steps": 32}
+            }),
+            json!([]),
+        );
         assert_ne!(plain.png, sun.png, "sun visibility must reach the pixels");
 
         state.stop();
@@ -1285,7 +1277,7 @@ mod tests {
                 "exposure": 1.35,
                 "iblIntensity": 1.0,
                 "environmentBackgroundIntensity": 1.0,
-                "vector": vector
+                "cartography": vector
             });
             state
                 .render(
@@ -1297,12 +1289,16 @@ mod tests {
                 .expect("one frame from the service")
         };
 
-        let plain = frame(serde_json::Value::Null);
-        let with_rails = frame(json!({
+        let plain = frame(json!([]));
+        let with_rails = frame(json!([{
+            "id": "rails",
+            "name": "Rail network",
+            "visible": true,
+            "type": "vector",
             "path": rail.to_str().expect("utf-8 rail path"),
             "colour": [0.9, 0.29, 0.1, 1.0],
             "widthPx": 3.0
-        }));
+        }]));
         assert_ne!(
             plain.png, with_rails.png,
             "the vector layer must reach the pixels"
@@ -1336,7 +1332,7 @@ mod tests {
                 "exposure": 1.35,
                 "iblIntensity": 1.0,
                 "environmentBackgroundIntensity": 1.0,
-                "vector": vector
+                "cartography": vector
             });
             state
                 .render(
@@ -1348,20 +1344,37 @@ mod tests {
                 .expect("one frame from the service")
         };
 
-        let plain = frame(json!({
+        let plain = frame(json!([{
+            "id": "places",
+            "name": "Places",
+            "visible": true,
+            "type": "vector",
             "path": places.to_str().expect("utf-8 places path"),
             "colour": [0.9, 0.29, 0.1, 1.0],
             "widthPx": 2.0
-        }));
-        let labelled = frame(json!({
-            "path": places.to_str().expect("utf-8 places path"),
-            "colour": [0.9, 0.29, 0.1, 1.0],
-            "widthPx": 2.0,
-            "labels": true,
-            "labelField": "name.en",
-            "labelColour": [0.08, 0.08, 0.1, 1.0],
-            "labelSizePx": 14.0
-        }));
+        }]));
+        let labelled = frame(json!([
+            {
+                "id": "places",
+                "name": "Places",
+                "visible": true,
+                "type": "vector",
+                "path": places.to_str().expect("utf-8 places path"),
+                "colour": [0.9, 0.29, 0.1, 1.0],
+                "widthPx": 2.0
+            },
+            {
+                "id": "labels",
+                "name": "Labels",
+                "visible": true,
+                "type": "labels",
+                "source": "places",
+                "path": places.to_str().expect("utf-8 places path"),
+                "field": "name.en",
+                "colour": [0.08, 0.08, 0.1, 1.0],
+                "sizePx": 14.0
+            }
+        ]));
         assert_ne!(
             plain.png, labelled.png,
             "the vector labels must reach the pixels"

@@ -240,27 +240,20 @@ class StudioRenderer:
                 self._ibl_cache.pop(next(iter(self._ibl_cache)))
         return cached
 
-    def colormap_overlay(self, quality: Dict[str, Any], has_raster_overlay: bool = False):
+    def colormap_overlay(self, layer: Optional[Dict[str, Any]]):
         """The engine's elevation colormap as a terrain overlay.
 
         `forge3d.get_colormap` returns a `Colormap`; the terrain takes a
         `Colormap1D` built from stops over the elevation domain, wrapped in an
         `OverlayLayer` — the engine's own path, not a second implementation.
-        Returns None when the project has no colormap (or its strength is 0).
+        Returns None when the layer has no colormap (or its strength is 0).
         """
-        name = str(quality.get("colormap") or "").strip()
+        if not layer:
+            return None
+        name = str(layer.get("colormap") or "").strip()
         if not name:
             return None
-        strength = float(quality.get("colormapStrength", 1.0))
-        if has_raster_overlay:
-            # `extract_overlay_binding` binds exactly one colormap LUT per
-            # frame (the first overlay that has one, then stops), so a raster
-            # overlay and a colormap cannot both apply. Say so instead of
-            # dropping one of them silently.
-            raise RuntimeError(
-                "a terrain overlay and a colormap both need the engine's "
-                "single colormap binding; remove the overlay or the colormap"
-            )
+        strength = float(layer.get("strength", 1.0))
         if strength <= 0.0:
             # 0 means off: no overlay. The engine normalizes the height its
             # material layers sample by the colormap's domain, so a bound
@@ -678,22 +671,56 @@ class StudioRenderer:
         # Viewport previews send neither, so the interactive path is unchanged.
         aov = quality.get("aov") or {}
         aov_flags = {channel: bool(aov.get(channel)) for channel in ("albedo", "normal", "depth")}
-        plate_enabled = bool(quality.get("plate", False))
-        if plate_enabled:
-            # The plate's cut-out is the renderer's own depth: background
-            # pixels carry zero depth, so a dark valley cannot be mistaken for
-            # the page.
+        # The plate's cut-out is the renderer's own depth: background pixels
+        # carry zero depth, so a dark valley cannot be mistaken for the page.
+        # A plate is a layer now, so the depth pass follows the stack.
+        layers = request.get("cartography") or []
+        has_plate = any(
+            str(layer.get("type", "")) == "plate" and bool(layer.get("visible", True))
+            for layer in layers
+        )
+        if has_plate:
             aov_flags["depth"] = True
         want_aov = any(aov_flags.values())
         want_denoise = bool(quality.get("denoise"))
-        overlay = request.get("overlay") or None
         environment = request.get("environment") or None
+
+        # The map's layer stack, back to front. The engine binds exactly one
+        # terrain overlay per frame (the first overlay that has a LUT, then
+        # stops), so the elevation ramp and the draped imagery compete for
+        # that slot: the uppermost visible one wins and the other is
+        # reported, never dropped silently.
+        visible = [layer for layer in layers if bool(layer.get("visible", True))]
+        imagery_layer = None
+        ramp_layer = None
+        for layer in visible:
+            kind = str(layer.get("type", ""))
+            if kind == "imagery":
+                imagery_layer = layer
+            elif kind == "elevationRamp":
+                ramp_layer = layer
+        if imagery_layer is not None and ramp_layer is not None:
+            print(
+                json.dumps(
+                    {
+                        "event": "warning",
+                        "message": "the elevation ramp is hidden under the imagery: "
+                        "the engine composites one terrain overlay per frame",
+                    }
+                ),
+                flush=True,
+            )
+            ramp_layer = None
         overlays = []
-        if overlay:
+        if imagery_layer is not None:
             try:
-                overlays = [self.build_overlay(overlay)]
+                overlays = [self.build_overlay(imagery_layer)]
             except Exception as exc:  # noqa: BLE001
                 print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
+        else:
+            ramp_overlay = self.colormap_overlay(ramp_layer)
+            if ramp_overlay is not None:
+                overlays.append(ramp_overlay)
 
         span = span_x
         radius = float(camera.get("radius") or 1.5 * max(self.span_x, self.span_y)) * self.scale
@@ -715,11 +742,8 @@ class StudioRenderer:
         ibl.intensity = float(request.get("iblIntensity", 1.0))
 
         sky_settings = self.sky_settings(request, quality, environment)
-        # The colormap tints the terrain; a raster overlay drawn after it
-        # still wins where it covers the ground.
-        colormap_overlay = self.colormap_overlay(quality, bool(overlays))
-        if colormap_overlay is not None:
-            overlays.insert(0, colormap_overlay)
+        # The elevation ramp tints the terrain; the imagery drapes over it.
+        ramp_overlay = self.colormap_overlay(ramp_layer)
         sun_visibility = self.sun_visibility_settings(quality)
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
@@ -752,9 +776,9 @@ class StudioRenderer:
             # material set and 1 is the ramp. With no colormap selected the
             # mode stays `material` (a `mix` mode with no overlay applies the
             # engine's fallback LUT to the whole terrain).
-            albedo_mode="mix" if colormap_overlay is not None else "material",
-            colormap_strength=float(quality.get("colormapStrength", 1.0))
-            if colormap_overlay is not None
+            albedo_mode="mix" if ramp_overlay is not None else "material",
+            colormap_strength=float(ramp_layer.get("strength", 1.0))
+            if ramp_overlay is not None
             else 0.0,
             # One lighting model across the app. The viewport's Solid/Material
             # preview is three.js `MeshStandardMaterial` — radiance =
@@ -845,13 +869,17 @@ class StudioRenderer:
                     "(install it with `pip install oidn` / `pip install pyoidn` next to the engine)" % (exc,)
                 ) from exc
 
-        vector = request.get("vector") or None
-        if vector:
-            label_field = str(vector.get("labelField", "") or "")
-            lines, points, vector_crs = read_vector_features(
-                str(vector["path"]), label_field
-            )
-            dem_code = crs_code(self.dem_crs)
+        # The map's vector layers, in draw order: each one's lines are
+        # draped on the terrain and rasterized by the engine.
+        vector_layers = [
+            layer for layer in visible if str(layer.get("type", "")) == "vector"
+        ]
+        label_layers = [
+            layer for layer in visible if str(layer.get("type", "")) == "labels"
+        ]
+        dem_code = crs_code(self.dem_crs)
+        for vector in vector_layers:
+            lines, _points, vector_crs = read_vector_features(str(vector["path"]), "")
             file_code = crs_code(vector_crs)
             if dem_code and file_code and dem_code != file_code:
                 raise RuntimeError(
@@ -872,71 +900,91 @@ class StudioRenderer:
                 lines,
                 width,
                 height,
-                colour=tuple(float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))),
+                colour=tuple(
+                    float(c) for c in vector.get("colour", (1.0, 0.29, 0.1, 1.0))
+                ),
                 stroke_px=stroke_px,
             )
-            rgb = composite_overlay(rgb, vector_overlay)
+            if vector_overlay is not None:
+                rgb = composite_overlay(rgb, vector_overlay)
 
-            if bool(vector.get("labels", False)) and points:
-                # The labels are the engine's: its label plan places them, its
-                # text compositor draws them (the packaged MSDF atlas, the
-                # halo, the rasterizer).
-                label_colour = tuple(
-                    float(c) for c in vector.get("labelColour", (0.08, 0.08, 0.1, 1.0))
+        # The label layers: the engine's own label plan places them and its
+        # text compositor draws them (the packaged MSDF atlas, the halo, the
+        # rasterizer).
+        for label_layer in label_layers:
+            field = str(label_layer.get("field", "") or "")
+            _lines, points, label_crs = read_vector_features(
+                str(label_layer["path"]), field
+            )
+            file_code = crs_code(label_crs)
+            if dem_code and file_code and dem_code != file_code:
+                raise RuntimeError(
+                    "the label file is in EPSG:%s and the DEM in EPSG:%s; "
+                    "reproject the file onto the DEM's CRS first" % (file_code, dem_code)
                 )
-                # A halo in the opposite tone keeps the text readable on any
-                # ground: light text gets a dark halo and the other way round.
-                dark_text = sum(label_colour[:3]) / 3.0 < 0.5
-                halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
-                rgb, label_summary = compose_vector_labels(
-                    rgb,
-                    params,
-                    self.heights,
-                    self.dem_bounds,
-                    points,
-                    width,
-                    height,
-                    colour=label_colour,
-                    size_px=float(vector.get("labelSizePx", 14.0) or 14.0),
-                    halo_colour=halo,
+            if not points:
+                continue
+            label_colour = tuple(
+                float(c) for c in label_layer.get("colour", (0.08, 0.08, 0.1, 1.0))
+            )
+            # A halo in the opposite tone keeps the text readable on any
+            # ground: light text gets a dark halo and the other way round.
+            dark_text = sum(label_colour[:3]) / 3.0 < 0.5
+            halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
+            rgb, label_summary = compose_vector_labels(
+                rgb,
+                params,
+                self.heights,
+                self.dem_bounds,
+                points,
+                width,
+                height,
+                colour=label_colour,
+                size_px=float(label_layer.get("sizePx", 14.0) or 14.0),
+                halo_colour=halo,
+            )
+            if not label_summary["accepted"]:
+                # Say why the labels drew nothing: the engine rejected them
+                # (a name outside the packaged atlas, say), and a silent
+                # empty layer looks like a broken control.
+                reasons = ", ".join(
+                    "%s %d" % (reason, count)
+                    for reason, count in sorted(label_summary["rejected"].items())
                 )
-                if not label_summary["accepted"]:
-                    # Say why the labels drew nothing: the engine rejected them
-                    # (a name outside the packaged atlas, say), and a silent
-                    # empty layer looks like a broken control.
-                    reasons = ", ".join(
-                        "%s %d" % (reason, count)
-                        for reason, count in sorted(label_summary["rejected"].items())
-                    )
-                    print(
-                        json.dumps(
-                            {
-                                "event": "warning",
-                                "message": "the vector labels drew nothing: %d features named, "
-                                "none accepted (%s)"
-                                % (label_summary["candidates"], reasons or "no reasons given"),
-                            }
-                        ),
-                        flush=True,
-                    )
+                print(
+                    json.dumps(
+                        {
+                            "event": "warning",
+                            "message": "the label layer drew nothing: %d features named, "
+                            "none accepted (%s)"
+                            % (label_summary["candidates"], reasons or "no reasons given"),
+                        }
+                    ),
+                    flush=True,
+                )
 
         rgb = apply_post_effects(rgb, quality)
-        legend_name = str(quality.get("colormap") or "").strip()
-        if bool(quality.get("legend", False)) and legend_name:
+        legend_name = str(ramp_layer.get("colormap", "") or "").strip() if ramp_layer else ""
+        if ramp_layer is not None and bool(ramp_layer.get("legend", False)) and legend_name:
             rgb = compose_legend(rgb, legend_name, self.range)
 
+        # The plate: the uppermost visible plate layer is the map's page.
+        plate_layer = None
+        for layer in visible:
+            if str(layer.get("type", "")) == "plate":
+                plate_layer = layer
         plate_rgb = None
         if (
-            plate_enabled
+            plate_layer is not None
             and aov_frame is not None
             and getattr(aov_frame, "has_depth", False)
         ):
             depth = np.asarray(aov_frame.depth())
-            title = str(quality.get("plateTitle") or "").strip()
+            title = str(plate_layer.get("title", "") or "").strip()
             if not title:
                 title = Path(self.dem_path).stem.replace("_", " ").title()
             legends = []
-            class_ids = self.overlay_classes(overlay) if overlay else []
+            class_ids = self.overlay_classes(imagery_layer) if imagery_layer else []
             if class_ids:
                 # A class raster: the legend names the classes the palette
                 # already paints.
@@ -946,7 +994,7 @@ class StudioRenderer:
                     legends.append(plate_legend(legend_name, self.range))
                 except Exception:  # noqa: BLE001 - the plate still has its title
                     pass
-            if vector:
+            for vector in vector_layers:
                 # The vector layer gets its own entry: its swatch and its file.
                 legends.append(
                     plate_vector_legend(

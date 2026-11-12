@@ -298,42 +298,59 @@ pub struct TerrainHandoff {
     pub world_span_xz: Option<[f64; 2]>,
     /// Elevation range in metres, `[min, max]`.
     pub elevation_range: Option<[f32; 2]>,
-    /// Draped raster overlay, if any.
-    pub overlay: Option<TerrainOverlayHandoff>,
-    /// Vector layer, if any.
-    pub vector: Option<TerrainVectorHandoff>,
 }
 
-/// A vector layer on its way to the renderer.
+/// A cartography layer on its way to the renderer: the map's stack, in draw
+/// order, with the asset paths resolved.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TerrainVectorHandoff {
-    pub path: String,
+pub struct CartographyLayerHandoff {
+    pub id: crate::cartography::CartographyLayerId,
     pub name: String,
-    /// The line colour, RGBA in 0..=1.
-    pub colour: [f32; 4],
-    /// The line's symbol width in pixels.
-    pub width_px: f32,
-    /// Draw the layer's named features as labels.
-    pub labels: bool,
-    /// The attribute that names a feature (`name`, `name.en`, ...).
-    pub label_field: String,
-    /// The label colour, RGBA in 0..=1.
-    pub label_colour: [f32; 4],
-    /// The label size in pixels.
-    pub label_size_px: f32,
+    pub visible: bool,
+    #[serde(flatten)]
+    pub kind: CartographyLayerHandoffKind,
 }
 
+/// What a cartography layer draws, in renderer terms.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerrainOverlayHandoff {
-    pub path: String,
-    pub name: String,
-    pub opacity: f32,
-    pub preserve_colors: bool,
-    /// Despeckle a single-band classification before paletting it.
-    #[serde(default)]
-    pub despeckle: bool,
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CartographyLayerHandoffKind {
+    Relief,
+    ElevationRamp {
+        colormap: String,
+        strength: f32,
+        legend: bool,
+    },
+    Imagery {
+        path: String,
+        opacity: f32,
+        preserve_colors: bool,
+        despeckle: bool,
+    },
+    Vector {
+        path: String,
+        colour: [f32; 4],
+        width_px: f32,
+    },
+    Labels {
+        /// The vector layer whose features are named.
+        source: crate::cartography::CartographyLayerId,
+        path: String,
+        field: String,
+        colour: [f32; 4],
+        size_px: f32,
+    },
+    Plate {
+        title: String,
+        north_arrow: bool,
+        scale_bar: bool,
+        legend: bool,
+    },
 }
 
 /// Sun direction in the viewer's terms (`lit_sun`).
@@ -375,6 +392,8 @@ pub struct Handoff {
     pub terrain_camera: Option<TerrainCamera>,
     /// The DEM the viewer should load, when the scene has terrain.
     pub terrain: Option<TerrainHandoff>,
+    /// The map's layer stack, in draw order.
+    pub cartography: Vec<CartographyLayerHandoff>,
     pub sun: Option<SunAngles>,
     /// HDRI environment for image-based lighting, when the project sets one.
     /// Both the Material preview and Rendered frames consume it.
@@ -564,9 +583,110 @@ pub fn handoff(project: &Project, revision: u64, target: Workspace) -> Handoff {
         ),
         terrain_camera: terrain_camera(project),
         terrain: terrain_handoff(project),
+        cartography: cartography_handoff(project),
         sun: sun_angles(project),
         environment: environment_handoff(project),
     }
+}
+
+/// The map's layer stack in renderer terms, with the asset paths resolved.
+///
+/// A layer whose asset is gone is dropped rather than sent as a broken path:
+/// the renderer would fail the whole frame over a layer the author already
+/// removed from the registry.
+pub fn cartography_handoff(project: &Project) -> Vec<CartographyLayerHandoff> {
+    let mut layers = Vec::new();
+    for layer in &project.cartography {
+        let kind = match &layer.kind {
+            crate::cartography::CartographyLayerKind::Relief => CartographyLayerHandoffKind::Relief,
+            crate::cartography::CartographyLayerKind::ElevationRamp {
+                colormap,
+                strength,
+                legend,
+            } => CartographyLayerHandoffKind::ElevationRamp {
+                colormap: colormap.clone(),
+                strength: *strength,
+                legend: *legend,
+            },
+            crate::cartography::CartographyLayerKind::Imagery {
+                asset,
+                opacity,
+                preserve_colors,
+                despeckle,
+            } => {
+                let Some(asset) = project.asset(*asset) else {
+                    continue;
+                };
+                CartographyLayerHandoffKind::Imagery {
+                    path: asset.path.clone(),
+                    opacity: *opacity,
+                    preserve_colors: *preserve_colors,
+                    despeckle: *despeckle,
+                }
+            }
+            crate::cartography::CartographyLayerKind::Vector {
+                asset,
+                colour,
+                width_px,
+            } => {
+                let Some(asset) = project.asset(*asset) else {
+                    continue;
+                };
+                CartographyLayerHandoffKind::Vector {
+                    path: asset.path.clone(),
+                    colour: *colour,
+                    width_px: *width_px,
+                }
+            }
+            crate::cartography::CartographyLayerKind::Labels {
+                source,
+                field,
+                colour,
+                size_px,
+            } => {
+                // A label layer names the features of a vector layer: the file
+                // is the source layer's, so the renderer reads it once.
+                let Some(source_layer) =
+                    project.cartography.iter().find(|entry| entry.id == *source)
+                else {
+                    continue;
+                };
+                let crate::cartography::CartographyLayerKind::Vector { asset, .. } =
+                    &source_layer.kind
+                else {
+                    continue;
+                };
+                let Some(asset) = project.asset(*asset) else {
+                    continue;
+                };
+                CartographyLayerHandoffKind::Labels {
+                    source: *source,
+                    path: asset.path.clone(),
+                    field: field.clone(),
+                    colour: *colour,
+                    size_px: *size_px,
+                }
+            }
+            crate::cartography::CartographyLayerKind::Plate {
+                title,
+                north_arrow,
+                scale_bar,
+                legend,
+            } => CartographyLayerHandoffKind::Plate {
+                title: title.clone(),
+                north_arrow: *north_arrow,
+                scale_bar: *scale_bar,
+                legend: *legend,
+            },
+        };
+        layers.push(CartographyLayerHandoff {
+            id: layer.id,
+            name: layer.name.clone(),
+            visible: layer.visible,
+            kind,
+        });
+    }
+    layers
 }
 
 /// The project's HDRI environment in renderer terms, when set.
@@ -597,31 +717,6 @@ pub fn terrain_handoff(project: &Project) -> Option<TerrainHandoff> {
         dimensions: terrain.dimensions,
         world_span_xz: terrain.world_span_xz,
         elevation_range: terrain.elevation_range,
-        overlay: terrain.overlay.and_then(|overlay| {
-            project
-                .asset(overlay.asset)
-                .map(|asset| TerrainOverlayHandoff {
-                    path: asset.path.clone(),
-                    name: asset.name.clone(),
-                    opacity: overlay.opacity,
-                    preserve_colors: overlay.preserve_colors,
-                    despeckle: overlay.despeckle,
-                })
-        }),
-        vector: terrain.vector.clone().and_then(|vector| {
-            project
-                .asset(vector.asset)
-                .map(|asset| TerrainVectorHandoff {
-                    path: asset.path.clone(),
-                    name: asset.name.clone(),
-                    colour: vector.colour,
-                    width_px: vector.width_px,
-                    labels: vector.labels,
-                    label_field: vector.label_field,
-                    label_colour: vector.label_colour,
-                    label_size_px: vector.label_size_px,
-                })
-        }),
     })
 }
 

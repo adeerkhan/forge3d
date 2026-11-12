@@ -87,6 +87,8 @@ fn migrate(mut value: Value, from_version: u32, context: &str) -> Result<Value, 
             2 => migrate_v2_to_v3(value),
             // v4 adds the animation timeline (defaulted on load).
             3 => migrate_v3_to_v4(value),
+            // v5 turns the map's decisions into an ordered layer stack.
+            4 => migrate_v4_to_v5(value),
             other => {
                 return Err(StudioError::UnsupportedSchema {
                     context: context.to_owned(),
@@ -150,6 +152,141 @@ fn migrate_v3_to_v4(mut value: Value) -> Value {
         object
             .entry("timeline")
             .or_insert_with(|| serde_json::to_value(crate::timeline::Timeline::default()).unwrap());
+        object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
+    }
+    value
+}
+
+/// v4 → v5: the map becomes an ordered layer stack.
+///
+/// v4 kept the map's decisions in three places: the terrain object's draped
+/// raster and vector layer, and the render settings' colormap and plate.
+/// v5 has one stack, so the migration moves them into layers — the relief
+/// first, then the ramp, the imagery, the vector layer and its labels, and
+/// the plate last (the draw order, back to front).
+fn migrate_v4_to_v5(mut value: Value) -> Value {
+    use serde_json::json;
+
+    let mut layers: Vec<Value> = Vec::new();
+    layers.push(json!({
+        "id": crate::ids::new_id().to_string(),
+        "name": "Terrain relief",
+        "visible": true,
+        "type": "relief",
+    }));
+
+    let colormap = value
+        .pointer("/render/colormap")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    if !colormap.is_empty() {
+        let strength = value
+            .pointer("/render/colormapStrength")
+            .and_then(Value::as_f64)
+            .unwrap_or(1.0);
+        layers.push(json!({
+            "id": crate::ids::new_id().to_string(),
+            "name": "Elevation ramp",
+            "visible": true,
+            "type": "elevationRamp",
+            "colormap": colormap,
+            "strength": strength,
+            "legend": value
+                .pointer("/render/legend")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        }));
+    }
+
+    if value.pointer("/render/plate").and_then(Value::as_bool) == Some(true) {
+        let title = value
+            .pointer("/render/plateTitle")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        layers.push(json!({
+            "id": crate::ids::new_id().to_string(),
+            "name": "Map plate",
+            "visible": true,
+            "type": "plate",
+            "title": title,
+            "northArrow": true,
+            "scaleBar": true,
+            "legend": true,
+        }));
+    }
+
+    // The terrain object carried the draped raster and the vector layer.
+    let mut terrain: Option<&mut Value> = None;
+    if let Some(objects) = value
+        .get_mut("scene")
+        .and_then(|scene| scene.get_mut("objects"))
+    {
+        if let Some(list) = objects.as_array_mut() {
+            for object in list.iter_mut() {
+                if object.pointer("/kind/type").and_then(Value::as_str) == Some("terrain") {
+                    terrain = Some(object);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(terrain) = terrain {
+        if let Some(overlay) = terrain.pointer("/kind/overlay").cloned() {
+            let asset = overlay.get("asset").cloned().unwrap_or(Value::Null);
+            layers.push(json!({
+                "id": crate::ids::new_id().to_string(),
+                "name": "Imagery",
+                "visible": true,
+                "type": "imagery",
+                "asset": asset,
+                "opacity": overlay.get("opacity").cloned().unwrap_or(json!(0.82)),
+                "preserveColors": overlay.get("preserveColors").cloned().unwrap_or(json!(false)),
+                "despeckle": overlay.get("despeckle").cloned().unwrap_or(json!(false)),
+            }));
+        }
+        if let Some(vector) = terrain.pointer("/kind/vector").cloned() {
+            let asset = vector.get("asset").cloned().unwrap_or(Value::Null);
+            let vector_id = crate::ids::new_id().to_string();
+            layers.push(json!({
+                "id": vector_id,
+                "name": "Vector layer",
+                "visible": true,
+                "type": "vector",
+                "asset": asset,
+                "colour": vector.get("colour").cloned().unwrap_or(json!([0.9, 0.29, 0.1, 1.0])),
+                "widthPx": vector.get("widthPx").cloned().unwrap_or(json!(2.0)),
+            }));
+            if vector.get("labels").and_then(Value::as_bool) == Some(true) {
+                layers.push(json!({
+                    "id": crate::ids::new_id().to_string(),
+                    "name": "Labels",
+                    "visible": true,
+                    "type": "labels",
+                    "source": vector_id,
+                    "field": vector.get("labelField").cloned().unwrap_or(json!("name")),
+                    "colour": vector.get("labelColour").cloned().unwrap_or(json!([0.08, 0.08, 0.1, 1.0])),
+                    "sizePx": vector.get("labelSizePx").cloned().unwrap_or(json!(14.0)),
+                }));
+            }
+        }
+        // The old fields are the stack's business now.
+        if let Some(kind) = terrain
+            .get_mut("kind")
+            .and_then(|kind| kind.as_object_mut())
+        {
+            kind.remove("overlay");
+            kind.remove("vector");
+        }
+    }
+
+    if let Some(object) = value.as_object_mut() {
+        // A document that already carries a stack keeps it: the migration only
+        // builds one for the documents that had none.
+        object
+            .entry("cartography")
+            .or_insert_with(|| Value::Array(layers));
         object.insert("schemaVersion".into(), Value::from(SCHEMA_VERSION));
     }
     value

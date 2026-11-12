@@ -102,11 +102,11 @@ export const tauriBridge: StudioBridge = {
 
   importTerrainDem: (path) => invoke<SessionState>("import_terrain_dem", { path }),
 
-  setTerrainOverlay: (path, opacity) =>
-    invoke<SessionState>("set_terrain_overlay", { path, opacity: opacity ?? null }),
+  addImageryLayer: (path, opacity) =>
+    invoke<SessionState>("add_imagery_layer", { path, opacity: opacity ?? null }),
 
-  setTerrainVector: (path, colour, widthPx) =>
-    invoke<SessionState>("set_terrain_vector", {
+  addVectorLayer: (path, colour, widthPx) =>
+    invoke<SessionState>("add_vector_layer", {
       path,
       colour: colour ?? null,
       widthPx: widthPx ?? null,

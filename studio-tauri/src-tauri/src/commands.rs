@@ -660,9 +660,12 @@ pub fn file_size(path: String) -> Result<u64, String> {
     Ok(metadata.len())
 }
 
-/// Attach (or clear) a raster overlay on the scene terrain.
+/// Add an imagery layer to the map's stack.
+///
+/// The file is registered as an asset and the layer goes on top of the stack,
+/// where the author can move it and give it a name.
 #[tauri::command]
-pub fn set_terrain_overlay(
+pub fn add_imagery_layer(
     state: State<'_, AppState>,
     path: Option<String>,
     opacity: Option<f32>,
@@ -671,56 +674,47 @@ pub fn set_terrain_overlay(
     let snapshot = session
         .state()
         .ok_or_else(|| "no project is open".to_owned())?;
-    let terrain = snapshot
-        .project
-        .terrain_object()
-        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
     let opacity = opacity.unwrap_or(0.82).clamp(0.0, 1.0);
+    let path = path.ok_or_else(|| "no file was chosen".to_owned())?;
 
+    let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+    let existing = snapshot
+        .project
+        .assets
+        .iter()
+        .find(|asset| asset.path == path)
+        .cloned();
+    let asset = existing.unwrap_or_else(|| studio_core::Asset {
+        id: studio_core::ids::new_id(),
+        name: std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "overlay.tif".to_owned()),
+        path: path.clone(),
+        kind: studio_core::AssetKind::Orthophoto,
+        byte_size: metadata.len(),
+    });
     let mut commands = Vec::new();
-    let overlay = match path {
-        None => None,
-        Some(path) => {
-            let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
-            let existing = snapshot
-                .project
-                .assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .cloned();
-            let asset = existing.unwrap_or_else(|| studio_core::Asset {
-                id: studio_core::ids::new_id(),
-                name: std::path::Path::new(&path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "overlay.tif".to_owned()),
-                path: path.clone(),
-                kind: studio_core::AssetKind::Orthophoto,
-                byte_size: metadata.len(),
-            });
-            if !snapshot
-                .project
-                .assets
-                .iter()
-                .any(|entry| entry.id == asset.id)
-            {
-                commands.push(Command::AddAsset {
-                    asset: asset.clone(),
-                });
-            }
-            Some(studio_core::scene::TerrainOverlay {
-                asset: asset.id,
-                opacity,
-                preserve_colors: true,
-                // Inert until the raster is a class raster; the Inspector
-                // toggles it on the terrain object afterwards.
-                despeckle: false,
-            })
-        }
-    };
-    commands.push(Command::SetTerrainOverlay {
-        id: terrain.id,
-        overlay,
+    if !snapshot
+        .project
+        .assets
+        .iter()
+        .any(|entry| entry.id == asset.id)
+    {
+        commands.push(Command::AddAsset {
+            asset: asset.clone(),
+        });
+    }
+    commands.push(Command::AddCartographyLayer {
+        layer: studio_core::CartographyLayer::new(studio_core::CartographyLayerKind::Imagery {
+            asset: asset.id,
+            opacity,
+            preserve_colors: true,
+            // Inert until the raster is a class raster; the Inspector
+            // toggles it on the layer afterwards.
+            despeckle: false,
+        }),
+        index: None,
     });
 
     session
@@ -731,14 +725,13 @@ pub fn set_terrain_overlay(
         .ok_or_else(|| "no project is open".to_owned())
 }
 
-/// Attach (or clear) a vector layer on the scene terrain.
+/// Add a vector layer to the map's stack.
 ///
 /// The file is a GeoPackage or GeoJSON of lines; the layer keeps its colour and
-/// the line's real width in the DEM's metres. The service reads the file and
-/// projects the lines through the engine's own camera, so nothing here parses
-/// geometry.
+/// the line's symbol width in pixels. The service reads the file and projects
+/// the lines through the engine's own camera, so nothing here parses geometry.
 #[tauri::command]
-pub fn set_terrain_vector(
+pub fn add_vector_layer(
     state: State<'_, AppState>,
     path: Option<String>,
     colour: Option<Vec<f32>>,
@@ -748,60 +741,48 @@ pub fn set_terrain_vector(
     let snapshot = session
         .state()
         .ok_or_else(|| "no project is open".to_owned())?;
-    let terrain = snapshot
+    let path = path.ok_or_else(|| "no file was chosen".to_owned())?;
+    let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
+    let existing = snapshot
         .project
-        .terrain_object()
-        .ok_or_else(|| "the scene has no terrain object".to_owned())?;
-
+        .assets
+        .iter()
+        .find(|asset| asset.path == path)
+        .cloned();
+    let asset = existing.unwrap_or_else(|| studio_core::Asset {
+        id: studio_core::ids::new_id(),
+        name: std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "vector.gpkg".to_owned()),
+        path: path.clone(),
+        kind: studio_core::AssetKind::Vector,
+        byte_size: metadata.len(),
+    });
     let mut commands = Vec::new();
-    let layer = match path {
-        None => None,
-        Some(path) => {
-            let metadata = std::fs::metadata(&path).map_err(|error| format!("{path}: {error}"))?;
-            let existing = snapshot
-                .project
-                .assets
-                .iter()
-                .find(|asset| asset.path == path)
-                .cloned();
-            let asset = existing.unwrap_or_else(|| studio_core::Asset {
-                id: studio_core::ids::new_id(),
-                name: std::path::Path::new(&path)
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "vector.gpkg".to_owned()),
-                path: path.clone(),
-                kind: studio_core::AssetKind::Vector,
-                byte_size: metadata.len(),
-            });
-            if !snapshot
-                .project
-                .assets
-                .iter()
-                .any(|entry| entry.id == asset.id)
-            {
-                commands.push(Command::AddAsset {
-                    asset: asset.clone(),
-                });
-            }
-            let colour = colour
-                .filter(|channels| channels.len() == 4)
-                .map(|channels| [channels[0], channels[1], channels[2], channels[3]])
-                .unwrap_or([0.9, 0.29, 0.1, 1.0]);
-            // The layer's label settings are edited in the Inspector (one
-            // command each); attaching a layer starts with the labels off.
-            let mut layer = studio_core::scene::TerrainVectorLayer::new(asset.id);
-            layer.colour = colour;
-            layer.width_px = width_px.unwrap_or(2.0).clamp(1.0, 20.0);
-            layer
-                .validate()
-                .map_err(|reason| format!("vector layer: {reason}"))?;
-            Some(layer)
-        }
-    };
-    commands.push(Command::SetTerrainVector {
-        id: terrain.id,
-        layer,
+    if !snapshot
+        .project
+        .assets
+        .iter()
+        .any(|entry| entry.id == asset.id)
+    {
+        commands.push(Command::AddAsset {
+            asset: asset.clone(),
+        });
+    }
+    let colour = colour
+        .filter(|channels| channels.len() == 4)
+        .map(|channels| [channels[0], channels[1], channels[2], channels[3]])
+        .unwrap_or([0.9, 0.29, 0.1, 1.0]);
+    // The layer's label settings are edited in the Inspector (one command
+    // each); a new layer starts without labels.
+    commands.push(Command::AddCartographyLayer {
+        layer: studio_core::CartographyLayer::new(studio_core::CartographyLayerKind::Vector {
+            asset: asset.id,
+            colour,
+            width_px: width_px.unwrap_or(2.0).clamp(1.0, 20.0),
+        }),
+        index: None,
     });
 
     session

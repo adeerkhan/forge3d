@@ -84,12 +84,12 @@ export interface StudioBridge {
   /** Replace the scene terrain's DEM with a raster the user picked — or add
    *  the terrain when the scene has none yet. */
   importTerrainDem(path: string): Promise<SessionState>;
-  /** Attach (`path`) or clear (`null`) a raster overlay on the terrain. */
-  setTerrainOverlay(path: string | null, opacity?: number): Promise<SessionState>;
-  /** Attach (`path`) or clear (`null`) a vector layer on the terrain. The
-   *  colour is RGBA 0..=1 and the width is a symbol width in pixels. */
-  setTerrainVector(
-    path: string | null,
+  /** Add an imagery layer to the map's stack. */
+  addImageryLayer(path: string, opacity?: number): Promise<SessionState>;
+  /** Add a vector layer to the map's stack. The colour is RGBA 0..=1 and the
+   *  width is a symbol width in pixels. */
+  addVectorLayer(
+    path: string,
     colour?: [number, number, number, number],
     widthPx?: number,
   ): Promise<SessionState>;

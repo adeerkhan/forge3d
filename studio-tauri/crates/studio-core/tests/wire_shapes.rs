@@ -36,10 +36,24 @@ fn ts_camel_case_shapes_deserialize() {
                 .to_string(),
         ),
         (
-            "setTerrainVector",
+            "addCartographyLayer",
             format!(
-                r#"{{"type":"setTerrainVector","id":"{id}","layer":{{"asset":"{id}","colour":[0.9,0.29,0.1,1.0],"widthPx":3.0}}}}"#
+                r#"{{"type":"addCartographyLayer","layer":{{"id":"{id}","name":"Rail network","visible":true,"type":"vector","asset":"{id}","colour":[0.9,0.29,0.1,1.0],"widthPx":3.0}}}}"#
             ),
+        ),
+        (
+            "updateCartographyLayer",
+            format!(
+                r#"{{"type":"updateCartographyLayer","id":"{id}","layer":{{"id":"{id}","name":"Rail network","visible":false,"type":"vector","asset":"{id}","colour":[0.9,0.29,0.1,1.0],"widthPx":3.0}}}}"#
+            ),
+        ),
+        (
+            "moveCartographyLayer",
+            format!(r#"{{"type":"moveCartographyLayer","id":"{id}","to":0}}"#),
+        ),
+        (
+            "removeCartographyLayer",
+            format!(r#"{{"type":"removeCartographyLayer","id":"{id}"}}"#),
         ),
         (
             "applyMapLook",

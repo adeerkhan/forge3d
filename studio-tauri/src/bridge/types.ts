@@ -80,27 +80,44 @@ export interface TerrainObject {
   /** Viewer-basis world span, metres (the viewer's terrain world units). */
   worldSpanXz: [number, number] | null;
   elevationRange: [number, number] | null;
-  overlay: TerrainOverlay | null;
-  /** A vector layer drawn on the terrain (rail, river, boundary). */
-  vector: TerrainVectorLayer | null;
 }
 
-/** A vector layer drawn on the terrain: the file, the line colour, the line's
- *  symbol width and the labels its named features carry. */
-export interface TerrainVectorLayer {
-  asset: string;
-  /** RGBA in 0..=1. */
-  colour: [number, number, number, number];
-  /** The line's symbol width in pixels. */
-  widthPx: number;
-  /** Draw the layer's named features as labels. */
-  labels: boolean;
-  /** The attribute that names a feature (`name`, `name.en`, ...). */
-  labelField: string;
-  /** RGBA in 0..=1. */
-  labelColour: [number, number, number, number];
-  /** The label size in pixels. */
-  labelSizePx: number;
+// ------------------------------------------------------------- cartography
+
+/**
+ * One layer of the map. The map is a stack of these, drawn back to front:
+ * the terrain's relief at the bottom, the ramp and the imagery over it, the
+ * vector layers and their labels, the plate at the front.
+ *
+ * The shape is flat because the wire format is flat (the kind's fields sit
+ * beside the layer's own); `type` says which fields are present.
+ */
+export interface CartographyLayer {
+  id: string;
+  name: string;
+  /** The eye: a hidden layer is not drawn. */
+  visible: boolean;
+  type: "relief" | "elevationRamp" | "imagery" | "vector" | "labels" | "plate";
+  /** elevationRamp */
+  colormap?: string;
+  strength?: number;
+  legend?: boolean;
+  /** imagery and vector */
+  asset?: string;
+  opacity?: number;
+  preserveColors?: boolean;
+  despeckle?: boolean;
+  /** vector */
+  colour?: [number, number, number, number];
+  widthPx?: number;
+  /** labels */
+  source?: string;
+  field?: string;
+  sizePx?: number;
+  /** plate */
+  title?: string;
+  northArrow?: boolean;
+  scaleBar?: boolean;
 }
 
 export interface TerrainOverlay {
@@ -272,6 +289,8 @@ export interface Project {
   viewport: ViewportState;
   render: RenderSettings;
   timeline: Timeline;
+  /** The map's layer stack, in draw order. */
+  cartography: CartographyLayer[];
 }
 
 // ---------------------------------------------------------------- timeline
@@ -547,12 +566,10 @@ export type Command =
       /** Omitted means "the new DEM's own default". */
       zScale?: number | null;
     }
-  | { type: "setTerrainOverlay"; id: string; overlay: TerrainOverlay | null }
-  | {
-      type: "setTerrainVector";
-      id: string;
-      layer: TerrainVectorLayer | null;
-    }
+  | { type: "addCartographyLayer"; layer: CartographyLayer; index?: number }
+  | { type: "removeCartographyLayer"; id: string }
+  | { type: "moveCartographyLayer"; id: string; to: number }
+  | { type: "updateCartographyLayer"; id: string; layer: CartographyLayer }
   | { type: "setActiveCamera"; id: string | null }
   | { type: "setViewport"; viewport: ViewportState }
   | { type: "setWorkspace"; workspace: Workspace }

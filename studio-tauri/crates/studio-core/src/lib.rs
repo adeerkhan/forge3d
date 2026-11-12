@@ -32,6 +32,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub mod autosave;
+pub mod cartography;
 pub mod command;
 pub mod editor;
 pub mod error;
@@ -46,6 +47,9 @@ pub mod timeline;
 pub mod workspace;
 
 pub use autosave::{AutosaveStore, RecoveryEntry, DEFAULT_AUTOSAVE_KEEP};
+pub use cartography::{
+    default_stack, CartographyLayer, CartographyLayerId, CartographyLayerKind, CartographyStack,
+};
 pub use command::{Command, CommandError};
 pub use editor::{Applied, Editor, HistoryEntry, SessionState, DEFAULT_HISTORY_LIMIT};
 pub use error::StudioError;
@@ -59,7 +63,7 @@ pub use project::{
 };
 pub use scene::{
     CameraObject, LightKind, LightObject, Material, MeshObject, MeshSource, ObjectKind, Primitive,
-    Scene, SceneObject, TerrainObject, TerrainOverlay,
+    Scene, SceneObject, TerrainObject,
 };
 pub use session::{AutosaveReport, Session, AUTOSAVE_INTERVAL_SECONDS};
 pub use timeline::{

@@ -5,6 +5,7 @@ import type {
   Applied,
   AssetIntegrity,
   AutosaveStatus,
+  CartographyLayer,
   Command,
   EngineStatus,
   PrimitiveShape,
@@ -30,6 +31,8 @@ export interface SessionApi {
   /** Active manipulation tool. UI state, not project state. */
   tool: Tool;
   setTool(tool: Tool): void;
+  /** The layer the cartography panel is editing. UI state. */
+  selectedLayerId: string | null;
   /** Gizmo orientation. UI state, not project state. */
   space: ToolSpace;
   setSpace(space: ToolSpace): void;
@@ -98,17 +101,17 @@ export interface SessionApi {
     importTerrainDem(): Promise<void>;
     /** Pick a GeoPackage/GeoJSON of lines and attach it as the terrain's
      *  vector layer. */
-    importTerrainVector(): Promise<void>;
-    clearTerrainVector(): Promise<void>;
-    /** Recolour or rewidth the terrain's vector layer (one command). */
-    setTerrainVectorStyle(colour: [number, number, number, number], widthPx: number): Promise<void>;
-    /** Change the terrain's vector labels (one command). */
-    setTerrainVectorLabels(
-      labels: boolean,
-      labelField: string,
-      labelColour: [number, number, number, number],
-      labelSizePx: number,
-    ): Promise<void>;
+    /** Select the layer the cartography panel is editing. */
+    selectCartographyLayer(id: string | null): void;
+    addVectorLayer(): Promise<void>;
+    addImageryLayer(): Promise<void>;
+    addCartographyLayer(layer: CartographyLayer, index?: number): Promise<void>;
+    addRampLayer(colormap: string): Promise<void>;
+    addPlateLayer(title: string): Promise<void>;
+    addLabelLayer(source: string, field: string): Promise<void>;
+    updateCartographyLayer(layer: CartographyLayer): Promise<void>;
+    removeCartographyLayer(id: string): Promise<void>;
+    moveCartographyLayer(id: string, to: number): Promise<void>;
     /** The map look in one undoable step: relief, map camera, north-west sun,
      *  ray-marched hillshade — and the viewport switches to the camera. */
     applyMapLook(): Promise<void>;
@@ -124,11 +127,6 @@ export interface SessionApi {
     relinkAsset(assetId: string): Promise<void>;
     /** Re-check every asset's existence and size on disk. */
     refreshAssetIntegrity(): Promise<void>;
-    /** Pick a raster overlay for the terrain. */
-    importTerrainOverlay(): Promise<void>;
-    /** Change or clear the overlay's opacity (0..1). */
-    setTerrainOverlayOpacity(opacity: number): Promise<void>;
-    clearTerrainOverlay(): Promise<void>;
     /** Render a full-resolution still into the project's renders/ directory. */
     renderStill(): Promise<void>;
     /** Render the whole timeline as a PNG sequence into `directory`.

@@ -38,6 +38,7 @@ fn project_document_key_shape_is_stable() {
             "createdUnixMs",
             "updatedUnixMs",
             "scene",
+            "cartography",
             "assets",
             "selection",
             "workspace",
@@ -75,11 +76,6 @@ fn project_document_key_shape_is_stable() {
             "skyGroundAlbedo",
             "skyExposure",
             "water",
-            "colormap",
-            "colormapStrength",
-            "legend",
-            "plate",
-            "plateTitle",
             "fog",
             "bloom",
             "vignette",
@@ -87,9 +83,9 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
     // Terrain self-shadowing is off by default and its rays reach 2 km.
-    assert_eq!(value["render"]["legend"], false);
-    assert_eq!(value["render"]["plate"], false);
-    assert_eq!(value["render"]["plateTitle"], "");
+    // The map's own decisions are layers now, not render settings.
+    assert_eq!(value["cartography"][0]["type"], "relief");
+    assert_eq!(value["cartography"][0]["visible"], true);
     assert_eq!(value["render"]["sunVisibility"], false);
     assert_eq!(value["render"]["sunVisibilityDistance"], 2000.0);
     assert_eq!(value["render"]["sunVisibilitySteps"], 32);

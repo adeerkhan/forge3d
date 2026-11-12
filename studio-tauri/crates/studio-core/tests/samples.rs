@@ -98,7 +98,10 @@ fn the_bryce_sample_is_the_terrain_scene_the_readme_describes() {
     assert_eq!(kind.dimensions, Some([1024, 1024]));
     assert_eq!(kind.world_span_xz, Some([4000.0, 3800.0]));
     assert!(
-        kind.overlay.is_some(),
+        project.cartography.iter().any(|layer| matches!(
+            layer.kind,
+            studio_core::CartographyLayerKind::Imagery { .. }
+        )),
         "the Bryce sample carries its NAIP drape"
     );
     // Lit by the committed HDRI, which is what the Environment control sets.

@@ -80,17 +80,31 @@ fn the_bryce_starter_ships_with_the_naip_albedo() {
         .expect("the NAIP asset is registered");
     assert_eq!(albedo.name, "Bryce_Canyon_naip.tif");
 
-    let terrain = project.terrain_object().expect("terrain object");
-    let overlay = terrain
-        .terrain()
-        .expect("terrain payload")
-        .overlay
+    // The starter albedo is the map's imagery layer now.
+    let imagery = project
+        .cartography
+        .iter()
+        .find(|layer| {
+            matches!(
+                layer.kind,
+                studio_core::CartographyLayerKind::Imagery { .. }
+            )
+        })
         .expect("the starter albedo is draped on the terrain");
-    assert_eq!(overlay.asset, albedo.id);
-    assert!((overlay.opacity - 0.82).abs() < f32::EPSILON);
-    assert!(overlay.preserve_colors);
+    let studio_core::CartographyLayerKind::Imagery {
+        asset,
+        opacity,
+        preserve_colors,
+        despeckle,
+    } = imagery.kind
+    else {
+        unreachable!("the layer is an imagery layer");
+    };
+    assert_eq!(asset, albedo.id);
+    assert!((opacity - 0.82).abs() < f32::EPSILON);
+    assert!(preserve_colors);
     // An orthophoto is not a class raster: despeckle starts off.
-    assert!(!overlay.despeckle);
+    assert!(!despeckle);
     project
         .validate()
         .expect("terrain starter with albedo is valid");

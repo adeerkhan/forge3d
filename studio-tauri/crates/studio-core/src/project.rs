@@ -14,7 +14,7 @@ use crate::math::{Transform, Vec3};
 use crate::now_unix_ms;
 use crate::scene::{
     validate_name, CameraObject, LightKind, LightObject, MeshObject, ObjectKind, Primitive, Scene,
-    SceneObject, TerrainObject, TerrainOverlay,
+    SceneObject, TerrainObject,
 };
 
 /// Width of the terrain in the Studio viewport's scene units.
@@ -31,7 +31,7 @@ pub const FORMAT: &str = "studio3d";
 /// v1 carried `kind.primitive` on meshes; v2 adds imported glTF/GLB meshes
 /// (`kind.source`) and the project asset registry; v3 adds DEM-backed terrain
 /// objects. Earlier files are migrated on load — see [`crate::persist::migrate`].
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Default project name for `File → New`.
 pub const UNTITLED: &str = "Untitled";
@@ -64,6 +64,12 @@ pub struct Project {
     /// instead of silently dropping keyframes.
     #[serde(default)]
     pub timeline: crate::timeline::Timeline,
+    /// The map's own layer stack (Phase 15). `default` so v4 documents load;
+    /// the v4→v5 migration turns the old per-object fields (the draped
+    /// raster, the vector layer) and the render settings (the colormap, the
+    /// plate) into layers, so a reopened map looks the way it was left.
+    #[serde(default)]
+    pub cartography: crate::cartography::CartographyStack,
 }
 
 impl Project {
@@ -138,6 +144,7 @@ impl Project {
             viewport: ViewportState::default(),
             render: RenderSettings::default(),
             timeline: crate::timeline::Timeline::default(),
+            cartography: crate::cartography::default_stack(),
         }
     }
 
@@ -164,8 +171,8 @@ impl Project {
             terrain =
                 terrain.with_dem_info(dimensions, range, seed.world_origin_xz, seed.world_span_xz);
         }
-        // The starter albedo (the Bryce NAIP image) is attached as an overlay:
-        // it is how the engine drapes imagery on terrain.
+        // The starter albedo (the Bryce NAIP image) becomes the map's imagery
+        // layer: it is how the engine drapes imagery on terrain.
         if let Some(raster) = seed.overlay.clone() {
             let id = new_id();
             project.assets.push(Asset {
@@ -175,12 +182,16 @@ impl Project {
                 kind: AssetKind::Orthophoto,
                 byte_size: raster.byte_size,
             });
-            terrain.overlay = Some(TerrainOverlay {
-                asset: id,
-                opacity: raster.opacity.clamp(0.0, 1.0),
-                preserve_colors: true,
-                despeckle: false,
-            });
+            project
+                .cartography
+                .push(crate::cartography::CartographyLayer::new(
+                    crate::cartography::CartographyLayerKind::Imagery {
+                        asset: id,
+                        opacity: raster.opacity.clamp(0.0, 1.0),
+                        preserve_colors: true,
+                        despeckle: false,
+                    },
+                ));
         }
         project.assets.push(asset);
         project.scene.objects.retain(|object| !object.is_mesh());
@@ -242,15 +253,17 @@ impl Project {
                 if !used.contains(&terrain.asset) {
                     used.push(terrain.asset);
                 }
-                if let Some(overlay) = terrain.overlay {
-                    if !used.contains(&overlay.asset) {
-                        used.push(overlay.asset);
-                    }
-                }
                 if let Some(albedo) = terrain.albedo {
                     if !used.contains(&albedo) {
                         used.push(albedo);
                     }
+                }
+            }
+        }
+        for layer in &self.cartography {
+            if let Some(asset) = layer.kind.asset() {
+                if !used.contains(&asset) {
+                    used.push(asset);
                 }
             }
         }
@@ -270,14 +283,14 @@ impl Project {
             .filter(|object| {
                 object.mesh().and_then(MeshObject::asset_id) == Some(id)
                     || object.terrain().map(|terrain| terrain.asset) == Some(id)
-                    || object
-                        .terrain()
-                        .and_then(|terrain| terrain.overlay)
-                        .map(|overlay| overlay.asset)
-                        == Some(id)
                     || object.mesh().and_then(|mesh| mesh.material.texture) == Some(id)
             })
             .count()
+            + self
+                .cartography
+                .iter()
+                .filter(|layer| layer.kind.asset() == Some(id))
+                .count()
             + usize::from(self.render.environment == Some(id))
     }
 
@@ -380,20 +393,6 @@ impl Project {
                         object.name, asset.name, asset.kind
                     ));
                 }
-                if let Some(overlay) = terrain.overlay {
-                    let Some(asset) = self.asset(overlay.asset) else {
-                        return Err(format!(
-                            "object {:?} references missing overlay asset {}",
-                            object.name, overlay.asset
-                        ));
-                    };
-                    if !asset.kind.is_raster() {
-                        return Err(format!(
-                            "object {:?} uses asset {:?} as an overlay, but it is {:?}",
-                            object.name, asset.name, asset.kind
-                        ));
-                    }
-                }
                 if let Some(albedo) = terrain.albedo {
                     if !asset_ids.contains(&albedo) {
                         return Err(format!(
@@ -468,11 +467,6 @@ impl Project {
         // The engine refuses more than 64 steps per sun ray.
         if !(8..=64).contains(&self.render.sun_visibility_steps) {
             return Err("sun visibility steps must be between 8 and 64".to_owned());
-        }
-        if !self.render.colormap_strength.is_finite()
-            || !(0.0..=1.0).contains(&self.render.colormap_strength)
-        {
-            return Err("colormap strength must be between 0 and 1".to_owned());
         }
         if !self.render.fog.density.is_finite() || !(0.0..=100.0).contains(&self.render.fog.density)
         {
@@ -829,28 +823,6 @@ pub struct RenderSettings {
     /// slope threshold rather than a mask.
     #[serde(default)]
     pub water: WaterSettings,
-    /// Elevation colormap for the terrain, by engine name (`viridis`,
-    /// `magma`, `vik`). Empty means none: the terrain keeps its material set.
-    /// The list is the engine's own `forge3d.available_colormaps()`.
-    #[serde(default)]
-    pub colormap: String,
-    /// How strongly the colormap covers the terrain material, 0..=1.
-    #[serde(default = "default_colormap_strength")]
-    pub colormap_strength: f32,
-    /// Export a map plate next to the still: the rendered terrain cut out on a
-    /// white page (the renderer's depth buffer is the cut-out) with a title and
-    /// an elevation legend. Final stills only, like the AOVs it borrows the
-    /// depth pass from.
-    #[serde(default)]
-    pub plate: bool,
-    /// The plate's title. Empty means the DEM's file name.
-    #[serde(default)]
-    pub plate_title: String,
-    /// Draw the elevation legend (the engine's `Legend`: gradient bar, ticks
-    /// in metres, label) in the frame's corner. Only meaningful with a
-    /// colormap selected; inert without one.
-    #[serde(default)]
-    pub legend: bool,
     /// Atmospheric fog on the terrain.
     #[serde(default)]
     pub fog: FogSettings,
@@ -947,10 +919,6 @@ fn default_sun_visibility_steps() -> u32 {
     32
 }
 
-fn default_colormap_strength() -> f32 {
-    1.0
-}
-
 fn default_fog_density() -> f32 {
     // 0.5 veiled 72% of a 922x795 frame; 0.05 is a haze you can see through.
     0.05
@@ -1009,11 +977,6 @@ impl Default for RenderSettings {
             sky_ground_albedo: default_sky_ground_albedo(),
             sky_exposure: default_sky_exposure(),
             water: WaterSettings::default(),
-            colormap: String::new(),
-            colormap_strength: default_colormap_strength(),
-            legend: false,
-            plate: false,
-            plate_title: String::new(),
             fog: FogSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,

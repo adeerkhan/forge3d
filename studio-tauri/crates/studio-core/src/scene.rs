@@ -379,148 +379,8 @@ pub struct TerrainObject {
     /// Elevation range in metres, `[min, max]`.
     #[serde(default)]
     pub elevation_range: Option<[f32; 2]>,
-    /// Draped raster overlay (land cover, orthophoto) — the cartographic layer.
-    #[serde(default)]
-    pub overlay: Option<TerrainOverlay>,
-    /// A vector layer drawn on the terrain (a rail network, rivers, boundaries).
-    #[serde(default)]
-    pub vector: Option<TerrainVectorLayer>,
-}
-
-/// A vector layer drawn on the terrain.
-///
-/// The lines come from the asset (a GeoPackage or GeoJSON); the colour and the
-/// width are the studio's. The width is a cartographic **symbol width in
-/// pixels**: a real rail is a few metres wide, which is sub-pixel at any
-/// country-scale framing (62 m per pixel on a 65 km DEM at 900 px), so a
-/// physical width could never change the picture. A symbol width does, at
-/// every zoom. The rasterizer's own floor is one pixel (0.5 px and 1 px render
-/// identically — 0 changed samples, measured), so the range starts at 1.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerrainVectorLayer {
-    pub asset: AssetId,
-    /// The line colour, RGBA in 0..=1.
-    #[serde(default = "default_vector_colour")]
-    pub colour: [f32; 4],
-    /// The line's symbol width in pixels.
-    #[serde(default = "default_vector_width")]
-    pub width_px: f32,
-    /// Draw the layer's named features as labels.
-    #[serde(default)]
-    pub labels: bool,
-    /// The attribute that names a feature (`name`, `name.en`, ...).
-    #[serde(default = "default_vector_label_field")]
-    pub label_field: String,
-    /// The label colour, RGBA in 0..=1.
-    #[serde(default = "default_vector_label_colour")]
-    pub label_colour: [f32; 4],
-    /// The label size in pixels.
-    #[serde(default = "default_vector_label_size")]
-    pub label_size_px: f32,
-}
-
-fn default_vector_colour() -> [f32; 4] {
-    [0.9, 0.29, 0.1, 1.0]
-}
-
-fn default_vector_width() -> f32 {
-    2.0
-}
-
-fn default_vector_label_field() -> String {
-    "name".to_owned()
-}
-
-fn default_vector_label_colour() -> [f32; 4] {
-    [0.08, 0.08, 0.1, 1.0]
-}
-
-fn default_vector_label_size() -> f32 {
-    14.0
-}
-
-/// A raster draped over the terrain, e.g. land cover or an orthophoto.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerrainOverlay {
-    pub asset: AssetId,
-    /// 0..1; the gallery's land-cover example uses 0.82.
-    #[serde(default = "default_opacity")]
-    pub opacity: f32,
-    /// Composite source colours after lighting (categorical palettes survive).
-    #[serde(default = "default_true")]
-    pub preserve_colors: bool,
-    /// Clean up a single-band *classification* raster before it is paletted:
-    /// a cell whose own class has at most two same-class neighbours takes the
-    /// neighbouring majority when that majority has at least four. The gallery
-    /// land-cover recipe's despeckle, for the salt-and-pepper a classifier
-    /// leaves behind. Inert on an RGB raster.
-    #[serde(default)]
-    pub despeckle: bool,
-}
-
-fn default_opacity() -> f32 {
-    0.82
-}
-
-impl TerrainVectorLayer {
-    /// A layer with the studio's defaults for everything but its asset.
-    pub fn new(asset: AssetId) -> Self {
-        Self {
-            asset,
-            colour: default_vector_colour(),
-            width_px: default_vector_width(),
-            labels: false,
-            label_field: default_vector_label_field(),
-            label_colour: default_vector_label_colour(),
-            label_size_px: default_vector_label_size(),
-        }
-    }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if self.asset.is_nil() {
-            return Err("vector layer has no asset".to_owned());
-        }
-        if !self
-            .colour
-            .iter()
-            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        {
-            return Err("vector colour channels must be between 0 and 1".to_owned());
-        }
-        if !self.width_px.is_finite() || !(1.0..=20.0).contains(&self.width_px) {
-            return Err("vector width must be between 1 and 20 pixels".to_owned());
-        }
-        if self.labels && self.label_field.trim().is_empty() {
-            return Err(
-                "the vector label field cannot be empty while the labels are on".to_owned(),
-            );
-        }
-        if !self
-            .label_colour
-            .iter()
-            .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
-        {
-            return Err("vector label colour channels must be between 0 and 1".to_owned());
-        }
-        if !self.label_size_px.is_finite() || !(8.0..=48.0).contains(&self.label_size_px) {
-            return Err("vector label size must be between 8 and 48 pixels".to_owned());
-        }
-        Ok(())
-    }
-}
-
-impl TerrainOverlay {
-    fn validate(&self) -> Result<(), String> {
-        if self.asset.is_nil() {
-            return Err("overlay has no asset".to_owned());
-        }
-        if !self.opacity.is_finite() || !(0.0..=1.0).contains(&self.opacity) {
-            return Err("overlay opacity must be between 0 and 1".to_owned());
-        }
-        Ok(())
-    }
+    // The draped raster, the vector layer and their labels are the map's
+    // layers now (`Project::cartography`): one stack, one order, one place.
 }
 
 fn default_z_scale() -> f32 {
@@ -561,8 +421,6 @@ impl TerrainObject {
             asset,
             z_scale: 1.0,
             albedo: None,
-            overlay: None,
-            vector: None,
             dimensions: None,
             world_origin_xz: None,
             world_span_xz: None,
@@ -621,15 +479,9 @@ impl TerrainObject {
         if self.asset.is_nil() {
             return Err("terrain has no DEM asset".to_owned());
         }
-        if let Some(overlay) = &self.overlay {
-            overlay.validate()?;
-        }
         // The engine refuses anything outside its range (it raises instead of
         // clamping), so a value in here must be one `TerrainRenderParams`
-        // accepts.
-        if let Some(vector) = &self.vector {
-            vector.validate()?;
-        }
+        // accepts. The map's own layers are validated with the stack.
         if !self.z_scale.is_finite() || !(MIN_Z_SCALE..=MAX_Z_SCALE).contains(&self.z_scale) {
             return Err(format!(
                 "terrain vertical scale must be between {MIN_Z_SCALE} and {MAX_Z_SCALE}"

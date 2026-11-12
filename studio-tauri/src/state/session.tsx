@@ -25,6 +25,7 @@ import type {
   Applied,
   AssetIntegrity,
   AutosaveStatus,
+  CartographyLayer,
   Command,
   EngineStatus,
   RenderFrame,
@@ -65,6 +66,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   /** Fly camera. UI state, not project state. */
   const [flyMode, setFlyMode] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
+  // The layer the cartography panel is editing. UI state, like the tool: the
+  // map's stack is the model, this is which row the author is looking at.
+  const [selectedLayerId, setSelectedLayerId] = useState<string | null>(null);
   const [terrainResolution, setTerrainResolution] = useState(96);
   const [presets, setPresets] = useState<ScenePreset[]>([]);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -555,7 +559,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
-  const importTerrainVector = useCallback(async () => {
+  const addVectorLayer = useCallback(async () => {
     try {
       const picked = await openDialog({
         multiple: false,
@@ -566,8 +570,8 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const path = typeof picked === "string" ? picked : null;
       if (!path) return;
       setBusy(true);
-      setState(await bridge.setTerrainVector(path, [0.9, 0.29, 0.1, 1.0], 2));
-      flash("Vector layer attached");
+      setState(await bridge.addVectorLayer(path, [0.9, 0.29, 0.1, 1.0], 2));
+      flash("Vector layer added");
     } catch (cause) {
       fail(cause);
     } finally {
@@ -575,11 +579,17 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
-  const clearTerrainVector = useCallback(async () => {
+  const addImageryLayer = useCallback(async () => {
     try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: [{ name: "Raster overlay", extensions: ["tif", "tiff", "png"] }],
+      });
+      const path = typeof picked === "string" ? picked : null;
+      if (!path) return;
       setBusy(true);
-      setState(await bridge.setTerrainVector(null));
-      flash("Vector layer removed");
+      setState(await bridge.addImageryLayer(path, 0.82));
+      flash("Imagery layer added");
     } catch (cause) {
       fail(cause);
     } finally {
@@ -587,41 +597,87 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [fail, flash]);
 
-  const setTerrainVectorStyle = useCallback(
-    async (colour: [number, number, number, number], widthPx: number) => {
-      const project = state?.project;
-      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
-      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.vector) {
-        return;
-      }
-      await applyCommand({
-        type: "setTerrainVector",
-        id: terrain.id,
-        layer: { ...terrain.kind.vector, colour, widthPx },
-      });
+  const addCartographyLayer = useCallback(
+    async (layer: CartographyLayer, index?: number) => {
+      await applyCommand({ type: "addCartographyLayer", layer, index });
+      setSelectedLayerId(layer.id);
     },
-    [applyCommand, state],
+    [applyCommand],
   );
 
-  const setTerrainVectorLabels = useCallback(
-    async (
-      labels: boolean,
-      labelField: string,
-      labelColour: [number, number, number, number],
-      labelSizePx: number,
-    ) => {
-      const project = state?.project;
-      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
-      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.vector) {
-        return;
-      }
-      await applyCommand({
-        type: "setTerrainVector",
-        id: terrain.id,
-        layer: { ...terrain.kind.vector, labels, labelField, labelColour, labelSizePx },
-      });
+  const addRampLayer = useCallback(
+    async (colormap: string) => {
+      const layer: CartographyLayer = {
+        id: "",
+        name: "Elevation ramp",
+        visible: true,
+        type: "elevationRamp",
+        colormap,
+        strength: 1,
+        legend: false,
+      };
+      // The id is the shell's: the command refuses a duplicate, and the
+      // engine's ids are UUIDs the shell cannot mint, so the command fills
+      // one in when the layer arrives without it.
+      await applyCommand({ type: "addCartographyLayer", layer });
     },
-    [applyCommand, state],
+    [applyCommand],
+  );
+
+  const addPlateLayer = useCallback(
+    async (title: string) => {
+      const layer: CartographyLayer = {
+        id: "",
+        name: "Map plate",
+        visible: true,
+        type: "plate",
+        title,
+        northArrow: true,
+        scaleBar: true,
+        legend: true,
+      };
+      await applyCommand({ type: "addCartographyLayer", layer });
+    },
+    [applyCommand],
+  );
+
+  const addLabelLayer = useCallback(
+    async (source: string, field: string) => {
+      const layer: CartographyLayer = {
+        id: "",
+        name: "Labels",
+        visible: true,
+        type: "labels",
+        source,
+        field,
+        colour: [0.08, 0.08, 0.1, 1],
+        sizePx: 14,
+      };
+      await applyCommand({ type: "addCartographyLayer", layer });
+    },
+    [applyCommand],
+  );
+
+  const updateCartographyLayer = useCallback(
+    async (layer: CartographyLayer) => {
+      await applyCommand({ type: "updateCartographyLayer", id: layer.id, layer });
+    },
+    [applyCommand],
+  );
+
+  const removeCartographyLayer = useCallback(
+    async (id: string) => {
+      await applyCommand({ type: "removeCartographyLayer", id });
+      setSelectedLayerId((current) => (current === id ? null : current));
+    },
+    [applyCommand],
+  );
+
+  const moveCartographyLayer = useCallback(
+    async (id: string, to: number) => {
+      await applyCommand({ type: "moveCartographyLayer", id, to });
+    },
+    [applyCommand],
   );
 
   const applyMapLook = useCallback(async () => {
@@ -644,75 +700,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setBusy(false);
     }
   }, [applyCommand, fail, flash, state]);
-
-  const importTerrainOverlay = useCallback(async () => {
-    try {
-      const picked = await openDialog({
-        multiple: false,
-        filters: [{ name: "Raster overlay", extensions: ["tif", "tiff", "png"] }],
-      });
-      const path = typeof picked === "string" ? picked : null;
-      if (!path) return;
-      setBusy(true);
-      const next = await bridge.setTerrainOverlay(path, 0.82);
-      setState(next);
-      // A raster overlay and a colormap both need the engine's single colormap
-      // binding (`extract_overlay_binding` binds the first LUT and stops), so
-      // leaving both set means every frame fails. Clear the ramp and say so,
-      // rather than handing the user a render error to work out.
-      const cleared = next.project.render.colormap;
-      if (cleared) {
-        await applyCommand({
-          type: "setRenderSettings",
-          render: { ...next.project.render, colormap: "" },
-        });
-        flash(
-          `Overlay attached — colormap ${cleared} cleared: one colormap binding per frame`,
-        );
-      } else {
-        flash("Overlay attached");
-      }
-    } catch (cause) {
-      fail(cause);
-    } finally {
-      setBusy(false);
-    }
-  }, [applyCommand, fail, flash]);
-
-  const setTerrainOverlayOpacity = useCallback(
-    async (opacity: number) => {
-      const project = state?.project;
-      const terrain = project?.scene.objects.find((object) => object.kind.type === "terrain");
-      if (!project || !terrain || terrain.kind.type !== "terrain" || !terrain.kind.overlay) {
-        return;
-      }
-      const overlayAsset = project.assets.find(
-        (entry) => entry.id === (terrain.kind.type === "terrain" ? terrain.kind.overlay?.asset : null),
-      );
-      if (!overlayAsset) return;
-      try {
-        setBusy(true);
-        setState(await bridge.setTerrainOverlay(overlayAsset.path, opacity));
-      } catch (cause) {
-        fail(cause);
-      } finally {
-        setBusy(false);
-      }
-    },
-    [bridge, fail, state],
-  );
-
-  const clearTerrainOverlay = useCallback(async () => {
-    try {
-      setBusy(true);
-      setState(await bridge.setTerrainOverlay(null));
-      flash("Overlay removed");
-    } catch (cause) {
-      fail(cause);
-    } finally {
-      setBusy(false);
-    }
-  }, [fail, flash]);
 
   /**
    * Offline render queue.
@@ -926,6 +913,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
+      selectCartographyLayer(id: string | null) {
+        setSelectedLayerId(id);
+      },
+
       async newProject() {
         // Kept for programmatic use (keyboard shortcut opens the dialog instead).
         await actions.createProject(null);
@@ -1081,14 +1072,16 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       relinkAsset,
       refreshAssetIntegrity,
       importTerrainDem,
-      importTerrainVector,
-      clearTerrainVector,
-      setTerrainVectorStyle,
-      setTerrainVectorLabels,
+      addVectorLayer,
+      addImageryLayer,
+      addCartographyLayer,
+      addRampLayer,
+      addPlateLayer,
+      addLabelLayer,
+      updateCartographyLayer,
+      removeCartographyLayer,
+      moveCartographyLayer,
       applyMapLook,
-      importTerrainOverlay,
-      setTerrainOverlayOpacity,
-      clearTerrainOverlay,
       setViewportMode,
       renderViewport,
       clearRenderFrame,
@@ -1141,12 +1134,15 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       relinkAsset,
       refreshAssetIntegrity,
       importTerrainDem,
-      importTerrainVector,
-      clearTerrainVector,
-      setTerrainVectorStyle,
-      setTerrainVectorLabels,
-      importTerrainOverlay,
-      clearTerrainOverlay,
+      addVectorLayer,
+      addImageryLayer,
+      addCartographyLayer,
+      addRampLayer,
+      addPlateLayer,
+      addLabelLayer,
+      updateCartographyLayer,
+      removeCartographyLayer,
+      moveCartographyLayer,
       refreshEngine,
       refreshRecovery,
       enqueueStill,
@@ -1159,7 +1155,6 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       select,
       setPlayhead,
       setSunFromSolar,
-      setTerrainOverlayOpacity,
       setViewportMode,
       state,
     ],
@@ -1177,6 +1172,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     busy,
     tool,
     setTool,
+    selectedLayerId,
     space,
     setSpace,
     cameraView,

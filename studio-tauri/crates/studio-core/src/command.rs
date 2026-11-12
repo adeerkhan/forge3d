@@ -230,16 +230,29 @@ pub enum Command {
         id: ObjectId,
     },
 
-    /// Attach, change, or remove a terrain's vector layer.
-    SetTerrainVector {
-        id: ObjectId,
-        layer: Option<crate::scene::TerrainVectorLayer>,
+    /// Add a layer to the map's stack. `index` places it in the draw order
+    /// (the end of the list is the front of the map).
+    AddCartographyLayer {
+        layer: crate::cartography::CartographyLayer,
+        #[serde(default)]
+        index: Option<usize>,
     },
 
-    /// Attach, change, or remove a terrain's draped overlay.
-    SetTerrainOverlay {
-        id: ObjectId,
-        overlay: Option<crate::scene::TerrainOverlay>,
+    /// Remove a layer from the map's stack.
+    RemoveCartographyLayer {
+        id: crate::cartography::CartographyLayerId,
+    },
+
+    /// Move a layer within the map's stack, to the draw position `to`.
+    MoveCartographyLayer {
+        id: crate::cartography::CartographyLayerId,
+        to: usize,
+    },
+
+    /// Change a layer: its name, its eye or its style.
+    UpdateCartographyLayer {
+        id: crate::cartography::CartographyLayerId,
+        layer: crate::cartography::CartographyLayer,
     },
 
     /// Duplicate an object in place. Children are not duplicated in Phase 2.
@@ -1013,74 +1026,106 @@ impl Command {
                 })
             }
 
-            Command::SetTerrainVector { id, layer } => {
+            Command::AddCartographyLayer { layer, index } => {
                 let layer = layer.clone();
-                let object = project
-                    .scene
-                    .object(*id)
-                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
-                let previous = match &object.kind {
-                    crate::scene::ObjectKind::Terrain(terrain) => terrain.vector.clone(),
-                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
-                };
-                if let Some(layer) = layer.as_ref() {
-                    if project.asset(layer.asset).is_none() {
-                        return Err(CommandError::AssetNotFound { id: layer.asset });
-                    }
-                    // The colour, the width and the label settings are the
-                    // shell's units; reject a value the renderer cannot take.
-                    layer
-                        .validate()
-                        .map_err(|reason| CommandError::invalid("vector layer", reason))?;
-                }
-                if let Some(object) = project.scene.object_mut(*id) {
-                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
-                        terrain.vector = layer;
+                layer
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("cartography layer", reason))?;
+                if let Some(asset) = layer.kind.asset() {
+                    if project.asset(asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: asset });
                     }
                 }
+                if project.cartography.iter().any(|entry| entry.id == layer.id) {
+                    return Err(CommandError::invalid(
+                        "cartography layer",
+                        "a layer with this id already exists",
+                    ));
+                }
+                let position = index
+                    .unwrap_or(project.cartography.len())
+                    .min(project.cartography.len());
+                project.cartography.insert(position, layer.clone());
                 Ok(Outcome {
-                    inverse: Command::SetTerrainVector {
-                        id: *id,
-                        layer: previous,
-                    },
-                    affected: vec![*id],
+                    inverse: Command::RemoveCartographyLayer { id: layer.id },
+                    affected: Vec::new(),
                 })
             }
 
-            Command::SetTerrainOverlay { id, overlay } => {
-                let object = project
-                    .scene
-                    .object(*id)
-                    .ok_or(CommandError::ObjectNotFound { id: *id })?;
-                let previous = match &object.kind {
-                    crate::scene::ObjectKind::Terrain(terrain) => terrain.overlay,
-                    _ => return Err(CommandError::invalid("terrain", "object is not a terrain")),
-                };
-                if let Some(layer) = overlay {
-                    if project.asset(layer.asset).is_none() {
-                        return Err(CommandError::AssetNotFound { id: layer.asset });
-                    }
-                    if let Some(object) = project.scene.object_mut(*id) {
-                        if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
-                            terrain.overlay = Some(*layer);
-                        }
-                    }
-                } else if let Some(object) = project.scene.object_mut(*id) {
-                    if let crate::scene::ObjectKind::Terrain(terrain) = &mut object.kind {
-                        terrain.overlay = None;
-                    }
-                }
-                if let Some(object) = project.scene.object(*id) {
-                    object
-                        .validate()
-                        .map_err(|reason| CommandError::invalid("terrain", reason))?;
-                }
+            Command::RemoveCartographyLayer { id } => {
+                let position = project
+                    .cartography
+                    .iter()
+                    .position(|entry| entry.id == *id)
+                    .ok_or_else(|| {
+                        CommandError::invalid("cartography layer", "the layer does not exist")
+                    })?;
+                let removed = project.cartography.remove(position);
                 Ok(Outcome {
-                    inverse: Command::SetTerrainOverlay {
-                        id: *id,
-                        overlay: previous,
+                    inverse: Command::AddCartographyLayer {
+                        layer: removed,
+                        index: Some(position),
                     },
-                    affected: vec![*id],
+                    affected: Vec::new(),
+                })
+            }
+
+            Command::MoveCartographyLayer { id, to } => {
+                let position = project
+                    .cartography
+                    .iter()
+                    .position(|entry| entry.id == *id)
+                    .ok_or_else(|| {
+                        CommandError::invalid("cartography layer", "the layer does not exist")
+                    })?;
+                if *to >= project.cartography.len() {
+                    return Err(CommandError::IndexOutOfRange {
+                        index: *to,
+                        len: project.cartography.len(),
+                    });
+                }
+                if position == *to {
+                    return Ok(Outcome {
+                        inverse: Command::MoveCartographyLayer { id: *id, to: *to },
+                        affected: Vec::new(),
+                    });
+                }
+                let layer = project.cartography.remove(position);
+                project.cartography.insert(*to, layer);
+                Ok(Outcome {
+                    inverse: Command::MoveCartographyLayer {
+                        id: *id,
+                        to: position,
+                    },
+                    affected: Vec::new(),
+                })
+            }
+
+            Command::UpdateCartographyLayer { id, layer } => {
+                let layer = layer.clone();
+                layer
+                    .validate()
+                    .map_err(|reason| CommandError::invalid("cartography layer", reason))?;
+                if let Some(asset) = layer.kind.asset() {
+                    if project.asset(asset).is_none() {
+                        return Err(CommandError::AssetNotFound { id: asset });
+                    }
+                }
+                let position = project
+                    .cartography
+                    .iter()
+                    .position(|entry| entry.id == *id)
+                    .ok_or_else(|| {
+                        CommandError::invalid("cartography layer", "the layer does not exist")
+                    })?;
+                let previous = project.cartography[position].clone();
+                project.cartography[position] = layer;
+                Ok(Outcome {
+                    inverse: Command::UpdateCartographyLayer {
+                        id: *id,
+                        layer: previous,
+                    },
+                    affected: Vec::new(),
                 })
             }
 
@@ -1272,15 +1317,17 @@ impl Command {
             | Command::SetTerrainZScale { id, .. }
             | Command::FitTerrainRelief { id }
             | Command::ApplyMapLook { id }
-            | Command::SetTerrainOverlay { id, .. }
-            | Command::SetTerrainVector { id, .. }
             | Command::SetTerrainDem { id, .. }
             | Command::SetMeshMaterial { id, .. }
             | Command::SetGltfNode { id, .. }
             | Command::SetChannelKeys { id, .. } => vec![*id],
             Command::SetRenderSettings { .. }
             | Command::SetAssetPath { .. }
-            | Command::SetTimelineConfig { .. } => Vec::new(),
+            | Command::SetTimelineConfig { .. }
+            | Command::AddCartographyLayer { .. }
+            | Command::RemoveCartographyLayer { .. }
+            | Command::MoveCartographyLayer { .. }
+            | Command::UpdateCartographyLayer { .. } => Vec::new(),
             Command::SetActiveCamera { id } => id.iter().copied().collect(),
             // The duplicate's id is only known once applied; resyncing the
             // original object is enough for an adapter to refresh the scene.
@@ -1336,6 +1383,16 @@ impl Command {
             Command::ApplyMapLook { id } => format!("Map look for {}", name_of(id)),
             Command::SetTerrainDem { id, .. } => format!("Change DEM of {}", name_of(id)),
             Command::SetRenderSettings { .. } => "Render settings".to_owned(),
+            Command::AddCartographyLayer { layer, .. } => {
+                format!("Add layer {}", layer.name)
+            }
+            Command::RemoveCartographyLayer { id } => {
+                format!("Remove layer {}", crate::ids::short_id(id))
+            }
+            Command::MoveCartographyLayer { .. } => "Reorder layer".to_owned(),
+            Command::UpdateCartographyLayer { layer, .. } => {
+                format!("Edit layer {}", layer.name)
+            }
             Command::SetMeshMaterial { id, .. } => format!("Material of {}", name_of(id)),
             Command::SetGltfNode { id, .. } => format!("Select node of {}", name_of(id)),
             Command::SetChannelKeys { id, channels } => {
@@ -1348,20 +1405,6 @@ impl Command {
             Command::SetTimelineConfig { .. } => "Timeline settings".to_owned(),
             Command::SetAssetPath { id, .. } => {
                 format!("Relink asset {}", crate::ids::short_id(id))
-            }
-            Command::SetTerrainVector { id, layer } => {
-                if layer.is_some() {
-                    format!("Vector layer on {}", name_of(id))
-                } else {
-                    format!("Remove vector layer from {}", name_of(id))
-                }
-            }
-            Command::SetTerrainOverlay { id, overlay } => {
-                if overlay.is_some() {
-                    format!("Overlay on {}", name_of(id))
-                } else {
-                    format!("Remove overlay from {}", name_of(id))
-                }
             }
             Command::SetActiveCamera { id } => match id {
                 Some(id) => format!("Set active camera {}", name_of(id)),

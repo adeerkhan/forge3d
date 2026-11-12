@@ -430,7 +430,7 @@ def test_the_colormap_is_built_from_the_engines_own_catalogue():
     stub = _WaterStub(
         heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(100.0, 500.0)
     )
-    assert service.StudioRenderer.colormap_overlay(stub, {}) is None
+    assert service.StudioRenderer.colormap_overlay(stub, None) is None
     layer = service.StudioRenderer.colormap_overlay(stub, {"colormap": "viridis"})
     assert layer is not None
     # Strength 0 is off. A bound colormap at strength 0 still shifted the
@@ -439,19 +439,17 @@ def test_the_colormap_is_built_from_the_engines_own_catalogue():
     # not bind one: measured 0 samples against the same scene with none.
     assert (
         service.StudioRenderer.colormap_overlay(
-            stub, {"colormap": "viridis", "colormapStrength": 0.0}
+            stub, {"colormap": "viridis", "strength": 0.0}
         )
         is None
     )
     # An unknown name must fail loudly, not render a silent grey terrain.
     with pytest.raises(RuntimeError, match="unknown colormap"):
         service.StudioRenderer.colormap_overlay(stub, {"colormap": "nope"})
-    # One LUT slot per frame: a raster overlay and a colormap cannot both
-    # apply, and dropping one silently would be a lie about the image.
-    with pytest.raises(RuntimeError, match="single colormap binding"):
-        service.StudioRenderer.colormap_overlay(
-            stub, {"colormap": "viridis"}, has_raster_overlay=True
-        )
+    # One LUT slot per frame: the ramp and the imagery compete for it. The
+    # conflict is the stack's business now — the service takes the uppermost
+    # visible one and reports the other (a warning event), instead of one of
+    # them failing the frame.
 
 
 def test_sun_visibility_is_off_unless_asked_and_maps_the_rays():
