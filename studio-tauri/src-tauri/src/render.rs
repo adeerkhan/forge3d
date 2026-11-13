@@ -523,8 +523,6 @@ pub struct RenderRequest {
     pub bloom_softness: f32,
     pub bloom_intensity: f32,
     pub vignette: f32,
-    /// Render the still through the engine's MapScene recipe (development).
-    pub render_via_mapscene: bool,
 }
 
 impl RenderRequest {
@@ -567,7 +565,6 @@ impl RenderRequest {
         self.bloom_softness = settings.bloom.softness;
         self.bloom_intensity = settings.bloom.intensity;
         self.vignette = settings.vignette;
-        self.render_via_mapscene = settings.render_via_mapscene;
         self
     }
 
@@ -642,12 +639,6 @@ impl RenderRequest {
                 // The threshold is the *internal* budget: 8 Mpx requested is
                 // a 16 Mpx target at 2x, which the GPU takes; above that the
                 // frame keeps its pixels and loses the antialiasing.
-                "renderScale": if u64::from(self.width) * u64::from(self.height) <= 8_000_000 {
-                    2.0
-                } else {
-                    1.0
-                },
-
                 "sky": self.sky,
                 // Final stills (and the frames of a sequence) may ask for AOVs
                 // and an OIDN pass; previews never pay for either.
@@ -657,7 +648,6 @@ impl RenderRequest {
                     "depth": final_quality && (self.aov_depth || self.has_plate()),
                 },
                 "denoise": final_quality && self.still_denoise,
-                "mapsceneStill": self.render_via_mapscene,
                 "shadowTechnique": self.shadow_technique,
                 "shadowResolution": self.shadow_resolution,
                 // Terrain self-shadowing. Cheap enough for previews (one ray
@@ -814,7 +804,6 @@ impl RenderRequest {
             bloom_softness: 0.2,
             bloom_intensity: 0.3,
             vignette: 0.0,
-            render_via_mapscene: false,
         })
     }
 }
@@ -877,7 +866,6 @@ mod tests {
             bloom_softness: 0.2,
             bloom_intensity: 0.3,
             vignette: 0.0,
-            render_via_mapscene: false,
         }
     }
 
@@ -964,36 +952,17 @@ mod tests {
     }
 
     #[test]
-    fn previews_and_finals_are_both_supersampled() {
-        // The terrain's per-cell normals alias into sparkles at close camera
-        // ranges; the engine's own 2x render + blit is the fix, and both the
-        // preview and the still do it so the still matches what was on screen.
-        assert_eq!(
-            request().to_payload("preview", None)["quality"]["renderScale"],
-            2.0
-        );
-        assert_eq!(
-            request().to_payload("final", None)["quality"]["renderScale"],
-            2.0
-        );
-
-        // The threshold is the internal target, not the requested frame: a
-        // 2048x2048 preview (4.2 Mpx) is still 2x, which is what lets the
-        // viewport cap at 2048 and keep the antialiasing. A frame over 8 Mpx
-        // would need a 16+ Mpx target, so it keeps its pixels and loses AA.
-        let mut large = request();
-        large.width = 2048;
-        large.height = 2048;
-        assert_eq!(
-            large.to_payload("preview", None)["quality"]["renderScale"],
-            2.0
-        );
-        large.width = 4096;
-        large.height = 2160;
-        assert_eq!(
-            large.to_payload("final", None)["quality"]["renderScale"],
-            1.0
-        );
+    fn previews_and_finals_both_go_through_the_recipe() {
+        // The still path is the engine's MapScene recipe in both modes; the
+        // recipe converges its temporal history instead of supersampling, so
+        // there is no scale key on the payload at all — the engine never
+        // refuses to supersample because supersampling is gone.
+        assert!(request().to_payload("preview", None)["quality"]
+            .get("renderScale")
+            .is_none());
+        assert!(request().to_payload("final", None)["quality"]
+            .get("renderScale")
+            .is_none());
     }
 
     #[test]
@@ -1732,20 +1701,5 @@ mod tests {
         assert_eq!(frame.radius, 900.0);
         assert_eq!(frame.target, [4.0, 5.0, 6.0]);
         assert_eq!(frame.fov_deg, 30.0);
-    }
-
-    #[test]
-    fn the_mapscene_still_flag_rides_the_payload_in_both_qualities() {
-        let settings = studio_core::RenderSettings {
-            render_via_mapscene: true,
-            ..studio_core::RenderSettings::default()
-        };
-        let with_flag = request().with_settings(&settings);
-        for quality in ["preview", "final"] {
-            let payload = with_flag.to_payload(quality, None);
-            assert_eq!(payload["quality"]["mapsceneStill"], true, "{quality}");
-        }
-        let plain = request().to_payload("final", None);
-        assert_eq!(plain["quality"]["mapsceneStill"], false);
     }
 }

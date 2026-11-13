@@ -595,20 +595,12 @@ fn still_sidecar(
     handoff: &studio_core::Handoff,
     frame_ms: f64,
 ) -> serde_json::Value {
-    let uses_aov_path =
-        request.aov_albedo || request.aov_normal || request.aov_depth || request.still_denoise;
     let mut description = request.to_payload("final", None);
     if let Some(map) = description.as_object_mut() {
         map.remove("output");
         map.insert(
             "renderer".into(),
-            serde_json::json!(if request.render_via_mapscene {
-                "forge3d.mapscene.render"
-            } else if uses_aov_path {
-                "forge3d.render_with_aov"
-            } else {
-                "forge3d.render_terrain_pbr_pom"
-            }),
+            serde_json::json!("forge3d.mapscene.render"),
         );
         map.insert(
             "stillAov".into(),
@@ -1345,19 +1337,13 @@ mod tests {
         );
 
         // Provenance only the shell knows.
-        assert_eq!(sidecar["renderer"], "forge3d.render_terrain_pbr_pom");
+        assert_eq!(sidecar["renderer"], "forge3d.mapscene.render");
         assert_eq!(sidecar["stillDenoise"], false);
         assert_eq!(sidecar["frameMs"], 12.5);
         assert_eq!(sidecar["revision"], 4);
         assert_eq!(sidecar["handoffKey"], handoff.idempotency_key);
 
-        // The map scene still reports which recipe made the frame.
-        let mapscene_request = RenderRequest {
-            render_via_mapscene: true,
-            ..request
-        };
-        let mapscene_sidecar = still_sidecar(&mapscene_request, &handoff, 1.0);
-        assert_eq!(mapscene_sidecar["renderer"], "forge3d.mapscene.render");
+        assert_eq!(sidecar["renderer"], "forge3d.mapscene.render");
     }
     /// A starter scene builds its cartography: the gallery's recipes become
     /// layers, and the camera and the sun are placed where the recipe says.

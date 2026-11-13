@@ -30,6 +30,7 @@ import math
 import sys
 import tempfile
 import traceback
+import uuid
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence, Tuple
 
@@ -102,6 +103,21 @@ def engine_height_domain(heights) -> tuple[float, float]:
     if high <= low:
         high = low + 1.0
     return (low, high)
+
+
+def _settings_mapping(obj):
+    """`terrain_params` settings dataclass -> the mapping the recipe accepts.
+
+    The recipe validates every key strictly against the target settings
+    class, so a silent rename would fail loudly instead of producing a
+    silently different frame. Values pass through, including native LUT
+    handles (the AETHER sky's), and the recipe rebuilds the identical
+    settings object.
+    """
+    fields = getattr(type(obj), "__dataclass_fields__", None)
+    if fields is None:
+        raise TypeError("%r is not a terrain_params settings object" % type(obj))
+    return {name: getattr(obj, name) for name in fields}
 
 
 def dem_span(dem) -> tuple[float, float]:
@@ -193,11 +209,7 @@ class StudioRenderer:
         env_path = Path(tempfile.gettempdir()) / "forge3d-studio-sky.hdr"
         write_sky_hdr(env_path)
         self.sky_path = env_path
-        # The built-in sky is the fallback; a project HDRI replaces it. IBLs
-        # are cached because `from_hdr` uploads and pre-filters the map, and
-        # Rendered mode re-requests frames while the camera moves.
-        self._ibl_cache: Dict[tuple, Any] = {}
-        self._ibl_cache_limit = 4
+        # The built-in sky is the fallback; a project HDRI replaces it.
         # The AETHER LUT is a shipped table: resolving it per frame costs a few
         # ms, and its parameters are fixed by the gate in `sky_settings`.
         self._aether_lut: Any = None
@@ -207,237 +219,16 @@ class StudioRenderer:
         self._overlay_rgba_cache: Dict[tuple, np.ndarray] = {}
         self._overlay_rgba_limit = 4
 
-        self.session = f3d.Session(window=False, backend="vulkan")
-        self.renderer = f3d.TerrainRenderer(self.session)
-        self.materials = f3d.MaterialSet.terrain_default()
         self.size: Optional[tuple[int, int]] = None
 
-    def quality_frame(
-        self, params, ibl, water_mask, quality, output=None, cartography=None
-    ):
-        """The frame through the engine's quality surface.
+    def colormap_spec(self, layer: Optional[Dict[str, Any]]):
+        """The elevation ramp as a drape PNG for the recipe.
 
-        The CONCORDIA path carries the screen-space effects — the cloud
-        shadows among them — and the GPU cartography. It is equal-resolution,
-        so the temporal anti-aliasing does the work the plain path's 2x
-        supersampling does; a still averages several frames so it keeps the
-        same smoothness (measured: 4 accumulated frames 2.496 edge energy
-        against the plain 2x still's 2.582).
-
-        The path is the engine's, not the studio's: the render scale is forced
-        to 1 because the quality path refuses to supersample (the engine
-        reports `taau_available: false`).
-        """
-        from forge3d.terrain_params import ScreenSpaceSettings
-
-        # A viewport frame is one sample: the temporal history converges as
-        # the camera moves. A still renders a short sequence and keeps the
-        # converged frame — the engine's own convention for a temporally
-        # filtered image (its recipe goldens warm the history the same way).
-        samples = 1 if not output else 3
-        clouds = cloud_settings(quality.get("clouds"))
-        frames = []
-        # The engine's GPU cartography: the lines and the labels are drawn by
-        # the engine, in the terrain's own pass, so the ground occludes them.
-        label_batches = getattr(cartography, "label_batches", None) or []
-        vector_batches = getattr(cartography, "vector_batches", None) or []
-        for _ in range(samples):
-            frame = self.renderer.render_interactive(
-                self.materials,
-                ibl,
-                params,
-                self.heights,
-                water_mask=water_mask,
-                clouds=clouds,
-                label_batches=label_batches or None,
-                vector_batches=vector_batches or None,
-            )
-            frames.append(np.asarray(frame.to_numpy())[:, :, :3].astype(np.float32))
-        # The last frame is the converged one: the temporal filter keeps
-        # folding the jittered samples into its history (measured on the Mount
-        # Fuji frame: the edge energy falls 3.063 -> 2.558 -> 2.295 over three
-        # frames, against the plain path's 2.582).
-        return frames[-1].astype(np.uint8)
-
-    def _mapscene_still(
-        self,
-        width: int,
-        height: int,
-        camera: Mapping[str, Any],
-        sun: Mapping[str, Any],
-        environment,
-        output_path: str,
-        exposure: float = 1.35,
-        *,
-        aovs: Sequence[str] = (),
-        taa: bool = True,
-    ) -> Tuple[np.ndarray, Any]:
-        """The still through the engine's MapScene recipe.
-
-        The recipe declares the terrain, the camera, the sun and the
-        environment, and calls the engine's own composition — the terrain
-        pass runs the same pipeline the hand-built params took, but the
-        studio stops hand-building every keyword. The heights go in as the
-        studio scaled them; the camera's radius and target are scaled the
-        same way. Post-processing (gradients, vignette, the plate) is the
-        studio's own and runs on the frame afterwards.
-
-        Returns `(frame, aov_frame)` so the plate path gets the recipe's own
-        depth AOV from `MapScene.last_aov_frame()` — no EXR round-trip and
-        no second implementation of anything the engine already does.
-        """
-        from pathlib import Path
-
-        import forge3d as f3d
-
-        span_x, span_y = self.span_x * self.scale, self.span_y * self.scale
-        heights = self.heights
-        mean_z = float(heights.mean())
-        res_x = span_x / max(1.0, float(heights.shape[1]))
-        res_y = span_y / max(1.0, float(heights.shape[0]))
-
-        def _v(key: str, default: float) -> float:
-            value = camera.get(key, default)
-            return float(value) if value is not None else float(default)
-
-        target = camera.get("target") or [0.0, 0.0, mean_z]
-        target = [
-            float(target[0]) * self.scale,
-            float(target[1]) * self.scale,
-            float(target[2]) * self.scale,
-        ]
-        environment_path = str(Path(self.sky_path).resolve()) if environment is None else str(environment)
-        if not Path(environment_path).exists():
-            environment_path = str(Path(self.sky_path).resolve())
-
-        terrain = f3d.TerrainSource(
-            data=heights,
-            crs=self.dem_crs,
-            metadata={
-                "source_id": "studio-dem",
-                "width": int(heights.shape[1]),
-                "height": int(heights.shape[0]),
-                "bounds": list(self.dem_bounds) if self.dem_bounds else None,
-                "resolution": (res_x, res_y),
-                "terrain_span": span_x,
-                "asset_status": "fixture",
-            },
-            elevation_sampling_available=True,
-        )
-        camera_az = _v("phiDeg", 90.0)
-        radius = float(camera.get("radius") or 1.5 * max(span_x, span_y)) * self.scale
-        scene = f3d.MapScene(
-            terrain=terrain,
-            camera=f3d.OrbitCamera(
-                target=tuple(target),
-                distance=radius,
-                azimuth_deg=camera_az,
-                elevation_deg=_v("thetaDeg", 45.0),
-                fov_deg=_v("fovDeg", 45.0),
-            ),
-            lighting=f3d.LightingPreset(
-                name="studio-daylight",
-                intensity=float(sun.get("intensity", 3.0)),
-                sun_direction=(
-                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
-                    * math.cos(math.radians(float(sun.get("azimuthDeg", 135.0)))),
-                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
-                    * math.sin(math.radians(float(sun.get("azimuthDeg", 135.0)))),
-                    math.sin(math.radians(float(sun.get("elevationDeg", 35.0)))),
-                ),
-                settings={
-                    "camera": {"camera_mode": "mesh:zup:north:dem"},
-                    "terrain_shading_model": "lambert_physical",
-                    "hue_variation_strength": 0.0,
-                    "albedo_mode": "material",
-                    "colormap_strength": 0.0,
-                    "light_azimuth_deg": float(sun.get("azimuthDeg", 135.0)),
-                    "light_elevation_deg": float(sun.get("elevationDeg", 35.0)),
-                    "clip": [10.0, 400000.0],
-                    "overlays": [],
-                    "sun": {"color": [float(c) for c in sun.get("color", (1.0, 0.97, 0.92))]},
-                    **({"screen_space": {"enabled": True, "taa_enabled": True}} if taa else {}),
-                    "ibl": {"path": environment_path},
-                    "renderer_config": {
-                        "ibl": {"path": environment_path},
-                        "gi": {"modes": ["ibl"]},
-                        "lighting": {"exposure": float(exposure)},
-                        "shadows": {
-                            "enabled": True,
-                            "technique": "pcf",
-                            "map_size": 4096,
-                            "cascades": 1,
-                            "moment_bias": 5e-05,
-                            "max_distance": 30000.0,
-                            "slope_scale_bias": 0.0001,
-                            "normal_bias": 0.00001,
-                        },
-                    },
-                },
-            ),
-            layers=[],
-            output=f3d.OutputSpec(
-                width=width, height=height, format="png", path=output_path,
-                aovs=tuple(aovs),
-            ),
-        )
-        from PIL import Image
-
-        if taa:
-            # The default still renders through the temporal filter three
-            # times and keeps the converged frame; the recipe one-shot does
-            # not converge. The engine's own flythrough helper shares one
-            # native renderer across the sequence, so the temporal history is
-            # warm exactly as it is in the default path.
-            from forge3d.map_scene import _shared_terrain_render_context
-
-            with _shared_terrain_render_context():
-                for _ in range(3):
-                    scene.render()
-        else:
-            scene.render()
-        frame = np.asarray(Image.open(output_path).convert("RGB"), dtype=np.float32) / 255.0
-        return frame, scene.last_aov_frame
-
-    def environment_map(self, path: Optional[str]):
-        """The IBL for one frame: the project's HDRI, or the built-in studio sky.
-
-        Cached by file identity (path, mtime, size) so replacing the .hdr in
-        place still takes effect, while orbiting reuses the prefiltered map.
-        """
-        if not path:
-            key: tuple = ("studio-sky",)
-            source = str(self.sky_path)
-        else:
-            target = Path(path)
-            try:
-                stat = target.stat()
-            except OSError as exc:
-                raise RuntimeError("HDRI environment not found: %s (%s)" % (path, exc))
-            if not target.is_file():
-                raise RuntimeError("HDRI environment is not a file: %s" % (path,))
-            if stat.st_size == 0:
-                raise RuntimeError("HDRI environment is empty: %s" % (path,))
-            key = (str(target), stat.st_mtime_ns, stat.st_size)
-            source = str(target)
-
-        cached = self._ibl_cache.get(key)
-        if cached is None:
-            cached = self.f3d.IBL.from_hdr(source, intensity=1.0)
-            self._ibl_cache[key] = cached
-            # A user trying several HDRIs should not leak every prefiltered
-            # map; keep a few and drop the oldest insertion.
-            while len(self._ibl_cache) > self._ibl_cache_limit:
-                self._ibl_cache.pop(next(iter(self._ibl_cache)))
-        return cached
-
-    def colormap_overlay(self, layer: Optional[Dict[str, Any]]):
-        """The engine's elevation colormap as a terrain overlay.
-
-        `forge3d.get_colormap` returns a `Colormap`; the terrain takes a
-        `Colormap1D` built from stops over the elevation domain, wrapped in an
-        `OverlayLayer` — the engine's own path, not a second implementation.
-        Returns None when the layer has no colormap (or its strength is 0).
+        The same 64-stop sampling of the engine's LUT the old in-shader
+        overlay used — `get_colormap` returns the Colormap; this bakes its
+        stops into a straight-alpha RGBA grid the recipe drapes like any
+        raster, through the one overlay channel it has. Returns None when the
+        layer has no colormap (or strength 0).
         """
         if not layer:
             return None
@@ -476,14 +267,25 @@ class StudioRenderer:
             )
             for index, row in enumerate(indices)
         ]
-        colormap = f3d.Colormap1D.from_stops(stops=stops, domain=domain)
-        return f3d.OverlayLayer.from_colormap1d(
-            colormap,
-            strength=strength,
-            offset=0.0,
-            blend_mode="Alpha",
-            domain=domain,
+        values = np.array([stop[0] for stop in stops], dtype=np.float64)
+        colors = np.array(
+            [[int(stop[1][i : i + 2], 16) for i in (1, 3, 5)] for stop in stops],
+            dtype=np.float64,
         )
+        # A sampled LUT from lo..hi: the ramp is linear between stops, so an
+        # indexed LUT and one floor per pixel sample it exactly.
+        lut_x = np.linspace(domain[0], domain[1], 2048)
+        lut = np.stack(
+            [np.interp(lut_x, values, colors[:, channel]) for channel in range(3)],
+            axis=1,
+        ).astype(np.uint8)
+        heights = np.asarray(self.heights, dtype=np.float32)
+        t = np.clip((heights.astype(np.float64) - domain[0]) / span, 0.0, 1.0)
+        idx = np.minimum((t * (lut.shape[0] - 1)).astype(np.int64), lut.shape[0] - 1)
+        drape = lut[idx]
+        alpha = np.where(np.isfinite(heights), 255, 0).astype(np.uint8)
+        drape = np.concatenate([drape, alpha[..., None]], axis=-1)
+        return {"rgba": np.ascontiguousarray(drape), "strength": strength}
 
     def sun_visibility_settings(self, quality: Dict[str, Any]):
         """The engine's heightfield sun-visibility pass, or None when off.
@@ -648,8 +450,8 @@ class StudioRenderer:
             identity = (0, 0)
         return (path, *identity, bool(overlay.get("despeckle", False)))
 
-    def build_overlay(self, overlay: Dict[str, Any]):
-        """The engine's drape layer for a raster overlay.
+    def drape_spec(self, overlay: Dict[str, Any]):
+        """The imagery drape for the recipe.
 
         The texture's resolution follows the *source*, not the frame: the
         engine samples it per pixel, so a decimated-to-frame atlas loses the
@@ -669,10 +471,10 @@ class StudioRenderer:
             while len(self._overlay_rgba_cache) > self._overlay_rgba_limit:
                 self._overlay_rgba_cache.pop(next(iter(self._overlay_rgba_cache)))
         rgba = entry[0]
-        return self.f3d.OverlayLayer.from_raster_rgba(
-            np.ascontiguousarray(rgba),
-            strength=float(overlay.get("opacity", 0.82)),
-        )
+        return {
+            "rgba": np.ascontiguousarray(rgba),
+            "strength": float(overlay.get("opacity", 0.82)),
+        }
 
     def read_overlay_rgba(self, overlay: Dict[str, Any]):
         """Decode a raster into the RGBA the drape texture uploads.
@@ -837,14 +639,160 @@ class StudioRenderer:
             lut_handle=lut_handle,
         )
 
+    def _mapscene_still(
+        self,
+        width: int,
+        height: int,
+        camera: Mapping[str, Any],
+        sun: Mapping[str, Any],
+        environment,
+        output_path: str,
+        exposure: float = 1.35,
+        *,
+        aovs: Sequence[str] = (),
+        taa: bool = True,
+        studio_settings: Optional[Mapping[str, Any]] = None,
+        target=None,
+        radius=None,
+    ) -> Tuple[np.ndarray, Any, Any]:
+        """The still through the engine's MapScene recipe.
+
+        The recipe declares the terrain, the camera, the sun and the
+        environment, and calls the engine's own composition — the engine
+        compiles the terrain params, renders the frame, and hands the params
+        back for the studio's own 2D projection work. The heights go in as
+        the studio scaled them; the camera's radius and target are scaled the
+        same way. Post-processing (gradients, vignette, the plate) is the
+        studio's own and runs on the frame afterwards.
+
+        Returns `(frame, aov_frame, terrain_params)` — the plate path gets
+        the recipe's own depth AOV from `MapScene.last_aov_frame`, and the
+        studio's 2D projection work reads the params the recipe compiled,
+        never a second set it built itself.
+        """
+        from pathlib import Path as _Path
+
+        import forge3d as f3d
+
+        span_x, span_y = self.span_x * self.scale, self.span_y * self.scale
+        heights = self.heights
+        mean_z = float(heights.mean())
+        res_x = span_x / max(1.0, float(heights.shape[1]))
+        res_y = span_y / max(1.0, float(heights.shape[0]))
+
+        def _v(key: str, default: float) -> float:
+            value = camera.get(key, default)
+            return float(value) if value is not None else float(default)
+
+        if target is None:
+            raw_target = camera.get("target") or [0.0, 0.0, mean_z]
+            target = [
+                float(raw_target[0]) * self.scale,
+                float(raw_target[1]) * self.scale,
+                float(raw_target[2]) * self.scale,
+            ]
+        else:
+            target = list(target)
+        if radius is None:
+            radius = float(camera.get("radius") or 1.5 * max(span_x, span_y)) * self.scale
+        clip_near = min(10.0, max(float(radius) * 0.001, 0.01))
+        environment_path = str(_Path(self.sky_path).resolve()) if environment is None else str(_Path(environment).resolve())
+        if not _Path(environment_path).exists():
+            environment_path = str(_Path(self.sky_path).resolve())
+
+        terrain = f3d.TerrainSource(
+            data=heights,
+            crs=self.dem_crs,
+            metadata={
+                "source_id": "studio-dem",
+                "width": int(heights.shape[1]),
+                "height": int(heights.shape[0]),
+                "bounds": list(self.dem_bounds) if self.dem_bounds else None,
+                "resolution": (res_x, res_y),
+                "terrain_span": span_x,
+                "asset_status": "fixture",
+            },
+            elevation_sampling_available=True,
+        )
+        camera_az = _v("phiDeg", 90.0)
+        fixed = {
+            "camera": {"camera_mode": "mesh:zup:north:dem"},
+            "terrain_shading_model": "lambert_physical",
+            "hue_variation_strength": 0.0,
+            "albedo_mode": "material",
+            "colormap_strength": 0.0,
+            "light_azimuth_deg": float(sun.get("azimuthDeg", 135.0)),
+            "light_elevation_deg": float(sun.get("elevationDeg", 35.0)),
+            "clip": [clip_near, 400000.0],
+            "overlays": [],
+            "sun": {"color": [float(c) for c in sun.get("color", (1.0, 0.97, 0.92))]},
+            "ibl": {"path": environment_path},
+            "renderer_config": {
+                "ibl": {"path": environment_path},
+                "gi": {"modes": ["ibl"]},
+                "lighting": {"exposure": float(exposure)},
+                "shadows": {
+                    "enabled": True,
+                    "technique": "pcf",
+                    "map_size": 4096,
+                    "cascades": 1,
+                    "moment_bias": 5e-05,
+                    "max_distance": 30000.0,
+                    "slope_scale_bias": 0.0001,
+                    "normal_bias": 0.00001,
+                },
+            },
+        }
+        settings = {**fixed, **dict(studio_settings or {})}
+        if taa:
+            settings["screen_space"] = {"enabled": True, "taa_enabled": True}
+        scene = f3d.MapScene(
+            terrain=terrain,
+            camera=f3d.OrbitCamera(
+                target=tuple(target),
+                distance=radius,
+                azimuth_deg=camera_az,
+                elevation_deg=_v("thetaDeg", 45.0),
+                fov_deg=_v("fovDeg", 45.0),
+            ),
+            lighting=f3d.LightingPreset(
+                name="studio-daylight",
+                intensity=float(sun.get("intensity", 3.0)),
+                sun_direction=(
+                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
+                    * math.cos(math.radians(float(sun.get("azimuthDeg", 135.0)))),
+                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
+                    * math.sin(math.radians(float(sun.get("azimuthDeg", 135.0)))),
+                    math.sin(math.radians(float(sun.get("elevationDeg", 35.0)))),
+                ),
+                settings=settings,
+            ),
+            layers=[],
+            output=f3d.OutputSpec(
+                width=width, height=height, format="png", path=output_path,
+                aovs=tuple(aovs),
+            ),
+        )
+        from PIL import Image
+
+        if taa:
+            # The default still renders through the temporal filter three
+            # times and keeps the converged frame; the recipe one-shot does
+            # not converge. The engine's own flythrough helper shares one
+            # native renderer across the sequence, so the temporal history is
+            # warm exactly as it is in the default path.
+            from forge3d.map_scene import _shared_terrain_render_context
+
+            with _shared_terrain_render_context():
+                for _ in range(3):
+                    scene.render()
+        else:
+            scene.render()
+        frame = np.asarray(Image.open(output_path).convert("RGB"), dtype=np.float32) / 255.0
+        return frame, scene.last_aov_frame, scene.last_terrain_params
+
     def render(self, request: Dict[str, Any]) -> Dict[str, Any]:
         f3d = self.f3d
-        from forge3d.terrain_params import (
-            AovSettings,
-            DetailSettings,
-            SkySettings,
-            make_terrain_params_config,
-        )
 
         width = int(request.get("width", 960))
         height = int(request.get("height", 600))
@@ -902,16 +850,34 @@ class StudioRenderer:
                 flush=True,
             )
             ramp_layer = None
-        overlays = []
-        if imagery_layer is not None:
-            try:
-                overlays = [self.build_overlay(imagery_layer)]
-            except Exception as exc:  # noqa: BLE001
-                print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
-        else:
-            ramp_overlay = self.colormap_overlay(ramp_layer)
-            if ramp_overlay is not None:
-                overlays.append(ramp_overlay)
+        from PIL import Image
+
+        baked_paths: list[Path] = []
+        overlay_specs = []
+        try:
+            if imagery_layer is not None:
+                try:
+                    spec = self.drape_spec(imagery_layer)
+                    png = Path(tempfile.gettempdir()) / (
+                        "forge3d-drape-%s.png" % uuid.uuid4().hex
+                    )
+                    Image.fromarray(spec["rgba"]).save(png)
+                    baked_paths.append(png)
+                    overlay_specs.append({"path": str(png), "strength": spec["strength"]})
+                except Exception as exc:  # noqa: BLE001
+                    print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
+            else:
+                spec = self.colormap_spec(ramp_layer)
+                if spec is not None:
+                    png = Path(tempfile.gettempdir()) / (
+                        "forge3d-drape-%s.png" % uuid.uuid4().hex
+                    )
+                    Image.fromarray(spec["rgba"]).save(png)
+                    baked_paths.append(png)
+                    overlay_specs.append({"path": str(png), "strength": spec["strength"]})
+        except Exception as exc:  # noqa: BLE001
+            print(json.dumps({"event": "warning", "message": "overlay bake failed: %s" % (exc,)}), flush=True)
+            overlay_specs = []
 
         span = span_x
         radius = float(camera.get("radius") or 1.5 * max(self.span_x, self.span_y)) * self.scale
@@ -924,160 +890,93 @@ class StudioRenderer:
             float(raw_target[2]) * self.scale,
         ]
 
-        # The shader's u_ibl.intensity comes from the IBL object itself
-        # (prepare_ibl_bind_group reads env_maps.intensity), not from
-        # TerrainRenderParams — set it here so the project's Environment
-        # intensity actually reaches the frame. The map itself is the project's
-        # HDRI when set, otherwise the built-in studio sky.
-        ibl = self.environment_map(environment)
-        ibl.intensity = float(request.get("iblIntensity", 1.0))
-
+        # The still always goes through the engine's MapScene recipe: the
+        # engine compiles the terrain params from the recipe, renders, and
+        # hands the params back for the studio's own 2D projection work —
+        # the plate resolution, the vector drape, the graticule. No
+        # hand-built params exist anywhere on this path.
         sky_settings = self.sky_settings(request, quality, environment)
-        # The elevation ramp tints the terrain; the imagery drapes over it.
-        ramp_overlay = self.colormap_overlay(ramp_layer)
+        has_ramp_overlay = bool(overlay_specs) and imagery_layer is None
         sun_visibility = self.sun_visibility_settings(quality)
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
-
-        # The engine's quality surface (CONCORDIA) carries the screen-space
-        # effects and the GPU cartography; it is equal-resolution, so the
-        # render scale is 1 there (the engine refuses to supersample on that
-        # path and reports `taau_available: false`).
-        output_path = request.get("output")
-        quality_path = "plain" if (want_aov or want_denoise) else "concordia"
-        screen_space = None
-        if quality_path == "concordia":
-            from forge3d.terrain_params import ScreenSpaceSettings
-
-            screen_space = ScreenSpaceSettings(enabled=True, taa_enabled=True)
-
-        settings = make_terrain_params_config(
-            size_px=(width, height),
-            render_scale=(
-                1.0
-                if quality_path == "concordia"
-                else float((request.get("quality") or {}).get("renderScale", 1.0))
-            ),
-            screen_space=screen_space,
-            msaa_samples=1,
-            terrain_span=span,
-            z_scale=float(request.get("zScale", 1.0)),
-            camera_mode="mesh:zup:north:dem",
-            cam_radius=radius,
-            cam_phi_deg=float(camera.get("phiDeg", 135.0)),
-            cam_theta_deg=float(camera.get("thetaDeg", 45.0)),
-            cam_target=(float(target[0]), float(target[1]), float(target[2])),
-            fov_y_deg=float(camera.get("fovDeg", 45.0)),
-            clip=(
-                # Near tracks the zoom: the fixed 10 m floor clipped close
-                # cameras' near terrain away (Solid draws it), and a free-float
-                # near would wreck depth precision against the 400 km far plane.
-                min(10.0, max(radius * 0.001, 0.01)),
-                400000.0,
-            ),
-            domain=self.scaled_range,
-            overlays=overlays,
-            # The colormap only reaches the pixels in `mix` mode: the shader's
-            # `material` branch assigns `material_albedo` last, so a colormap
-            # overlay measured zero changed samples under it. `mix` blends
-            # material -> colormap by `colormap_strength`, so 0 is the
-            # material set and 1 is the ramp. With no colormap selected the
-            # mode stays `material` (a `mix` mode with no overlay applies the
-            # engine's fallback LUT to the whole terrain).
-            albedo_mode="mix" if ramp_overlay is not None else "material",
-            colormap_strength=float(ramp_layer.get("strength", 1.0))
-            if ramp_overlay is not None
-            else 0.0,
-            # One lighting model across the app. The viewport's Solid/Material
-            # preview is three.js `MeshStandardMaterial` — radiance =
-            # albedo/pi * sun_color*intensity * n.l plus one IBL irradiance
-            # term. The engine's "stylized" terrain model answers the same sun
-            # with a hardcoded, style-matched response (sun_peak 0.36, ambient
-            # floors), so identical sun/exposure lit the still ~4x darker than
-            # the preview. `lambert_physical` evaluates the same physical
-            # equation the preview does, so a frame matches what the user saw
-            # while authoring it.
-            terrain_shading_model="lambert_physical",
-            hue_variation_strength=0.0,
-            light_azimuth_deg=float(sun.get("azimuthDeg", 135.0)),
-            light_elevation_deg=float(sun.get("elevationDeg", 35.0)),
-            sun_intensity=float(sun.get("intensity", 3.0)),
-            # The starter sun's colour; the shell sends the scene's light
-            # colour so Rendered matches the Solid view's lighting hue.
-            sun_color=tuple(float(c) for c in sun.get("color", (1.0, 0.97, 0.92))),
-            ibl_enabled=True,
-            ibl_intensity=float(request.get("iblIntensity", 1.0)),
-            exposure=float(request.get("exposure", 1.35)),
-            detail=DetailSettings(enabled=False),
-            aov=AovSettings(
-                enabled=want_aov or want_denoise,
-                # Denoise gets albedo/normal guidance from the same frame —
-                # capturing them costs the AOV pass we are already in.
-                albedo=aov_flags["albedo"] or want_denoise,
-                normal=aov_flags["normal"] or want_denoise,
-                depth=aov_flags["depth"],
-                format="png",
-            ),
-            sky=sky_settings,
-            fog=fog_settings,
-            sun_visibility=sun_visibility,
-            water=water_settings,
-        )
-        settings.shadows.enabled = bool(quality.get("shadows", True))
-        # Shadow filter and map size are the project's, not the service's: PCF
-        # is the cheap inset filter, PCSS trades a blocker search for
-        # contact-hardening, and the map size is the quality/cost dial.
-        settings.shadows.technique = str(quality.get("shadowTechnique") or "PCF").upper()
-        settings.shadows.resolution = int(quality.get("shadowResolution") or 4096)
-        # The camera orbits far outside the 4000 m default max_distance
-        # (6+ km away), so every fragment beyond it faded to unshadowed —
-        # the entire terrain rendered without a single shadow.
-        settings.shadows.max_distance = 30000.0
-        # The bias defaults (0.0005/0.001/0.0002 in NORMALIZED depth) were
-        # sized for small scenes; over this engine's ~6 km light box they eat
-        # ~10 m of world depth and swallow every shadow. Keep them near zero so
-        # cast shadows survive, with just enough constant/normal bias to keep
-        # heightmap interpolation off acne.
-        settings.shadows.depth_bias = 0.00005
-        settings.shadows.slope_scale_bias = 0.0001
-        settings.shadows.normal_bias = 0.00001
-
-        params = f3d.TerrainRenderParams(settings)
-        # The map's cartography, prepared for whichever path draws it: the
-        # engine's GPU batches (the lines and the labels drawn in the terrain's
-        # own pass) and the numpy overlays the plain path composites.
-        cartography = prepare_cartography(
-            params,
-            visible,
-            width,
-            height,
-            self.dem_bounds,
-            self.heights,
-            self.dem_crs,
-        )
-        aov_frame = None
-        if bool(quality.get("mapsceneStill")):
-            # One still through the engine's MapScene recipe instead of the
-            # hand-built params + interactive path. The recipe declares the
-            # terrain, the camera, the sun and the environment, and the engine
-            # compiles the frame — the studio stops hand-building the keyword
-            # list. The cartography layers the studio already composites
-            # (vectors, labels, graticule) are drawn by the same numpy
-            # compositor the plain path uses, so the difference under review is
-            # the terrain pass only. AOVs follow the same rules as the plain
-            # path: a plate reads the recipe's native depth frame out of the
-            # recipe's AOV hand-off, so the plate is composited by the same
-            # code either way, and AOV finals still write <stem>_albedo/normal/
-            # depth.png from the recipe's own capture.
-            import tempfile
-            import uuid
-
-            tempfile_path = Path(tempfile.gettempdir()) / (
-                "forge3d-mapscene-still-%s.png" % uuid.uuid4().hex
+        # The recipe reads the water mask from a file, never from the
+        # caller's memory: the mask the studio derived goes in a temp .npy.
+        water_npy = None
+        if water_mask is not None and water_settings is not None:
+            water_npy = Path(tempfile.gettempdir()) / (
+                "forge3d-water-%s.npy" % uuid.uuid4().hex
             )
-            mapscene_path = str(tempfile_path)
+            np.save(water_npy, np.ascontiguousarray(water_mask.astype(np.float32)))
+        output_path = request.get("output")
+        shadows_enabled = bool(quality.get("shadows", True))
+        studio_settings = {
+            # The project's HDRI (or the studio sky) lights the scene; the
+            # intensity rides inside the IBL map the recipe builds from it.
+            "ibl": {"path": str(Path(self.sky_path).resolve()) if not environment else str(Path(environment).resolve()),
+                    "intensity": float(request.get("iblIntensity", 1.0))},
+            "sky": _settings_mapping(sky_settings)
+            if sky_settings is not None
+            else {"enabled": False},
+            # The project's shadow filter and map size, not the service's.
+            "renderer_config": {
+                "ibl": {"path": str(Path(self.sky_path).resolve()) if not environment else str(Path(environment).resolve())},
+                "gi": {"modes": ["ibl"]},
+                "lighting": {"exposure": float(request.get("exposure", 1.35))},
+                "shadows": {
+                    "enabled": shadows_enabled,
+                    "technique": str(quality.get("shadowTechnique") or "pcf").lower(),
+                    "map_size": int(quality.get("shadowResolution") or 4096),
+                    "cascades": 1,
+                    "moment_bias": 5e-05,
+                    "max_distance": 30000.0,
+                    "slope_scale_bias": 0.0001,
+                    "normal_bias": 0.00001,
+                },
+            },
+        }
+        clouds = quality.get("clouds") or {}
+        if bool(clouds.get("enabled", False)):
+            studio_settings["clouds"] = {
+                "enabled": True,
+                "shadows_enabled": bool(clouds.get("shadowsEnabled", True)),
+                "coverage": float(clouds.get("coverage", 0.5)),
+                "density": float(clouds.get("density", 0.5)),
+                "shadow_strength": float(clouds.get("shadowStrength", 0.35)),
+                "quality": str(clouds.get("quality", "medium")),
+            }
+        if fog_settings is not None:
+            studio_settings["fog"] = _settings_mapping(fog_settings)
+        if sun_visibility is not None:
+            studio_settings["sun_visibility"] = _settings_mapping(sun_visibility)
+        if water_npy is not None:
+            studio_settings["water"] = {
+                "enabled": True,
+                "mask_path": str(water_npy),
+                "slope_threshold": float(getattr(water_settings, "slope_threshold", 0.02)),
+                "level": getattr(water_settings, "level", None),
+            }
+        else:
+            # No project water: the recipe renders what the request asks for.
+            studio_settings.pop("water", None)
+        if overlay_specs:
+            # The baked drape PYNGs go in the recipe's overlay channel,
+            # which is the engine's own shader overlay blend (Alpha) at the
+            # given strength — the same blend the old in-params overlay ran.
+            studio_settings["overlays"] = overlay_specs
+            studio_settings["albedo_mode"] = "mix" if has_ramp_overlay else "material"
+            studio_settings["colormap_strength"] = (
+                float(ramp_layer.get("strength", 1.0)) if has_ramp_overlay else 0.0
+            )
+        try:
+            import tempfile as _tempfile
+            import uuid as _uuid
+
+            mapscene_path = str(
+                Path(_tempfile.gettempdir()) / ("forge3d-mapscene-still-%s.png" % _uuid.uuid4().hex)
+            )
             try:
-                frame, aov_frame = self._mapscene_still(
+                frame, aov_frame, params = self._mapscene_still(
                     width,
                     height,
                     camera,
@@ -1091,6 +990,9 @@ class StudioRenderer:
                         if aov_flags[channel] or want_denoise
                     ),
                     taa=not (want_aov or want_denoise),
+                    studio_settings=studio_settings,
+                    target=target,
+                    radius=radius,
                 )
                 # The recipe returns 0..1 floats; the rest of the path is
                 # uint8. The recipe's own PNG is a temp file — it is read
@@ -1100,35 +1002,33 @@ class StudioRenderer:
                 )
             finally:
                 Path(mapscene_path).unlink(missing_ok=True)
-            render_path = "mapscene"
-        elif want_aov or want_denoise:
-            # The engine's AOV renderer is the plain path: it has no quality
-            # surface, so the AOV/denoise finals cannot carry the screen-space
-            # effects. The path is reported in the reply.
-            frame, aov_frame = self.renderer.render_with_aov(
-                self.materials, ibl, params, self.heights, water_mask=water_mask
-            )
-            image = np.asarray(frame.to_numpy())
-            render_path = "plain"
-        else:
-            image = self.quality_frame(
-                params,
-                ibl,
-                water_mask,
-                quality,
-                output_path,
-                cartography=cartography,
-            )
-            aov_frame = None
-            render_path = "concordia"
+        finally:
+            if water_npy is not None:
+                Path(water_npy).unlink(missing_ok=True)
+            for baked in baked_paths:
+                try:
+                    baked.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        # The map's cartography, prepared with the camera the frame used: the
+        # engine's GPU batches (the lines and the labels drawn in the
+        # terrain's own pass) and the numpy overlays the recipe frame cannot
+        # carry yet (vectors, labels, graticule drawn as numpy overlays here).
+        cartography = prepare_cartography(
+            params,
+            visible,
+            width,
+            height,
+            self.dem_bounds,
+            self.heights,
+            self.dem_crs,
+        )
         rgb = image[:, :, :3].astype(np.uint8)
-        if render_path in ("plain", "mapscene"):
-            # Neither the AOV renderer nor the MapScene recipe carries the
-            # studio's numpy cartography: the overlays are composited over the
-            # frame here. The recipe moved the terrain pass into the engine; the
-            # vector/label/graticule compositor stays the studio's until the
-            # recipe layers build it.
-            rgb = cartography.composite_overlays(rgb)
+        # Neither AOVs nor the recipe carries the studio's numpy cartography:
+        # the overlays are composited over the frame here. The recipe moved
+        # the terrain pass into the engine; the vector/label/graticule
+        # compositor stays the studio's until the recipe layers build it.
+        rgb = cartography.composite_overlays(rgb)
 
         if want_denoise:
             albedo = aov_frame.albedo() if aov_frame is not None and aov_frame.has_albedo else None
@@ -1263,12 +1163,12 @@ class StudioRenderer:
         return {
             "width": width,
             "height": height,
-            # Which engine path made the frame: the quality surface carries the
-            # screen-space effects, the plain path is the AOV renderer's.
-            "renderPath": render_path,
-            # The quality surface is temporally filtered (the engine's TAA), so
-            # its frame is the converged one; the plain path is byte-stable.
-            "temporal": render_path != "plain",
+            # Which engine path made the frame: always the recipe now.
+            "renderPath": "mapscene",
+            # The recipe warms its temporal history like every still (three
+            # frames, converged) unless AOVs/denoise were requested, in which
+            # case the frame is a one-shot capture.
+            "temporal": not (want_aov or want_denoise),
             # The plate is composited only when the path exposes a depth AOV.
             "plate": plate_rgb is not None,
             "plateSkippedFor": plate_skipped_for,

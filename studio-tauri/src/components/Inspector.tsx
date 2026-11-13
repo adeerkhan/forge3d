@@ -510,10 +510,8 @@ export function RenderSettingsEditor() {
     <>
       <Section title="Output" id="render-output">
         <div className="pair">
-          {/* The render service caps a frame at 4096 px per side (a 4096²
-              still at render_scale 2 would be an 8192² target, which the
-              engine refuses or crawls through), so the field must not offer a
-              size the renderer will silently shrink. */}
+          {/* The render service caps a frame at 4096 px per side, so the
+              field must not offer a size the renderer will refuse. */}
           <NumberField label="Width" value={render.width} step={16} min={64} max={4096} onCommit={(width) => commit({ width: Math.round(width) })} />
           <NumberField label="Height" value={render.height} step={16} min={64} max={4096} onCommit={(height) => commit({ height: Math.round(height) })} />
         </div>
@@ -648,11 +646,6 @@ export function RenderSettingsEditor() {
           checked={render.stillDenoise}
           onChange={(stillDenoise) => commit({ stillDenoise })}
         />
-        <Toggle
-          label="Render stills through the engine's MapScene recipe"
-          checked={render.renderViaMapscene ?? false}
-          onChange={(renderViaMapscene) => commit({ renderViaMapscene })}
-        />
         {render.stillDenoise && engine?.available && engine.denoise === false && (
           <p className="hint hint--boxed">
             The engine's interpreter has no OIDN runtime, so a denoised still
@@ -665,14 +658,7 @@ export function RenderSettingsEditor() {
           Both apply to sequence frames as well (they are final renders) and to
           viewport previews never.
         </p>
-        <p className="hint">
-          The MapScene recipe is the same pipeline a future release will use
-          for every still: the engine compiles a recipe declaring terrain,
-          camera, lighting and layers instead of the studio hand-building a
-          parameter list. The look differs from the current path — the recipe
-          renders saturated alpine colours, sharper, with no grey wash — so
-          this is a development preview, not a new default.
-        </p>
+
       </Section>
       <Section title="Fog" id="atmosphere-fog">
         <Toggle

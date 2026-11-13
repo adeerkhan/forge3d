@@ -29,13 +29,13 @@ Two rules govern the table:
 | 12 | Map plate, map furniture, categorical legend | done |
 | 13 | The map look (one button), the release audit as a CI gate | done |
 | 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped: lines, labels, furniture and the graticule |
-| 15 | Convergence on `MapScene` as the scene model | partial: stills can render through the engine's `MapScene` recipe (development preview) |
+| 15 | Convergence on `MapScene` as the scene model | the still is the recipe; step 4 remains (typed raster layers) |
 
-Studio exposes **86 controls** — the app's 55 numeric fields, 3 range sliders,
-19 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
-predated the vector layer's colour, width and label controls, the
-graticule's six came with the grid, and the MapScene still preview came
-with them) — over 28
+Studio exposes **85 controls** — the app's 55 numeric fields, 3 range sliders,
+18 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
+predated the vector layer's colour, width and label controls and the
+graticule's six came with the grid; the MapScene preview toggle came and went
+with it) — over 28
 render settings, the scene model (terrain, mesh, camera, light), the timeline,
 the map plate and the map's layer stack. The engine's
 public Python surface is **383 names** (the label compositor joined it); the
@@ -147,21 +147,22 @@ the plate's scale bar and north arrow are the engine's own (`ScaleBar`,
 engine's label plan. Still open in the tier: polygons, a legend for the
 vector attributes, and labels occluded by the terrain's ridges.
 
-**Phase 15 (MapScene — convergence preview).** A still can render through the
-engine's `MapScene` recipe now: the studio composes a `TerrainSource` from the
-DEM, the camera and the lighting recipe the studio asks for, the engine
-compiles and renders the frame, and Studio composites the numpy cartography
-(and the plate) on top. The path is `RenderSettings::render_via_mapscene` /
-the "MapScene" toggle in the Inspector's Stills section; the reply reports
-`renderPath: "mapscene"` — the reply also reports `plate: true | null` and
-`plateSkippedFor` (with a warning) when the plate is not composited. Measured
-on the Swiss DEM and on Mount Fuji at 900×700: the recipe path now renders a
-**byte-identical frame** to the default still, and the AOV PNGs are
-byte-identical too — the recipe receives the same native params, the same IBL,
-the same TAA warm-up sequence as the current default (roadmap §5.29). The
-recipe also costs ~3.2 s per converged still vs ~0.6 s for the default path,
-which is why it is still an opt-in preview; the default switch is the §5.29
-step 3 decision.
+**Phase 15 (MapScene — the still *is* the recipe now).** Every still — and
+every viewport frame — goes through the engine's `MapScene` recipe: the studio
+composes a `TerrainSource` from the scaled DEM, an `OrbitCamera` and a
+`LightingPreset` (sun, IBL path and intensity, sky/fog/water/sun-visibility
+settings) from the request, and the engine compiles and renders the frame
+with the same TAA warm-up the old default used. Studio composites the numpy
+cartography (vectors, labels, graticule) and the plate on top, exactly as
+before. The reply reports `renderPath: "mapscene"`, `plate: true | null`, and
+`title`/`caption`/etc. unchanged; the shell names the renderer
+`forge3d.mapscene.render`. Measured on the Swiss DEM and Mount Fuji at
+900×700: **byte-identical to the pre-switch default** — pixel counts from the
+roadmap §5.29. The overlays (imagery drape, elevation ramp) ride the
+recipe's own shader overlay channel via a baked drape PNG
+(`LightingPreset.settings["overlays"]` — JSON-serializable, one colour
+source per frame). The AOV/denoise path is the same one-shot
+`render_with_aov` route on both sides, byte-identical as well.
 **Converge on `MapScene`.** The engine's typed map scene carries labels,
 buildings, 3D Tiles, furniture, graticules and bundles; Studio has its own
 model and its own service. The map's layer stack (above) is shaped like

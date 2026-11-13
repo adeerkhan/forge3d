@@ -911,13 +911,6 @@ pub struct RenderSettings {
     /// Vignette: corner darkening, 0..=1. 0 is no vignette.
     #[serde(default)]
     pub vignette: f32,
-    /// Render the still through the engine's MapScene recipe instead of the
-    /// hand-built interactive render params. The same pipeline that a future
-    /// release will use for every still. Off by default — the recipe's
-    /// look differs from the current path (it is a different pipeline) and
-    /// the plate/AOV depth does not exist on this path yet.
-    #[serde(default)]
-    pub render_via_mapscene: bool,
 }
 
 /// The analytic sky models the engine can draw as a backdrop.
@@ -1083,7 +1076,6 @@ impl Default for RenderSettings {
             clouds: CloudSettings::default(),
             bloom: BloomSettings::default(),
             vignette: 0.0,
-            render_via_mapscene: false,
         }
     }
 }

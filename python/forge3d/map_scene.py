@@ -484,6 +484,11 @@ class _MapSceneNativeRenderResult:
     # at composite time (populated only when provenance emission is on).
     source_map: Any | None = None
     contributing_tiles: list[dict[str, Any]] | None = None
+    # The params the recipe compiled for this frame. Callers that composite
+    # their own 2D work against the frame (map overlays, graticules) project
+    # with the exact camera the frame used; they must not rebuild a second
+    # parameter set for it.
+    terrain_params: Any | None = None
 
 
 def _aov_arrays_for_rgba(recipe: "SceneRecipe", rgba: Any, requested: Sequence[str]) -> dict[str, Any]:
@@ -787,6 +792,43 @@ def _mapscene_offline_settings(output: "OutputSpec") -> Any:
         min_samples=min(4, samples),
         batch_size=batch,
     )
+
+
+def _mapscene_user_overlays(settings: Mapping[str, Any]) -> Any:
+    """Overlays a caller provides as ``[{"path": png, "strength": float}, ...]``.
+
+    The recipe's settings channel is JSON-serializable, so a native
+    ``OverlayLayer`` cannot ride inside them. A PNG path and a strength are
+    the minimal faithful carrier — the same object the caller built locally,
+    re-created here through the engine's own ``OverlayLayer.from_raster_rgba``.
+    Returns ``None`` when the setting is absent (the recipe keeps its thematic
+    colormap overlay); an empty list deliberately means no overlay at all.
+    """
+    import numpy as np
+    import forge3d as f3d
+
+    raw = settings.get("overlays")
+    if raw is None:
+        return None
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise TypeError(f"LightingPreset.settings['overlays'] must be a list of specs, got {type(raw).__name__}")
+    if any(not isinstance(item, Mapping) for item in raw):
+        raise TypeError("LightingPreset.settings['overlays'] entries must be mappings with a 'path'")
+    overlays = []
+    for spec in raw:
+        path = spec.get("path")
+        if not isinstance(path, (str, os.PathLike)) or not Path(str(path)).is_file():
+            raise ValueError(f"LightingPreset.settings['overlays'] path is not a file: {path!r}")
+        from ._png import load_png_rgba
+
+        rgba = np.ascontiguousarray(load_png_rgba(Path(str(path))).astype(np.uint8, copy=False))
+        overlays.append(
+            f3d.OverlayLayer.from_raster_rgba(
+                rgba,
+                strength=float(spec.get("strength", 1.0)),
+            )
+        )
+    return overlays
 
 
 def _mapscene_shadow_settings(shadow_config: Any, raw: Mapping[str, Any] | None = None) -> Any:
@@ -1556,7 +1598,11 @@ def _build_mapscene_terrain_params(
         **_mapscene_lighting_extras(settings),
         clip=clip_pair,
         shadows=_mapscene_shadow_settings(renderer_config.shadows, raw=raw_shadows),
-        overlays=list(settings["overlays"]) if isinstance(settings.get("overlays"), list) else [overlay],
+        overlays=(
+            user_overlays
+            if (user_overlays := _mapscene_user_overlays(settings)) is not None
+            else [overlay]
+        ),
         aa_samples=max(1, int(output.samples if output is not None else 1)),
         aa_seed=_mapscene_aa_seed(recipe),
         aov=_mapscene_aov_settings(
@@ -1748,13 +1794,16 @@ class _TerrainRenderResources:
             context_ready.result()
         return self._renderer._anamnesis_resource_fingerprint(self.material_set, environment)
 
-    def env_maps(self, hdr_path: str) -> Any:
+    def env_maps(self, hdr_path: str, intensity: float = 1.0) -> Any:
         # Same-path edits can preserve both size and mtime. A retained IBL
-        # must belong to the decoded source actually requested for this frame.
-        cache_key = hashlib.sha256(Path(hdr_path).read_bytes()).digest()
+        # must belong to the decoded source actually requested for this frame,
+        # at the intensity it was requested for (the intensity ships inside
+        # the prefiltered map, so two intensities are two maps).
+        intensity = float(intensity)
+        cache_key = hashlib.sha256(Path(hdr_path).read_bytes()).digest() + str(intensity).encode("utf-8")
         env_maps = self._ibl_cache.get(cache_key)
         if env_maps is None:
-            env_maps = self._f3d.IBL.from_hdr(hdr_path, intensity=1.0)
+            env_maps = self._f3d.IBL.from_hdr(hdr_path, intensity=intensity)
             self._ibl_cache[cache_key] = env_maps
         return env_maps
 
@@ -1767,6 +1816,10 @@ def _terrain_resources_for_recipe(recipe: "SceneRecipe") -> tuple[Any, Any]:
 
     holder = getattr(_ACTIVE_TERRAIN_RESOURCES, "holder", None)
     hdr_path, delete_hdr = _native_ibl_path(recipe)
+    ibl_settings = _metadata_dict(recipe.lighting.settings).get("ibl")
+    intensity = 1.0
+    if isinstance(ibl_settings, Mapping) and ibl_settings.get("intensity") is not None:
+        intensity = float(ibl_settings["intensity"])
     try:
         if holder:
             resources = holder[0]
@@ -1774,7 +1827,7 @@ def _terrain_resources_for_recipe(recipe: "SceneRecipe") -> tuple[Any, Any]:
             resources = _TerrainRenderResources(f3d)
             if holder is not None:
                 holder.append(resources)
-        return resources, resources.env_maps(hdr_path)
+        return resources, resources.env_maps(hdr_path, intensity=intensity)
     except BaseException:
         if holder is not None:
             holder.clear()
@@ -2116,6 +2169,7 @@ def _render_terrain_renderer_result_impl(
         metadata=metadata,
         source_map=source_map,
         contributing_tiles=contributing_tiles,
+        terrain_params=params,
     )
 
 
@@ -4393,6 +4447,7 @@ def _render_native_offscreen_result(
         metadata=metadata,
         source_map=result.source_map,
         contributing_tiles=result.contributing_tiles,
+        terrain_params=result.terrain_params,
     )
 
 
@@ -5838,6 +5893,7 @@ class MapScene:
         self.last_render_metadata: dict[str, Any] | None = None
         self.last_bundle_path: str | None = None
         self.last_aov_frame: Any | None = None
+        self.last_terrain_params: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"kind": "map_scene", "recipe": self.recipe.to_dict()}
@@ -6372,6 +6428,7 @@ class MapScene:
         native_metadata = dict(native_result.metadata)
         aov_frame = native_result.aov_frame
         self.last_aov_frame = aov_frame
+        self.last_terrain_params = native_result.terrain_params
         hdr_frame = native_result.hdr_frame
         aov_paths = _write_mapscene_aovs(
             target_path,

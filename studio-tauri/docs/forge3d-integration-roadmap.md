@@ -905,23 +905,40 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   the map upside down for the engine's `north` camera mode; it now stands at
   270.
 
-### 5.29 MapScene — the first mapping: the still (0.5 day) — **partial**
+### 5.29 MapScene — the first mapping: the still (0.5 day) — **done, step 4 remains**
 
-- **A still can render through the engine's `MapScene` recipe now.** The
-  service composes a `TerrainSource` from the heights it already scaled into
-  the view budget, an `OrbitCamera` from the request, a `LightingPreset`
-  carrying the sun and the IBL's path/intensity, and the recipe's own
-  `OutputSpec`, then calls `scene.render()`. The studio's numpy cartography
-  sits on top, as it does on the plain path. `RenderSettings::render_via_mapscene`
-  / the "MapScene" toggle in the Inspector's Stills section switches the still
-  over; `renderPath: "mapscene"` reports the path.
-- **The recipe produces a different image, not a matching one.** Measured on
-  the Swiss DEM (900×700, phi 270): the recipe's alpine output is bright, low
-  contrast, green-tinted — the IBL and material shading read stronger there
-  than on the live interactive path, and the studio's tuning (TAA history,
-  exposure compression) does not exist on the recipe's `pbr_pom` path. The
-  path does not match the current default yet and is a development toggle, not
-  a switch.
+- **The still always renders through the engine's `MapScene` recipe.** The hand-
+  built `make_terrain_params_config` path is deleted; the studio composes a
+  `TerrainSource` from the heights it already scaled into the view budget, an
+  `OrbitCamera` from the request, a `LightingPreset` carrying the sun, the
+  IBL's path/intensity and the studio's sky/fog/water/sun-visibility settings
+  (passed as `LightingPreset.settings` mappings, not a second parameter list),
+  and the recipe's own `OutputSpec`, then calls `scene.render()`. The engine's
+  own `_shared_terrain_render_context` warms the temporal history exactly as
+  the old default did (three frames), so the recipe's frame equals the old
+  default byte-for-byte. AOVs and denoise keep the one-shot `render_with_aov`
+  route, exactly as the old AOV/denoise finals did. The still-sidecar names
+  `forge3d.mapscene.render`; `RenderSettings::render_via_mapscene` and the
+  Inspector's MapScene toggle are gone (the still is the recipe, always).
+- **Step 3 landed with the drapes carried on the recipe's overlay channel.**
+  The recipe's settings channel is JSON-serializable, so native
+  `OverlayLayer`s cannot ride inside `LightingPreset.settings`; and the
+  recipe's native raster drape (`RasterOverlay`) reserves an estimated
+  ~4.0 GiB of host-side temporaries for a DEM this size, which the engine's
+  allocation budget refuses. The studio bakes the drapes into straight-alpha
+  RGBA PNGs instead — the elevation ramp from the engine's own LUT at the
+  DEM's resolution (the same 64-stop sampling the old in-shader overlay
+  used), the imagery from the same cached RGBA the overlay used to decode —
+  and hands the recipe `{"overlays": [{"path": png, "strength": …}]}`, which
+  the engine re-creates through its own `OverlayLayer.from_raster_rgba`.
+  One overlay per frame: imagery and ramp still compete for the slot, the
+  stack's business unchanged.
+- **The recipe produces a different image on the first attempt — fixed in
+  step 2.** Measured on the Swiss DEM (900×700, phi 270): the recipe's alpine
+  output was bright, low contrast, green-tinted, because the IBL's `.hdr` was
+  being wired at the wrong `renderer_config` location and the recipe's IBL
+  silently fell back to its neutral built-in sky. The correction was wiring
+  the same path at the top level `settings["ibl"]["path"]`.
 - **The plate composite works on the recipe path too.** The recipe's
   `OutputSpec(aovs=("depth",))` produces a native depth frame on the engine's
   `render_with_aov` path, and `MapScene.last_aov_frame()` hands it to the
@@ -969,12 +986,12 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   no TAA, exactly the default's behaviour in that case. The recipe costs ~3.2 s
   for a converged still vs ~0.6 s for the default (it renders the same passes
   three times plus the PNG write); the one-shot AOV captures are ~1.7 s.
-- **What is next for the convergence** — in order: (3) the still/preview path
-  switches to the recipe (delete the hand-built `make_terrain_params_config`
-  path — both produce identical bytes, so the switch is safe today); the
-  default still, the AOV finals and the plate all work identically on both
-  paths; (4) the engine's own overlay layer takes over the colormap and the
-  imagery drape.
+- **What is next for the convergence** — (4) the engine's own typed
+  `RasterOverlay` layer takes over the colormap and the imagery drape end to
+  end, retiring the baked-PNG channel this increment added, and the overlay
+  conflict (imagery vs ramp, one colour source per terrain frame) moves onto
+  the recipe's overlay stack instead of the studio's rule.
+
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

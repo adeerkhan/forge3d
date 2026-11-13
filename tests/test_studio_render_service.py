@@ -100,7 +100,7 @@ def test_still_uses_the_physical_shading_model():
     """Solid/Material previews are three.js PBR; the still must match them."""
     service = load_service()
     source = SERVICE.read_text()
-    assert 'terrain_shading_model="lambert_physical"' in source
+    assert '"terrain_shading_model": "lambert_physical"' in source
 
 
 def test_shared_hdr_writer_reproduces_the_canonical_environment_bytes(tmp_path):
@@ -424,28 +424,28 @@ def test_a_single_band_classification_overlay_is_palette_mapped():
 
 
 def test_the_colormap_is_built_from_the_engines_own_catalogue():
-    """`get_colormap` returns a Colormap; the terrain takes a Colormap1D built
-    from stops over the elevation domain, wrapped in an OverlayLayer."""
+    """`get_colormap` returns the LUT; the service bakes its stops into a
+    straight-alpha drape PNG over the DEM's domain."""
     service = load_service()
     stub = _WaterStub(
         heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(100.0, 500.0)
     )
-    assert service.StudioRenderer.colormap_overlay(stub, None) is None
-    layer = service.StudioRenderer.colormap_overlay(stub, {"colormap": "viridis"})
-    assert layer is not None
+    assert service.StudioRenderer.colormap_spec(stub, None) is None
+    spec = service.StudioRenderer.colormap_spec(stub, {"colormap": "viridis"})
+    assert spec is not None
     # Strength 0 is off. A bound colormap at strength 0 still shifted the
     # material layer blend by 162,905 samples (the shader normalizes the
     # height the layers sample by the colormap domain), so the service does
-    # not bind one: measured 0 samples against the same scene with none.
+    # not bake one: measured 0 samples against the same scene with none.
     assert (
-        service.StudioRenderer.colormap_overlay(
+        service.StudioRenderer.colormap_spec(
             stub, {"colormap": "viridis", "strength": 0.0}
         )
         is None
     )
     # An unknown name must fail loudly, not render a silent grey terrain.
     with pytest.raises(RuntimeError, match="unknown colormap"):
-        service.StudioRenderer.colormap_overlay(stub, {"colormap": "nope"})
+        service.StudioRenderer.colormap_spec(stub, {"colormap": "nope"})
     # One LUT slot per frame: the ramp and the imagery compete for it. The
     # conflict is the stack's business now — the service takes the uppermost
     # visible one and reports the other (a warning event), instead of one of
@@ -525,11 +525,6 @@ def test_the_overlay_rgba_is_decoded_once_per_file(tmp_path):
     stub = object.__new__(service.StudioRenderer)
     stub._overlay_rgba_cache = {}
     stub._overlay_rgba_limit = 2
-    stub.f3d = types.SimpleNamespace(
-        OverlayLayer=types.SimpleNamespace(
-            from_raster_rgba=lambda rgba, strength: ("layer", strength, rgba.shape)
-        )
-    )
     calls = []
 
     def read(overlay):
@@ -538,12 +533,12 @@ def test_the_overlay_rgba_is_decoded_once_per_file(tmp_path):
 
     stub.read_overlay_rgba = read
     overlay = {"path": str(source), "opacity": 0.82}
-    first = service.StudioRenderer.build_overlay(stub, overlay)
-    second = service.StudioRenderer.build_overlay(stub, {**overlay, "opacity": 0.4})
+    first = service.StudioRenderer.drape_spec(stub, overlay)
+    second = service.StudioRenderer.drape_spec(stub, {**overlay, "opacity": 0.4})
     assert len(calls) == 1, "the second frame must not re-read the raster"
-    assert first[1] == 0.82 and second[1] == 0.4, "opacity is per request"
+    assert first["strength"] == 0.82 and second["strength"] == 0.4, "opacity is per request"
     # A different despeckle is a different decode.
-    service.StudioRenderer.build_overlay(stub, {**overlay, "despeckle": True})
+    service.StudioRenderer.drape_spec(stub, {**overlay, "despeckle": True})
     assert len(calls) == 2
 
 
@@ -936,31 +931,23 @@ def test_the_plate_furniture_is_the_engine_own():
     assert not np.array_equal(arrow, turned), "the arrow must turn with the map"
 
 
-def test_mapscene_still_is_opted_into():
-    """The MapScene recipe render is opt-in (`quality.mapsceneStill`); the
-    default still path does not go through it."""
+def test_the_still_always_goes_through_the_recipe():
+    """The still is the engine's MapScene recipe, always — there is no
+    parameter-set path left for the service to hand the engine."""
     service = load_service()
     source = SERVICE.read_text()
-    # The service always goes through the recipe before reporting `mapscene`:
-    # the flag lives in the render body, and is honoured before the
-    # TerrainRenderParams-driven interactive path is picked.
-    assert 'quality.get("mapsceneStill")' in source
-    assert '"renderPath": render_path' in source
-    assert '"mapscene"' in source
-    # The recipe render must use the engine's own recipe compilation, which
-    # goes through `TerrainSource` + `MapScene.render()`.
-    assert "f3d.TerrainSource" in source
+    assert 'quality.get("mapsceneStill")' not in source
+    assert "f3d.MapScene(" in source
     assert "scene.render()" in source
+    assert "make_terrain_params_config" not in source
+    assert '"renderPath": "mapscene"' in source
 
 
-def test_mapscene_still_compiles_a_recipe_before_rendering():
-    """The MapScene dev path must build the recipe before rendering; no
-    ad-hoc hand-built params sneak into it."""
+def test_the_still_compiles_a_recipe_before_rendering():
+    """The recipe path must build `TerrainSource` + `MapScene` before the
+    engine renders; no ad-hoc params sneak into it."""
     service = load_service()
     source = SERVICE.read_text()
     recipe_at = source.index("f3d.MapScene(")
-    assert source.index("self.renderer.render_interactive") < recipe_at
-    assert source.index("self.renderer.render_interactive") < source.index(
-        '"renderPath": render_path'
-    )
     assert source.index("f3d.TerrainSource") < recipe_at
+    assert "TerrainRenderParams(" not in source
