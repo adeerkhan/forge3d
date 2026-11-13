@@ -170,7 +170,12 @@ MapScene's recipe layers, so the convergence is now a mapping: the stack's
 layers become the recipe's layers, and the engine's own compositors draw
 them. *Trigger:* the labels already adopted the engine's label plan and text
 compositor rather than a second implementation — the rest of the tier can
-follow the same road.
+follow the same road. Step 4 closed the loop — the imagery drape is a typed
+`RasterOverlay` layer rendered by the recipe's own UV drape; the elevation
+ramp rides the engine's own colormap overlay (the recipe builds a
+`Colormap1D` from the project LUT); the baked-PNG compositor channel is
+gone (the native UV drape now composites in row bands under the host
+budget).
 
 **Phase 16 — the preview matches the still.** The preview's shadows, the
 hillshade and the plate's crop in the viewport, so authoring shows the output.

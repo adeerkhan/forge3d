@@ -986,11 +986,35 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   no TAA, exactly the default's behaviour in that case. The recipe costs ~3.2 s
   for a converged still vs ~0.6 s for the default (it renders the same passes
   three times plus the PNG write); the one-shot AOV captures are ~1.7 s.
-- **What is next for the convergence** — (4) the engine's own typed
-  `RasterOverlay` layer takes over the colormap and the imagery drape end to
-  end, retiring the baked-PNG channel this increment added, and the overlay
-  conflict (imagery vs ramp, one colour source per terrain frame) moves onto
-  the recipe's overlay stack instead of the studio's rule.
+- **Step 4 — the engine's own typed `RasterOverlay` layers take over the drape
+  (done).** The imagery drape is a typed `f3d.RasterOverlay` layer handed to
+  `MapScene(layers=…)` — the recipe's own UV drape composites it, from the
+  PNG the studio already keeps in cache (its rgba is cached by file identity).
+  The elevation ramp rides the engine's own colormap overlay: the recipe
+  builds a `Colormap1D` from the project's LUT, and the terrain shader's
+  `mix` blend combines it with the material albedo; the studio passes the
+  LUT name through the recipe's own settings channel (`"colormap"`,
+  `"albedo_mode": "mix"`, `"colormap_strength"`), with no second
+  implementation in the shell. Both share
+  the single colormap/raster slot the shader provides, so with an imagery
+  visible the ramp is hidden exactly as before — the uppermost visible
+  source wins, a warning is printed, and the stack keeps its rule.
+- **The terrain raster drape now runs under the host budget.** The native
+  drape path previously reserved an estimated ~4.0 GiB of host temporaries
+  for the 3200×7294 Swiss DEM (6 full-float grids at once), which the
+  allocation budget rightly refused. It now composites in row bands, so the
+  peak host allocation is one full-width RGBA8 canvas plus a few dozen MiB
+  of banded buffers. The Swiss land-cover drape renders end to end.
+- **The baked-PNG channel is deleted.** The studio no longer rasterizes the
+  ramp or the imagery into PNGs on its own; both go through the recipe's
+  own overlay builds now. Verified end to end: the opaque footprint of
+  the imagery is unchanged against the step-3 frame, the AOV finals are
+  byte-identical to the pre-switch capture, the baseline still is
+  byte-identical against the committed default, the ramp keeps the project's
+  LUT with its legend, and a plate composites on the same path.
+- **What is next** — Phase 16: the preview matches the still. The preview's
+  shadows, the hillshade and the plate's crop in the viewport, so authoring
+  shows the output.
 
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**

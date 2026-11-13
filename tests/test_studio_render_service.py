@@ -423,33 +423,17 @@ def test_a_single_band_classification_overlay_is_palette_mapped():
     assert service.CLASSIFICATION_PALETTE[4] == (196, 40, 27)
 
 
-def test_the_colormap_is_built_from_the_engines_own_catalogue():
-    """`get_colormap` returns the LUT; the service bakes its stops into a
-    straight-alpha drape PNG over the DEM's domain."""
+def test_the_ramp_rides_the_engines_own_colormap_overlay():
+    """The elevation ramp reaches the recipe as `settings["colormap"]` +
+    `colormap_strength` in mix mode — the engine's own LUT builder renders
+    it, the studio does not bake a second ramp."""
     service = load_service()
-    stub = _WaterStub(
-        heights=np.zeros((4, 4), dtype=np.float32), scale=1.0, range=(100.0, 500.0)
-    )
-    assert service.StudioRenderer.colormap_spec(stub, None) is None
-    spec = service.StudioRenderer.colormap_spec(stub, {"colormap": "viridis"})
-    assert spec is not None
-    # Strength 0 is off. A bound colormap at strength 0 still shifted the
-    # material layer blend by 162,905 samples (the shader normalizes the
-    # height the layers sample by the colormap domain), so the service does
-    # not bake one: measured 0 samples against the same scene with none.
-    assert (
-        service.StudioRenderer.colormap_spec(
-            stub, {"colormap": "viridis", "strength": 0.0}
-        )
-        is None
-    )
-    # An unknown name must fail loudly, not render a silent grey terrain.
-    with pytest.raises(RuntimeError, match="unknown colormap"):
-        service.StudioRenderer.colormap_spec(stub, {"colormap": "nope"})
-    # One LUT slot per frame: the ramp and the imagery compete for it. The
-    # conflict is the stack's business now — the service takes the uppermost
-    # visible one and reports the other (a warning event), instead of one of
-    # them failing the frame.
+    source = SERVICE.read_text()
+    assert 'studio_settings["colormap"]' in source
+    assert 'studio_settings["albedo_mode"] = "mix"' in source
+    assert 'studio_settings["colormap_strength"]' in source
+    # No bake helpers are used for the ramp any more.
+    assert "colormap_spec" not in source
 
 
 def test_sun_visibility_is_off_unless_asked_and_maps_the_rays():

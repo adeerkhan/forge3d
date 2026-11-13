@@ -221,72 +221,6 @@ class StudioRenderer:
 
         self.size: Optional[tuple[int, int]] = None
 
-    def colormap_spec(self, layer: Optional[Dict[str, Any]]):
-        """The elevation ramp as a drape PNG for the recipe.
-
-        The same 64-stop sampling of the engine's LUT the old in-shader
-        overlay used — `get_colormap` returns the Colormap; this bakes its
-        stops into a straight-alpha RGBA grid the recipe drapes like any
-        raster, through the one overlay channel it has. Returns None when the
-        layer has no colormap (or strength 0).
-        """
-        if not layer:
-            return None
-        name = str(layer.get("colormap") or "").strip()
-        if not name:
-            return None
-        strength = float(layer.get("strength", 1.0))
-        if strength <= 0.0:
-            # 0 means off: no overlay. The engine normalizes the height its
-            # material layers sample by the colormap's domain, so a bound
-            # colormap at strength 0 still shifted the layer blend by 162,905
-            # samples (mean 4.4/255) against the same scene with no overlay.
-            return None
-        import forge3d as f3d
-
-        token = name if ":" in name else f"forge3d:{name}"
-        try:
-            cmap = f3d.get_colormap(token)
-        except KeyError as exc:
-            raise RuntimeError(
-                "unknown colormap %r; the engine offers %s"
-                % (name, ", ".join(f3d.available_colormaps()))
-            ) from exc
-        rgba = np.asarray(cmap.rgba, dtype=np.float32)
-        stops_count = min(64, len(rgba))
-        indices = np.linspace(0, len(rgba) - 1, stops_count, dtype=int)
-        low, high = self.range
-        # The renderer works in the scaled heights the service built.
-        domain = (float(low) * self.scale, float(high) * self.scale)
-        span = max(domain[1] - domain[0], 1e-6)
-        stops = [
-            (
-                domain[0] + span * index / max(stops_count - 1, 1),
-                "#%02x%02x%02x"
-                % tuple(int(round(float(rgba[row][channel]) * 255.0)) for channel in range(3)),
-            )
-            for index, row in enumerate(indices)
-        ]
-        values = np.array([stop[0] for stop in stops], dtype=np.float64)
-        colors = np.array(
-            [[int(stop[1][i : i + 2], 16) for i in (1, 3, 5)] for stop in stops],
-            dtype=np.float64,
-        )
-        # A sampled LUT from lo..hi: the ramp is linear between stops, so an
-        # indexed LUT and one floor per pixel sample it exactly.
-        lut_x = np.linspace(domain[0], domain[1], 2048)
-        lut = np.stack(
-            [np.interp(lut_x, values, colors[:, channel]) for channel in range(3)],
-            axis=1,
-        ).astype(np.uint8)
-        heights = np.asarray(self.heights, dtype=np.float32)
-        t = np.clip((heights.astype(np.float64) - domain[0]) / span, 0.0, 1.0)
-        idx = np.minimum((t * (lut.shape[0] - 1)).astype(np.int64), lut.shape[0] - 1)
-        drape = lut[idx]
-        alpha = np.where(np.isfinite(heights), 255, 0).astype(np.uint8)
-        drape = np.concatenate([drape, alpha[..., None]], axis=-1)
-        return {"rgba": np.ascontiguousarray(drape), "strength": strength}
-
     def sun_visibility_settings(self, quality: Dict[str, Any]):
         """The engine's heightfield sun-visibility pass, or None when off.
 
@@ -654,6 +588,7 @@ class StudioRenderer:
         studio_settings: Optional[Mapping[str, Any]] = None,
         target=None,
         radius=None,
+        recipe_layers: Sequence[Any] = (),
     ) -> Tuple[np.ndarray, Any, Any]:
         """The still through the engine's MapScene recipe.
 
@@ -724,7 +659,6 @@ class StudioRenderer:
             "light_azimuth_deg": float(sun.get("azimuthDeg", 135.0)),
             "light_elevation_deg": float(sun.get("elevationDeg", 35.0)),
             "clip": [clip_near, 400000.0],
-            "overlays": [],
             "sun": {"color": [float(c) for c in sun.get("color", (1.0, 0.97, 0.92))]},
             "ibl": {"path": environment_path},
             "renderer_config": {
@@ -767,7 +701,7 @@ class StudioRenderer:
                 ),
                 settings=settings,
             ),
-            layers=[],
+            layers=list(recipe_layers),
             output=f3d.OutputSpec(
                 width=width, height=height, format="png", path=output_path,
                 aovs=tuple(aovs),
@@ -853,31 +787,21 @@ class StudioRenderer:
         from PIL import Image
 
         baked_paths: list[Path] = []
-        overlay_specs = []
-        try:
-            if imagery_layer is not None:
-                try:
-                    spec = self.drape_spec(imagery_layer)
-                    png = Path(tempfile.gettempdir()) / (
-                        "forge3d-drape-%s.png" % uuid.uuid4().hex
-                    )
-                    Image.fromarray(spec["rgba"]).save(png)
-                    baked_paths.append(png)
-                    overlay_specs.append({"path": str(png), "strength": spec["strength"]})
-                except Exception as exc:  # noqa: BLE001
-                    print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
-            else:
-                spec = self.colormap_spec(ramp_layer)
-                if spec is not None:
-                    png = Path(tempfile.gettempdir()) / (
-                        "forge3d-drape-%s.png" % uuid.uuid4().hex
-                    )
-                    Image.fromarray(spec["rgba"]).save(png)
-                    baked_paths.append(png)
-                    overlay_specs.append({"path": str(png), "strength": spec["strength"]})
-        except Exception as exc:  # noqa: BLE001
-            print(json.dumps({"event": "warning", "message": "overlay bake failed: %s" % (exc,)}), flush=True)
-            overlay_specs = []
+        # The typed `RasterOverlay` layer the recipe drapes onto the terrain
+        # UV grid natively — no second overlay implementation. The imagery's
+        # decode is cached at source resolution; the drape PNG is small.
+        drape_png = None
+        if imagery_layer is not None:
+            try:
+                spec = self.drape_spec(imagery_layer)
+                drape_png = Path(tempfile.gettempdir()) / (
+                    "forge3d-drape-%s.png" % uuid.uuid4().hex
+                )
+                Image.fromarray(spec["rgba"]).save(drape_png)
+                baked_paths.append(drape_png)
+            except Exception as exc:  # noqa: BLE001
+                print(json.dumps({"event": "warning", "message": "overlay skipped: %s" % (exc,)}), flush=True)
+                drape_png = None
 
         span = span_x
         radius = float(camera.get("radius") or 1.5 * max(self.span_x, self.span_y)) * self.scale
@@ -896,7 +820,6 @@ class StudioRenderer:
         # the plate resolution, the vector drape, the graticule. No
         # hand-built params exist anywhere on this path.
         sky_settings = self.sky_settings(request, quality, environment)
-        has_ramp_overlay = bool(overlay_specs) and imagery_layer is None
         sun_visibility = self.sun_visibility_settings(quality)
         water_mask, water_settings = self.water(request)
         fog_settings = self.fog_settings(quality)
@@ -959,15 +882,35 @@ class StudioRenderer:
         else:
             # No project water: the recipe renders what the request asks for.
             studio_settings.pop("water", None)
-        if overlay_specs:
-            # The baked drape PYNGs go in the recipe's overlay channel,
-            # which is the engine's own shader overlay blend (Alpha) at the
-            # given strength — the same blend the old in-params overlay ran.
-            studio_settings["overlays"] = overlay_specs
-            studio_settings["albedo_mode"] = "mix" if has_ramp_overlay else "material"
-            studio_settings["colormap_strength"] = (
-                float(ramp_layer.get("strength", 1.0)) if has_ramp_overlay else 0.0
-            )
+        ramp_colormap = str(ramp_layer.get("colormap", "")).strip() if ramp_layer is not None else ""
+        ramp_strength = float(ramp_layer.get("strength", 1.0)) if ramp_layer is not None else 0.0
+        ramp_visible = bool(ramp_colormap) and ramp_strength > 0.0
+        imagery_active = drape_png is not None
+        if ramp_visible and not imagery_active:
+            # The elevation ramp rides the engine's own colormap overlay,
+            # blended into the terrain in mix mode with the project's LUT.
+            # No `overlays` key: the recipe builds the one colour source the
+            # shader allows, with this named LUT.
+            studio_settings["colormap"] = ramp_colormap
+            studio_settings["albedo_mode"] = "mix"
+            studio_settings["colormap_strength"] = ramp_strength
+        else:
+            # No ramp (or a ramp hidden behind the imagery): hold back the
+            # recipe's built-in colourmap overlay so the material/drain keep
+            # the pre-switch look.
+            studio_settings["overlays"] = []
+        recipe_layers = []
+        if drape_png is not None:
+            import forge3d as f3d
+
+            recipe_layers = [
+                f3d.RasterOverlay(
+                    layer_id="studio-imagery",
+                    path=str(drape_png),
+                    crs=str(self.dem_crs or "EPSG:4326"),
+                    opacity=float(imagery_layer.get("opacity", 0.82)),
+                )
+            ]
         try:
             import tempfile as _tempfile
             import uuid as _uuid
@@ -993,6 +936,7 @@ class StudioRenderer:
                     studio_settings=studio_settings,
                     target=target,
                     radius=radius,
+                    recipe_layers=recipe_layers,
                 )
                 # The recipe returns 0..1 floats; the rest of the path is
                 # uint8. The recipe's own PNG is a temp file — it is read

@@ -794,41 +794,13 @@ def _mapscene_offline_settings(output: "OutputSpec") -> Any:
     )
 
 
-def _mapscene_user_overlays(settings: Mapping[str, Any]) -> Any:
-    """Overlays a caller provides as ``[{"path": png, "strength": float}, ...]``.
-
-    The recipe's settings channel is JSON-serializable, so a native
-    ``OverlayLayer`` cannot ride inside them. A PNG path and a strength are
-    the minimal faithful carrier — the same object the caller built locally,
-    re-created here through the engine's own ``OverlayLayer.from_raster_rgba``.
-    Returns ``None`` when the setting is absent (the recipe keeps its thematic
-    colormap overlay); an empty list deliberately means no overlay at all.
-    """
-    import numpy as np
-    import forge3d as f3d
-
-    raw = settings.get("overlays")
-    if raw is None:
-        return None
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        raise TypeError(f"LightingPreset.settings['overlays'] must be a list of specs, got {type(raw).__name__}")
-    if any(not isinstance(item, Mapping) for item in raw):
-        raise TypeError("LightingPreset.settings['overlays'] entries must be mappings with a 'path'")
-    overlays = []
-    for spec in raw:
-        path = spec.get("path")
-        if not isinstance(path, (str, os.PathLike)) or not Path(str(path)).is_file():
-            raise ValueError(f"LightingPreset.settings['overlays'] path is not a file: {path!r}")
-        from ._png import load_png_rgba
-
-        rgba = np.ascontiguousarray(load_png_rgba(Path(str(path))).astype(np.uint8, copy=False))
-        overlays.append(
-            f3d.OverlayLayer.from_raster_rgba(
-                rgba,
-                strength=float(spec.get("strength", 1.0)),
-            )
-        )
-    return overlays
+def _invalid_overlays(value: Any) -> Any:
+    raise TypeError(
+        "LightingPreset.settings['overlays'] only supports [] (no overlay) or an absent "
+        "key (the recipe's built-in thematic overlay); overlay objects cannot ride "
+        "inside the JSON-serialized recipe settings — use typed RasterOverlay layers "
+        "to drape a raster onto the terrain"
+    )
 
 
 def _mapscene_shadow_settings(shadow_config: Any, raw: Mapping[str, Any] | None = None) -> Any:
@@ -1502,7 +1474,7 @@ def _build_mapscene_terrain_params(
     denoise_enabled = _mapscene_denoise_enabled(output)
     settings = _metadata_dict(recipe.lighting.settings)
     preset_name = settings.get("resolved_preset")
-    if preset_name:
+    if preset_name or settings.get("colormap"):
         from .terrain_demo import _build_colormap
 
         colormap = _build_colormap(domain, colormap_name=str(settings.get("colormap", "terrain")), heightmap=heightmap)
@@ -1599,9 +1571,13 @@ def _build_mapscene_terrain_params(
         clip=clip_pair,
         shadows=_mapscene_shadow_settings(renderer_config.shadows, raw=raw_shadows),
         overlays=(
-            user_overlays
-            if (user_overlays := _mapscene_user_overlays(settings)) is not None
-            else [overlay]
+            []
+            if settings.get("overlays") == []
+            else (
+                [overlay]
+                if settings.get("overlays") is None
+                else _invalid_overlays(settings.get("overlays"))
+            )
         ),
         aa_samples=max(1, int(output.samples if output is not None else 1)),
         aa_seed=_mapscene_aa_seed(recipe),
