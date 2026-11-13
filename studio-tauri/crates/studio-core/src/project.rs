@@ -614,6 +614,11 @@ pub struct TerrainSeed {
 pub struct ViewportState {
     pub mode: ViewportMode,
     pub grid_visible: bool,
+    /// Slope-angle hillshade painted onto the terrain in the viewport
+    /// (a diffuse multiplier; the still always renders with the engine's own
+    /// shading regardless of this flag).
+    #[serde(default = "default_true")]
+    pub hillshade: bool,
 }
 
 impl Default for ViewportState {
@@ -621,6 +626,7 @@ impl Default for ViewportState {
         Self {
             mode: ViewportMode::Solid,
             grid_visible: true,
+            hillshade: true,
         }
     }
 }

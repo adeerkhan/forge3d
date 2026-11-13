@@ -1012,9 +1012,21 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   byte-identical to the pre-switch capture, the baseline still is
   byte-identical against the committed default, the ramp keeps the project's
   LUT with its legend, and a plate composites on the same path.
-- **What is next** — Phase 16: the preview matches the still. The preview's
-  shadows, the hillshade and the plate's crop in the viewport, so authoring
-  shows the output.
+- **Phase 16 — the preview matches the still — begins here.** The first slice
+  landed: the **terrain editor's Terrain section** now has a `Hillshade`
+  checkbox that turns a live slope-angle relief bake
+  (`bakeHillshade(preview)`) on and off the 3D viewport's terrain material
+  (a raster multiplier consulted by `applyTerrainShading`), so the author
+  sees relief without waiting for a still. The flag lives on
+  `ViewportState` (serde-default on, restored by the schema contract
+  unchanged), set via `setViewport(…)` — a single undoable command, no
+  new field on the project root. The still renders with the engine's own
+  shading regardless of the toggle (the engine decides its own specular
+  response; the hillshade is a preview aid, not a hidden print change).
+- **What is still open for Phase 16** — the preview's shadows aligned with the
+  still's PCF, the Material preview's lighting matched to the still's
+  `lambert_physical`, and the plate's crop shape in the viewport. Each lands in
+  its own increment, measured against the still.
 
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**

@@ -108,6 +108,8 @@ interface ShadingRecord {
   drape?: THREE.Texture | null;
   /** Terrain only: the mesh carries per-vertex elevation-ramp colours. */
   ramp?: boolean;
+  /** Terrain only: the baked hillshade texture (grey multiplier, below). */
+  hillshade?: THREE.Texture | null;
 }
 
 /** Clamp half-float RGBA data to 8-bit linear values for a safe backdrop. */
@@ -233,14 +235,15 @@ function setSolidShading(root: THREE.Object3D, solid: boolean): void {
  * sun nor the exposure may change with a slider, so the preview keeps the
  * surface opaque; the still honours the opacity in its overlay pass.
  */
-function applyTerrainShading(mesh: THREE.Mesh, solid: boolean): void {
+function applyTerrainShading(mesh: THREE.Mesh, solid: boolean, hillshade: boolean): void {
   const material = mesh.material as THREE.MeshStandardMaterial;
-  const { drape = null, ramp = false } = mesh.userData as ShadingRecord;
+  const { drape = null, ramp = false, hillshade: hillshadeMap = null } = mesh.userData as ShadingRecord;
   // Material shows the cartography: a draped raster when one is attached,
   // otherwise the elevation ramp when a colormap is chosen. Solid is clay.
+  // Hillshade rides on top unless a raster drape is already there.
   const draped = !solid && drape !== null;
   const ramped = !solid && !draped && ramp;
-  const map = draped ? drape : null;
+  const map = draped ? drape : hillshade ? hillshadeMap : null;
   const colour = draped || ramped ? 0xffffff : CLAY_COLOUR;
   // Playback re-applies shading on every snapshot; only touch the material
   // when the mode (or the drape/ramp) actually changed, so `needsUpdate` does
@@ -274,13 +277,14 @@ function applyShading(
   runtime: Runtime,
   object: SceneObject,
   mode: ViewportMode,
+  hillshade: boolean,
 ): void {
   const group = runtime.objects.get(object.id);
   if (!group) return;
   const solid = mode === "solid";
   if (object.kind.type === "terrain") {
     for (const child of group.children) {
-      if (child instanceof THREE.Mesh) applyTerrainShading(child, solid);
+      if (child instanceof THREE.Mesh) applyTerrainShading(child, solid, hillshade);
     }
     return;
   }
@@ -464,10 +468,83 @@ function buildLightGizmo(light: LightObject): THREE.Group {
  * albedo ramp; Solid must show no colour at all, and Material supplies the real
  * drape ([`applyTerrainShading`]).
  */
+/**
+ * Hillshade: a greyscale relief map baked from the DEM's slope/aspect against
+ * a fixed sun azimuth/altitude (matches QGIS: 315° azimuth, 45° altitude, ½ past). Keyed to
+ * the grid's metric resolution, not the preview's world scale. Tracks the
+ * terrain data, not the camera, so it composes with any view direction.
+ */
+function computeHillshadeTexel(
+  dzDx: number,
+  dzDy: number,
+  azimuth: number,
+  zenith: number,
+): number {
+  const slope = Math.atan(Math.sqrt(dzDx * dzDx + dzDy * dzDy));
+  // ArcGIS aspect convention: 0 = north, clockwise.
+  const aspect = Math.atan2(dzDy, -dzDx);
+  const value = Math.cos(zenith) * Math.cos(slope) +
+                Math.sin(zenith) * Math.sin(slope) * Math.cos(azimuth - aspect);
+  return Math.max(0, Math.min(255, Math.floor(value * 255)));
+}
+
+/** Bake a hillshade texture from the heights: central differences, metric
+ *  cell size from the footprint, 315° az / 45° alt, no exaggeration. Linear filter. */
+function bakeHillshade(preview: TerrainPreview): THREE.DataTexture {
+  const resolution = preview.resolution;
+  const heights = preview.heights;
+  const [spanX, spanZ] = preview.spanXz;
+  const cellX = spanX / Math.max(1, resolution - 1);
+  const cellY = spanZ / Math.max(1, resolution - 1);
+  const azimuth = (315 * Math.PI) / 180;
+  // Zenith angle from the vertical, the ESRI formula: matches the standard
+  // "QGIS / ArcGIS" relief shades (SE-lit slopes face dark).
+  const zenith = (45 * Math.PI) / 180;
+  const data = new Uint8Array(resolution * resolution * 4);
+  for (let row = 0; row < resolution; row += 1) {
+    for (let column = 0; column < resolution; column += 1) {
+      const left = column === 0 ? heights[row * resolution + column]
+                                : heights[row * resolution + column - 1];
+      const right = column === resolution - 1 ? heights[row * resolution + column]
+                                : heights[row * resolution + column + 1];
+      const up = row === 0 ? heights[row * resolution + column]
+                          : heights[(row - 1) * resolution + column];
+      const down = row === resolution - 1 ? heights[row * resolution + column]
+                          : heights[(row + 1) * resolution + column];
+      const dzDx = (right - left) / (2 * cellX);
+      const dzDy = (down - up) / (2 * cellY);
+      const value = computeHillshadeTexel(dzDx, dzDy, azimuth, zenith);
+      // PlaneGeometry UVs follow row order; match the mesh's own indexing.
+      // RGBA: three.js .map sampling expects channels the material can read;
+      // replicate the grey into R/G/B so it multiplies cleanly in the shader.
+      const base = (row * resolution + column) * 4;
+      data[base] = value;
+      data[base + 1] = value;
+      data[base + 2] = value;
+      data[base + 3] = 255;
+    }
+  }
+  const texture = new THREE.DataTexture(
+    data,
+    resolution,
+    resolution,
+    THREE.RGBAFormat,
+    THREE.UnsignedByteType,
+  );
+  texture.flipY = true;
+  texture.colorSpace = THREE.NoColorSpace;
+  texture.magFilter = THREE.LinearFilter;
+  texture.minFilter = THREE.LinearFilter;
+  texture.generateMipmaps = false;
+  texture.needsUpdate = true;
+  return texture;
+}
+
 function buildTerrainMesh(
   preview: TerrainPreview,
   zScale: number,
   ramp: { stops: [number, number, number][]; strength: number } | null,
+  hillshade: boolean,
 ): THREE.Mesh {
   const resolution = preview.resolution;
   const geometry = new THREE.PlaneGeometry(1, 1, resolution - 1, resolution - 1);
@@ -505,6 +582,13 @@ function buildTerrainMesh(
   geometry.computeVertexNormals();
   const material = clayMaterial(THREE.DoubleSide);
   material.roughness = 0.95;
+  // Hillshade stays in the mesh so the workspace can flip it live; its
+  // texture is baked once against the DEM.
+  const hillshadeTexel = bakeHillshade(preview);
+  if (hillshade) {
+    material.map = hillshadeTexel;
+    material.vertexColors = colours !== null;
+  }
   const mesh = new THREE.Mesh(geometry, material);
   mesh.castShadow = true;
   mesh.receiveShadow = true;
@@ -513,6 +597,7 @@ function buildTerrainMesh(
   mesh.userData.owned = true;
   mesh.userData.studioMaterial = mesh.material;
   mesh.userData.drape = null;
+  mesh.userData.hillshade = hillshadeTexel;
   // Whether this mesh carries an elevation ramp at all (the attribute is fixed
   // once built; the mode decides if it is shown).
   mesh.userData.ramp = colours !== null;
@@ -1235,6 +1320,8 @@ export function Viewport3D() {
     const runtime = runtimeRef.current;
     if (!runtime) return;
     const project = state?.project;
+    // The viewport hillshade flag (shared for both call sites in this effect).
+    const hillshade = project?.viewport.hillshade ?? true;
     if (!project) {
       for (const group of runtime.objects.values()) {
         disposeChildren(group);
@@ -1301,7 +1388,7 @@ export function Viewport3D() {
       } else {
         // Rebuilt content keeps its geometry; a mode switch (or a material
         // edit) only changes how it is shaded.
-        applyShading(runtime, object, viewportModeRef.current);
+        applyShading(runtime, object, viewportModeRef.current, hillshade);
         continue;
       }
 
@@ -1388,10 +1475,10 @@ export function Viewport3D() {
           .then(([preview, ramp]) => {
             if (group.userData.signature !== expected) return;
             disposeChildren(group);
-            const mesh = buildTerrainMesh(preview, zScale, ramp);
+            const mesh = buildTerrainMesh(preview, zScale, ramp, hillshade);
             group.add(mesh);
             setProblem(null);
-            applyTerrainShading(mesh, viewportModeRef.current === "solid");
+            applyTerrainShading(mesh, viewportModeRef.current === "solid", hillshade);
             // The drape is the terrain's albedo: Material shows it, Solid
             // stays clay. The shell decodes the raster; a scene without an
             // overlay stays clay in both.
@@ -1400,7 +1487,7 @@ export function Viewport3D() {
                 .then((texture) => {
                   if (group.userData.signature !== expected) return;
                   mesh.userData.drape = texture;
-                  applyTerrainShading(mesh, viewportModeRef.current === "solid");
+                  applyTerrainShading(mesh, viewportModeRef.current === "solid", hillshade);
                   runtime.needsRender = true;
                 })
                 .catch((cause) => {
@@ -1420,7 +1507,7 @@ export function Viewport3D() {
       } else {
         group.add(buildLightGizmo(object.kind));
       }
-      applyShading(runtime, object, viewportModeRef.current);
+      applyShading(runtime, object, viewportModeRef.current, hillshade);
     }
 
     // Camera view: the render camera *is* the project's active camera, so an

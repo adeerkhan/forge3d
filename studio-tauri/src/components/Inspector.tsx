@@ -1122,7 +1122,8 @@ function TerrainEditor({
   terrain: Extract<SceneObject["kind"], { type: "terrain" }>;
   asset: Asset | undefined;
 }) {
-  const { actions, terrainResolution, setTerrainResolution } = useSession();
+  const { actions, terrainResolution, setTerrainResolution, state } = useSession();
+  const hillshade = state?.project.viewport?.hillshade ?? true;
   const elevation =
     terrain.elevationRange === null
       ? "—"
@@ -1147,6 +1148,11 @@ function TerrainEditor({
         <dd className="mono">{elevation}</dd>
       </div>
 
+      <Toggle
+        label="Hillshade (relief shading)"
+        checked={hillshade}
+        onChange={(value) => void actions.setHillshade(value)}
+      />
       <label className="field">
         <span className="field-label">
           Solid mesh · {terrainResolution} × {terrainResolution}

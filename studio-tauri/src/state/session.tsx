@@ -921,6 +921,18 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [applyCommand, state],
   );
 
+  const setHillshade = useCallback(
+    async (hillshade: boolean) => {
+      const project = state?.project;
+      if (!project) return;
+      await applyCommand({
+        type: "setViewport",
+        viewport: { ...project.viewport, hillshade },
+      });
+    },
+    [applyCommand, state],
+  );
+
   const actions = useMemo<SessionApi["actions"]>(
     () => ({
       selectCartographyLayer(id: string | null) {
@@ -1094,6 +1106,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       moveCartographyLayer,
       applyMapLook,
       setViewportMode,
+      setHillshade,
       renderViewport,
       clearRenderFrame,
 
@@ -1168,6 +1181,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setPlayhead,
       setSunFromSolar,
       setViewportMode,
+      setHillshade,
       state,
     ],
   );

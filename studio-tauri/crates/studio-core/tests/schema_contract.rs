@@ -51,7 +51,7 @@ fn project_document_key_shape_is_stable() {
     assert_eq!(value["schemaVersion"], studio_core::SCHEMA_VERSION);
     assert_eq!(value["workspace"], "studio");
 
-    expect_keys(&value["viewport"], &["mode", "gridVisible"]);
+    expect_keys(&value["viewport"], &["mode", "gridVisible", "hillshade"]);
     assert_eq!(value["viewport"]["mode"], "solid");
     expect_keys(
         &value["render"],

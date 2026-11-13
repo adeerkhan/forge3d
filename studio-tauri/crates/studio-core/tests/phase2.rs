@@ -59,7 +59,7 @@ fn v1_document() -> serde_json::Value {
         },
         "selection": [],
         "workspace": "studio",
-        "viewport": {"mode": "solid", "gridVisible": true},
+        "viewport": {"mode": "solid", "gridVisible": true, "hillshade": true},
         "render": {"width": 1920, "height": 1080}
     })
 }

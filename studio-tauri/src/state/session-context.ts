@@ -90,6 +90,7 @@ export interface SessionApi {
     importMesh(): Promise<void>;
     refreshEngine(force?: boolean): Promise<void>;
     setViewportMode(mode: ViewportMode): Promise<void>;
+    setHillshade(hillshade: boolean): Promise<void>;
     renderViewport(
       width: number,
       height: number,

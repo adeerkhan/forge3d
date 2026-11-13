@@ -165,6 +165,8 @@ export type RenderQuality = "preview" | "final";
 export interface ViewportState {
   mode: ViewportMode;
   gridVisible: boolean;
+  /** Slope-angle hillshade painted onto the terrain in the viewport. */
+  hillshade: boolean;
 }
 
 export interface RenderSettings {

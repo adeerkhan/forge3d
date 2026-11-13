@@ -81,10 +81,17 @@ sees. They are the reason the app feels loose.
    exported frames (meshes do not reach Rendered yet — the capability table
    says so). *Fix:* either ship meshes in Rendered (phase 15), or mark
    non-camera channels as preview-only in the timeline.
-2. **The Material preview is never shadowed.** The viewport's sun has a full
-   shadow rig configured and then `castShadow = false`, so the preview shows a
-   flat-lit map while the still carries the ray-marched hillshade the map look
-   turns on. *Fix:* one line plus an acne check, or an honest note in the panel.
+2. **The Material preview is never shadowed in the still sense.** The
+   viewport renders with three.js lighting (a real directional light with a
+   full PCF shadow rig configured and then `castShadow = false` on the
+   directional light — see `src/viewport/Viewport3D.tsx`), so the preview
+   does not show the engine's ray-marched relief shading. Phase 16 has begun:
+   the terrain editor's Terrain section now offers a `Hillshade` raster, a
+   relief-ankle multiplier baked from the DEM (the same ESRI/QGIS formula),
+   toggling the viewport between an unlit shading and the classic
+   relief map. The shadow line itself is still open for Material, and the
+   shading-model match between preview and still is the next Phase-16 increment
+   to land.
 3. **The preview and the still are two renderers.** They agree on the lighting
    rig, the exposure and the tone-map by construction, but the engine's terrain
    shading (triplanar layers, AO, sun visibility, shadows) only exists in the
