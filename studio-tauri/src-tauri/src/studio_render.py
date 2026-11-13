@@ -1179,31 +1179,6 @@ def plate_legend(colormap_name: str, domain):
     return np.asarray(Legend.from_colormap(get_colormap(token), (float(low), float(high)), config).render())
 
 
-def _nice_length(metres: float) -> float:
-    """The largest 1, 2 or 5 times a power of ten that fits in `metres`.
-
-    A scale bar reads in round distances, so the bar's length is snapped to
-    one of those rather than to the exact pixel count.
-    """
-    if metres <= 0.0 or not math.isfinite(metres):
-        return 0.0
-    value = 1.0
-    while value * 10.0 <= metres:
-        value *= 10.0
-    for step in (5.0, 2.0):
-        while value * step <= metres:
-            value *= step
-    return value
-
-
-def _scale_label(metres: float) -> str:
-    """A scale bar's label: metres under a kilometre, kilometres above."""
-    if metres >= 1000.0:
-        value = metres / 1000.0
-        return ("%g km" % value) if value % 1 else ("%d km" % value)
-    return ("%g m" % metres) if metres % 1 else ("%d m" % metres)
-
-
 def plate_class_legend(class_ids) -> np.ndarray:
     """The categorical legend for a class raster: the palette's swatches and
     the class names that palette implies."""
