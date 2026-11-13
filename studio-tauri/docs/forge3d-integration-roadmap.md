@@ -546,8 +546,9 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
 ### 5.18 The map look, in one button (0.5 day) — **done**
 - Cartography setup was four places (fit relief, a camera, a sun, a hillshade)
   and the numbers were in the gallery's recipe, not the app. `ApplyMapLook` does
-  all of it in one undoable command: the DEM's own relief, the map camera (from
-  the north, 31° off vertical, framed on the whole footprint), the gallery's
+  all of it in one undoable command: the DEM's own relief, the map camera
+  (from the south, 31° off vertical — north up — framed on the whole footprint),
+  the gallery's
   north-west sun (315°, 24°) and the ray-marched hillshade (4 km reach, 48
   steps). The Inspector's Map tab has the button; the viewport switches to the
   camera so the framing is what you see.
@@ -570,9 +571,10 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   guesses: a **scale bar** (the ground scale at the frame's centre, snapped to
   a round 1/2/5 length — "50 km" on the Swiss plate) and a **north arrow**.
 - Both are drawn only where they are true: the scale bar needs a near-vertical
-  view (an oblique frame has no single ground scale), and the arrow needs a
-  north-up camera (phi within 3° of north). A plate from any other camera gets
-  the title, the legend and the caption, and no wrong furniture.
+  view (an oblique frame has no single ground scale). The north arrow is the
+  engine's own and turns with the map (the engine's `north` camera mode reads
+  the azimuth from east towards north, so the north-up view stands at phi
+  270°, and the arrow's rotation is clockwise from north on the page).
 - The scale comes from the camera the frame was rendered with: the visible
   width at the target (2 · radius · tan(fov/2), unscaled to metres) over the
   frame's width.
@@ -802,7 +804,9 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   on the Swiss plate: the north arrow **663 changed samples**, the scale bar
   **2,292**, the legend turns the page from 750×683 into 900×915 (the legend
   column), the whole furniture **2,955**. The land cover itself: **1,176,000**
-  changed samples (mean 28.6).
+  changed samples (mean 28.6). (The arrow's own rotation and the map look's
+  azimuth turned out to be wrong for the engine's `north` camera mode — see
+  5.28.)
 - The plate's caption is drawn with the packaged Latin atlas, which has no
   middot: the recipes use a plain dash.
 - Check: the recipes' own tests (the layers, the camera, the sun; the label
@@ -838,11 +842,68 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   returns no depth, so the studio's lines are depth-tested against the
   terrain's depth — the terrain's own — and are not occluded by a ridge in
   front of them. Closing it is either an OIT bridge that also returns the
-  depth or the MapScene convergence below.
+  depth or the MapScene convergence below. **Closed by 5.28.**
 - Check: the engine's public batch builder, the studio's cartography
   preparation (the batches' shape, the depth, the glyph rects), the e2e tests
   (the labels and the clouds reach the pixels), and the determinism claim
   moved to the path that keeps it.
+
+### 5.28 The lines' own depth, the engine's furniture, the graticule (2 days) — **done**
+- **The lines now carry their own depth.** The engine's vector path computes
+  the per-pixel depth of the projected geometry; the studio's coverage came
+  from the OIT rasterizer, which returns no depth, so a line drew *through*
+  the ridge in front of it. The engine's rule is now public:
+  `forge3d.vector.projected_depth(coverage, paths, width, height)` returns the
+  nearest segment's interpolated depth and the sub-pixel offset from it. The
+  engine's own recipe path (`_map_scene_native_inputs`) calls it too, so there
+  is **one** rule and not two.
+- **The occlusion is the engine's own test**: a line is hidden where its depth
+  is behind the ground's depth at that pixel, with the bias the engine uses
+  (the terrain's depth gradient across the pixel times the line's sub-pixel
+  offset), so a line that lies *on* the ground does not flicker against it.
+  The CONCORDIA overlay shader still reads a constant depth (the authored
+  depth is uploaded but unused), so the studio applies the engine's Python
+  rule to the coverage it drew — once, so the plain path's composite and the
+  engine's GPU path draw the same line.
+- **Measured** (Mount Fuji 30 m DEM, 900×700, the quality surface): a line
+  across the cone changes **12,822 samples** (mean 0.518) against the plain
+  terrain, and **2,147 of the line's 4,400 covered pixels are behind the
+  ridge** — the line stops at the ground.
+- **The plate's furniture is the engine's**: `forge3d.scale_bar.ScaleBar`
+  (the graduated, geodetic bar and its label) and
+  `forge3d.north_arrow.NorthArrow` (the arrow geometry and its "N"), not the
+  studio's rectangle and triangle. The arrow turns with the map: the engine's
+  `north` camera mode reads the azimuth from east towards north (measured with
+  the engine's own `project_terrain_points`: at phi 0/90/180/270 the north edge
+  lands right/down/left/up), so the north-up view stands at phi = 270 and the
+  arrow's rotation is `(phiDeg + 90) % 360`. The studio's own map look used to
+  stand at phi = 90 — the map upside down with a south-up plate — and now
+  stands at 270.
+  **Measured** (the Swiss plate, 900×700, phi 270): the arrow and the bar
+  change **4,908 samples** (mean 0.190).
+- **The graticule is a map layer**, drawn by the engine:
+  `forge3d.graticule.generate_graticule` makes the meridians and the parallels
+  of the map's own bounds (in the DEM's CRS; a projected DEM's bounds are
+  transformed with the engine's own `transform_bounds`) and says what each
+  line is worth ("8 degE"). The lines are draped on the terrain and rasterized
+  by the engine's OIT bridge, like every other line; the annotations are
+  placed by the engine's label plan, on their own line, where it leaves the
+  frame (the bottom edge for a meridian, the left edge for a parallel).
+- **Measured** (the Swiss map, 900×700): the graticule at 1° changes
+  **23,329 samples** (mean 0.657) against the plain terrain; the annotations
+  alone change **3,834** (mean 0.147). Every control of the layer moves
+  pixels: the interval (1° against 2°) **16,245**, the width (1 px against
+  3 px) **26,262**, the colour **14,156**, the annotations **3,834**.
+- The graticule's interval range (0.05°–30°) is inside the engine's (any
+  positive interval); the studio refuses what the engine would refuse.
+- Check: the engine's public depth rule (and the recipe path sharing it),
+  the occlusion test, the engine's furniture, the graticule's geometry and
+  its annotation anchors, and the studio-core layer's own ranges. Two bugs
+  found while verifying, both fixed in this increment: the engine's polygon
+  vector overlay on terrain referenced a deleted name (`distance` → the
+  offsets' squared length), and the studio's map look stood at phi = 90 —
+  the map upside down for the engine's `north` camera mode; it now stands at
+  270.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

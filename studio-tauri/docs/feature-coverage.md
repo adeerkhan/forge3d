@@ -28,15 +28,16 @@ Two rules govern the table:
 | 11 | Colormaps, sun visibility, vertical scale, despeckle | done |
 | 12 | Map plate, map furniture, categorical legend | done |
 | 13 | The map look (one button), the release audit as a CI gate | done |
-| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped: lines and labels (furniture next) |
+| 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped: lines, labels, furniture and the graticule |
 | 15 | Convergence on `MapScene` as the scene model | design increment, trigger-gated |
 
-Studio exposes **79 controls** — the app's 50 numeric fields, 3 range sliders,
-17 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
-predated the vector layer's colour, width and label controls) — over 28
+Studio exposes **85 controls** — the app's 55 numeric fields, 3 range sliders,
+18 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
+predated the vector layer's colour, width and label controls, and the
+graticule's six came with the grid) — over 28
 render settings, the scene model (terrain, mesh, camera, light), the timeline,
 the map plate and the map's layer stack. The engine's
-public Python surface is **382 names** (the label compositor joined it); the
+public Python surface is **383 names** (the label compositor joined it); the
 table below is the honest breakdown of what a *terrain and cartography studio*
 needs from those.
 
@@ -48,10 +49,10 @@ needs from those.
 | Terrain inputs (`mini_dem`, `fetch_dem`, datasets, COG) | partial | local GeoTIFF only; no dataset fetching, no COG streaming |
 | Raster overlays (`ViewerHandle.load_overlay`) | **full** | the drape, in the Material preview and in Rendered, at the source's resolution |
 | Thematic rasters (categorical/bivariate styles) | partial | the class palette and the elevation ramp; no bivariate styles, no `MapScene` styles |
-| Vector overlays and labels | **lines and labels** | the engine's projection + OIT rasterizer for the lines; the engine's label plan + text compositor for the labels; on the quality surface both are drawn by the engine in the terrain's own pass, with the ground's depth; furniture is the rest of the tier |
-| The map as a layer stack | **full** | the studio's own ordered stack (relief, ramp, imagery, vector, labels, plate), drawn back to front by the render service |
+| Vector overlays and labels | **lines, labels, furniture and the graticule** | the engine's projection + OIT rasterizer for the lines (with the lines' own depth, so a ridge hides them); the engine's label plan + text compositor for the labels; on the quality surface both are drawn by the engine in the terrain's own pass, with the ground's depth; the engine's `ScaleBar`, `NorthArrow` and `generate_graticule` for the furniture and the grid |
+| The map as a layer stack | **full** | the studio's own ordered stack (relief, ramp, imagery, vector, labels, graticule, plate), drawn back to front by the render service |
 | The gallery's recipes as starter scenes | **full** | the Swiss land-cover, the Luxembourg rail network and the Mount Fuji labels, with their layers, camera and sun |
-| Map furniture (title, caption, north arrow, scale bar, legend) | **full** | the plate layer's own switches, drawn by the studio's page compositor |
+| Map furniture (title, caption, north arrow, scale bar, legend) | **full** | the plate layer's own switches; the arrow and the bar are the engine's own (`NorthArrow`, `ScaleBar`), the page itself the studio's compositor |
 | Picking and selection | partial | the Solid view picks objects; the engine's terrain picking is not used |
 | Point clouds | none | a different product tier |
 | Camera automation (`animation`, `camera_rigs`) | partial | the timeline's camera path and FOV reach the render; **object channels do not** |
@@ -131,13 +132,19 @@ panel on the left, the map in the middle, the selected layer's properties on
 the right. The shell's own model, but the shape matches MapScene's recipe
 layers, so the convergence below is a mapping rather than a rewrite.
 
-**Phase 14 — the engine's cartographic tier** — **shipped: lines and labels**
+**Phase 14 — the engine's cartographic tier** — **shipped: lines, labels,
+furniture and the graticule**
 (`docs/goal-phase-14-cartographic-tier.md`): the rail network draws on the
 Luxembourg DEM and on the plate through the engine's own projection and OIT
 rasterizer, and the place names draw through the engine's label plan and its
 text compositor (`forge3d.composite_label_layers`, made public for callers
-that own their pixels). Still open in the tier: furniture, polygons, a legend
-for the vector attributes, and labels occluded by the terrain's ridges.
+that own their pixels). The lines carry their own depth (the engine's public
+`forge3d.vector.projected_depth`), so a ridge in front of a line hides it;
+the plate's scale bar and north arrow are the engine's own (`ScaleBar`,
+`NorthArrow`), and the graticule is the engine's grid
+(`forge3d.graticule.generate_graticule`) with its annotations placed by the
+engine's label plan. Still open in the tier: polygons, a legend for the
+vector attributes, and labels occluded by the terrain's ridges.
 
 **Converge on `MapScene`.** The engine's typed map scene carries labels,
 buildings, 3D Tiles, furniture, graticules and bundles; Studio has its own

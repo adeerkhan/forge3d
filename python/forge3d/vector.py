@@ -23,10 +23,72 @@ __all__ = [
     'add_graph',
     'clear_vectors',
     'get_vector_counts',
+    'projected_depth',
     'render_analytic',
     'coverage_report',
     'VectorScene',
 ]
+
+
+def projected_depth(
+    coverage: np.ndarray,
+    paths: Any,
+    width: int,
+    height: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The nearest projected path's depth and offset, per covered pixel.
+
+    `coverage` is the HxWx4 coverage the caller rasterized; `paths` are the
+    projected paths in output pixels, each a sequence of (x, y, depth)
+    points. The depth of a covered pixel is the interpolated depth of the
+    nearest segment — the engine's own rule, so the depth always matches the
+    coverage it was computed for.
+
+    Returns `(depth, offsets)`: `depth` is HxW (the covered pixels carry the
+    interpolated depth of the nearest segment, the rest 1.0) and `offsets` is
+    the (N, 2) sub-pixel offset from that segment, in the covered pixels'
+    order. A caller that rasterized its own coverage (the OIT bridge, say) uses
+    this to hand the renderer the depth that matches its own pixels, so a line
+    behind a ridge is hidden by the ridge.
+    """
+    coverage = np.asarray(coverage)
+    if coverage.ndim != 3 or coverage.shape[2] < 4:
+        raise ValueError("the coverage must be an HxWx4 image")
+    height = int(height)
+    width = int(width)
+    depth = np.ones((height, width), dtype=np.float32)
+    yy, xx = np.nonzero(coverage[..., 3])
+    offsets = np.zeros((len(xx), 2), dtype=np.float32)
+    if not len(xx):
+        return depth, offsets
+    px, py = xx + 0.5, yy + 0.5
+    nearest = np.full(len(xx), np.inf)
+    stroke_depth = np.ones(len(xx), dtype=np.float32)
+    offset_x = np.zeros(len(xx), dtype=np.float32)
+    offset_y = np.zeros(len(xx), dtype=np.float32)
+    for path in paths or ():
+        points = list(path)
+        if not points:
+            continue
+        segments = [(points[0], points[0])] if len(points) == 1 else list(zip(points, points[1:]))
+        for a, b in segments:
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            length2 = dx * dx + dy * dy
+            t = (
+                np.clip(((px - a[0]) * dx + (py - a[1]) * dy) / length2, 0, 1)
+                if length2
+                else np.zeros(len(xx))
+            )
+            d = (px - a[0] - t * dx) ** 2 + (py - a[1] - t * dy) ** 2
+            mask = d < nearest
+            nearest[mask] = d[mask]
+            offset_x[mask] = (px - a[0] - t * dx)[mask]
+            offset_y[mask] = (py - a[1] - t * dy)[mask]
+            stroke_depth[mask] = a[2] + t[mask] * (b[2] - a[2])
+    depth[yy, xx] = stroke_depth
+    offsets[:, 0] = offset_x
+    offsets[:, 1] = offset_y
+    return depth, offsets
 
 
 def _analytic_scene_json(scene: Mapping[str, Any]) -> str:

@@ -866,3 +866,86 @@ def test_the_cartography_is_prepared_for_the_engine_own_pass():
     assert prepared.label_batches, "the engine's glyph batches must be built"
     assert "atlas" in prepared.label_batches[0]
     assert prepared.label_batches[0]["rects"], "the labels must have glyph rects"
+
+
+def test_a_line_behind_the_ground_is_hidden_by_it():
+    """The engine's own occlusion rule: a line is hidden where the ground is
+    in front of it, and the studio applies it to the coverage it drew."""
+    service = load_service()
+    coverage = np.zeros((8, 8, 4), dtype=np.uint8)
+    coverage[2:6, 2:6, 3] = 255
+    # The line's depth: far away. The ground's: near, in the left half.
+    line_depth = np.full((8, 8), 0.9, dtype=np.float32)
+    terrain_depth = np.full((8, 8), 0.5, dtype=np.float32)
+    terrain_depth[:, 4:] = 0.95
+    offsets = np.zeros((16, 2), dtype=np.float32)
+
+    hidden = service.hidden_by_ground(coverage, line_depth, terrain_depth, offsets)
+    # The left half: the ground (0.5) is in front of the line (0.9).
+    assert hidden[3, 3]
+    # The right half: the ground (0.95) is behind the line (0.9).
+    assert not hidden[3, 5]
+
+    batch = service.vector_batch(coverage, [[(2.0, 2.0, 0.9), (6.0, 6.0, 0.9)]], terrain_depth, "line")
+    assert batch["rgba"][3, 3, 3] == 0, "the hidden pixel must be empty"
+    assert batch["rgba"][3, 5, 3] == 255, "the visible pixel must stay"
+    assert batch["depth_test"] is True
+
+
+def test_the_graticule_is_the_engine_own_grid():
+    """The engine generates the grid; the studio never draws its own."""
+    service = load_service()
+    bounds = (5.955885327836842, 45.81802022980842, 10.4924973226525, 47.80830791604507)
+    lines, annotations = service.graticule_geometry(bounds, "EPSG:4326", 1.0, True)
+
+    assert lines, "the engine must generate the grid"
+    assert len(annotations) == len(lines)
+    # A meridian is a line of constant longitude; a parallel a line of
+    # constant latitude.
+    meridians = [line for line in lines if line[0][0] == line[1][0]]
+    parallels = [line for line in lines if line[0][1] == line[1][1]]
+    assert meridians and parallels
+    assert meridians[0][0][0] == 6.0
+    assert [note["text"] for note in annotations[:2]] == ["6 degE", "7 degE"]
+    assert annotations[0]["kind"] == "meridian"
+
+
+def test_the_annotations_sit_on_their_line_at_the_frames_edge():
+    """The studio says where the grid's annotations go: on the line, where it
+    leaves the frame."""
+    service = load_service()
+    bounds = (0.0, 0.0, 10.0, 10.0)
+    lines = [[(2.0, 0.0), (2.0, 10.0)]]
+    annotations = [{"kind": "meridian", "text": "2 degE"}]
+
+    class _Params:
+        def project_terrain_points(self, batch, shared_frame=False):
+            # The first point is below the frame, the second inside it.
+            return [[100.0, 400.0, 0.5], [100.0, 200.0, 0.5]]
+
+    anchors = service.graticule_label_anchors(
+        _Params(), np.zeros((64, 64), dtype=np.float32), bounds, lines, annotations, 320, 240
+    )
+    assert len(anchors) == 1
+    assert anchors[0]["text"] == "2 degE"
+    assert anchors[0]["y"] == 200.0
+    # The anchor never sits on the frame's edge, so the text is not cut off.
+    assert 0 < anchors[0]["x"] < 320
+    assert 0 < anchors[0]["y"] < 240
+
+
+def test_the_plate_furniture_is_the_engine_own():
+    """The scale bar and the north arrow are the engine's, not the studio's
+    rectangle and triangle."""
+    service = load_service()
+    bar = service.engine_scale_bar(1000.0, 240)
+    assert bar is not None and bar.shape[2] == 4
+    assert bar[..., 3].any(), "the bar must draw something"
+
+    arrow = service.engine_north_arrow(0.0, 24)
+    assert arrow is not None and arrow.shape[2] == 4
+    assert arrow[..., 3].any(), "the arrow must draw something"
+
+    turned = service.engine_north_arrow(90.0, 24)
+    assert turned is not None
+    assert not np.array_equal(arrow, turned), "the arrow must turn with the map"

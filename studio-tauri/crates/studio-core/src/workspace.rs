@@ -345,6 +345,12 @@ pub enum CartographyLayerHandoffKind {
         colour: [f32; 4],
         size_px: f32,
     },
+    Graticule {
+        interval_deg: f32,
+        colour: [f32; 4],
+        width_px: f32,
+        labels: bool,
+    },
     Plate {
         title: String,
         caption: String,
@@ -668,6 +674,17 @@ pub fn cartography_handoff(project: &Project) -> Vec<CartographyLayerHandoff> {
                     size_px: *size_px,
                 }
             }
+            crate::cartography::CartographyLayerKind::Graticule {
+                interval_deg,
+                colour,
+                width_px,
+                labels,
+            } => CartographyLayerHandoffKind::Graticule {
+                interval_deg: *interval_deg,
+                colour: *colour,
+                width_px: *width_px,
+                labels: *labels,
+            },
             crate::cartography::CartographyLayerKind::Plate {
                 title,
                 caption,

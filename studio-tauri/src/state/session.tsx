@@ -639,6 +639,19 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [addCartographyLayer],
   );
 
+  const addGraticuleLayer = useCallback(async () => {
+    await addCartographyLayer({
+      id: crypto.randomUUID(),
+      name: "Graticule",
+      visible: true,
+      type: "graticule",
+      intervalDeg: 1,
+      colour: [0.1, 0.1, 0.12, 0.75],
+      widthPx: 1,
+      labels: true,
+    });
+  }, [addCartographyLayer]);
+
   const addLabelLayer = useCallback(
     async (source: string, field: string) => {
       await addCartographyLayer({
@@ -1074,6 +1087,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       addCartographyLayer,
       addRampLayer,
       addPlateLayer,
+      addGraticuleLayer,
       addLabelLayer,
       updateCartographyLayer,
       removeCartographyLayer,
@@ -1136,6 +1150,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       addCartographyLayer,
       addRampLayer,
       addPlateLayer,
+      addGraticuleLayer,
       addLabelLayer,
       updateCartographyLayer,
       removeCartographyLayer,

@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import numpy as np
 
+from .vector import projected_depth
+
 
 def vector_batches(recipe, projected):
     from . import map_scene as ms
@@ -63,10 +65,6 @@ def vector_batches(recipe, projected):
             if len(xx) and projected is not recipe:
                 geometry = feature['geometry']
                 kind, coords = geometry['type'], geometry['coordinates']
-                distance = np.full(len(xx), np.inf)
-                offset_x = np.zeros(len(xx))
-                offset_y = np.zeros(len(xx))
-                stroke_depth = np.ones(len(xx))
                 if kind in ('Polygon', 'MultiPolygon'):
                     if surface_uv is None:
                         surface_uv = projector.params.unproject_terrain_depth(
@@ -91,19 +89,15 @@ def vector_batches(recipe, projected):
                 else:
                     inside = np.ones(len(xx), dtype=bool)
                     paths = [[coords]] if kind == 'Point' else [coords]
-                px, py = xx + 0.5, yy + 0.5
-                for path in paths:
-                    segments = zip(path, path[1:]) if len(path) > 1 else [(path[0], path[0])]
-                    for a, b in segments:
-                        dx, dy = b[0]-a[0], b[1]-a[1]
-                        length2 = dx*dx + dy*dy
-                        t = np.clip(((px-a[0])*dx+(py-a[1])*dy)/length2, 0, 1) if length2 else np.zeros(len(xx))
-                        d = (px-a[0]-t*dx)**2 + (py-a[1]-t*dy)**2
-                        nearest = d < distance
-                        distance[nearest] = d[nearest]
-                        offset_x[nearest] = (px-a[0]-t*dx)[nearest]
-                        offset_y[nearest] = (py-a[1]-t*dy)[nearest]
-                        stroke_depth[nearest] = a[2]+t[nearest]*(b[2]-a[2])
+                # The nearest path's depth and offset: the engine's own rule,
+                # shared with every caller that rasterized its own coverage.
+                stroke_depth_raster, offsets = projected_depth(rgba, paths, width, height)
+                stroke_depth = stroke_depth_raster[yy, xx]
+                offset_x = offsets[:, 0]
+                offset_y = offsets[:, 1]
+                # The offset *is* the vector from the nearest segment, so its
+                # squared length is the distance to it.
+                distance = offset_x**2 + offset_y**2
                 if kind in ('Polygon', 'MultiPolygon'):
                     line_width = feature.get('_projected_width_px', ms._render_resolve_line_width_px(
                         layer, ms._render_paint(layer, 'line'), recipe, width, height))

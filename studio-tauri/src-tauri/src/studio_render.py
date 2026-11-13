@@ -35,6 +35,10 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
+# The graticule's coordinate labels: the engine's label plan takes the size,
+# and a grid annotation reads smaller than a place name.
+GRATICULE_LABEL_SIZE_PX = 12.0
+
 
 def emit(payload: Dict[str, Any]) -> None:
     print(json.dumps(payload), flush=True)
@@ -990,7 +994,7 @@ class StudioRenderer:
                     legends.append(plate_legend(legend_name, self.range))
                 except Exception:  # noqa: BLE001 - the plate still has its title
                     pass
-            for vector in vector_layers:
+            for vector in cartography.vector_layers:
                 # The vector layer gets its own entry: its swatch and its file.
                 legends.append(
                     plate_vector_legend(
@@ -1000,8 +1004,8 @@ class StudioRenderer:
                 )
             # The furniture is the plate layer's business: each piece is
             # drawn only when the layer asks for it, and only where it is
-            # true (the scale bar needs a known ground scale, the north arrow
-            # a north-up view).
+            # true (the scale bar needs a known ground scale, the view not
+            # too oblique; the arrow turns with the map).
             caption = str(plate_layer.get("caption", "") or "")
             if not caption:
                 caption = "Forge3D Studio - %s" % Path(self.dem_path).stem
@@ -1013,9 +1017,13 @@ class StudioRenderer:
             metres_per_pixel = visible_metres / max(width, 1)
             theta = float(camera.get("thetaDeg", 45.0) or 45.0)
             phi = float(camera.get("phiDeg", 135.0) or 135.0)
-            north_up = theta <= 45.0 and min(abs(phi - 90.0), abs(phi - 450.0)) <= 3.0
-            if not bool(plate_layer.get("scaleBar", True)):
-                metres_per_pixel = None
+            # The map's rotation: the engine's azimuth runs from east towards
+            # north with the `north` camera mode the studio renders with, so
+            # at phi = 270 the camera looks north and the screen's top is
+            # north (the arrow's rotation is 0 there). The engine's arrow
+            # rotation is clockwise from north on the page — the same
+            # convention.
+            north_rotation = (phi + 90.0) % 360.0
             plate_rgb = compose_plate(
                 rgb,
                 depth,
@@ -1023,7 +1031,9 @@ class StudioRenderer:
                 legend=legend,
                 caption=caption,
                 metres_per_pixel=metres_per_pixel if theta <= 45.0 else None,
-                north_up=north_up and bool(plate_layer.get("northArrow", True)),
+                north_rotation_deg=north_rotation,
+                scale_bar=bool(plate_layer.get("scaleBar", True)),
+                north_arrow=bool(plate_layer.get("northArrow", True)),
             )
 
         png = encode_png(rgb)
@@ -1246,7 +1256,9 @@ def compose_plate(
     legend: "np.ndarray | list | None" = None,
     caption: str = "",
     metres_per_pixel: "float | None" = None,
-    north_up: bool = False,
+    north_rotation_deg: float = 0.0,
+    scale_bar: bool = True,
+    north_arrow: bool = True,
 ) -> np.ndarray:
     """A map plate: the rendered terrain cut out and laid on a white page.
 
@@ -1302,55 +1314,25 @@ def compose_plate(
         legend_img = Image.fromarray(np.ascontiguousarray(item), "RGBA")
         page.alpha_composite(legend_img, dest=(margin, legend_y))
         legend_y += item.shape[0] + 8
-    if north_up:
-        # A north arrow only where it is true: the arrow is drawn for a
-        # north-up view, not rotated by a guess.
-        arrow_x = page_w - margin - int(title_size * 0.7)
-        arrow_y = int(title_size * 0.9) + margin // 2
-        arrow_len = max(18, int(title_size * 0.9))
-        draw.polygon(
-            [
-                (arrow_x, arrow_y - arrow_len),
-                (arrow_x - arrow_len // 4, arrow_y),
-                (arrow_x + arrow_len // 4, arrow_y),
-            ],
-            fill=(38, 38, 42),
-        )
-        draw.text(
-            (arrow_x, arrow_y + 4),
-            "N",
-            fill=(38, 38, 42),
-            font=font_caption,
-            anchor="ma",
-        )
-    page.alpha_composite(Image.fromarray(np.ascontiguousarray(subject_rgba), "RGBA"), dest=(margin, header))
-    if metres_per_pixel and metres_per_pixel > 0:
-        # A scale bar in round distances, as long as it stays between 15% and
-        # 40% of the page's width.
-        target = width * 0.28
-        metres = target * metres_per_pixel
-        nice = _nice_length(metres)
-        bar_pixels = int(round(nice / metres_per_pixel))
-        if bar_pixels > 8:
-            bar_x = margin
-            bar_y = header + height - margin // 2
-            bar_h = max(3, int(title_size * 0.18))
-            draw.rectangle(
-                [
-                    bar_x,
-                    bar_y,
-                    bar_x + bar_pixels,
-                    bar_y + bar_h,
-                ],
-                fill=(38, 38, 42),
+    if north_arrow:
+        # The engine's own north arrow: the arrow geometry and its "N" label
+        # are drawn through the engine's native text engine, and the arrow
+        # turns with the map (the rotation comes from the camera's azimuth).
+        arrow = engine_north_arrow(north_rotation_deg, title_size)
+        if arrow is not None:
+            page.alpha_composite(
+                Image.fromarray(np.ascontiguousarray(arrow), "RGBA"),
+                dest=(page_w - margin - arrow.shape[1], int(title_size * 0.6) + margin // 2),
             )
-            label = _scale_label(nice)
-            draw.text(
-                (bar_x, bar_y - int(caption_size * 1.4)),
-                label,
-                fill=(54, 54, 60),
-                font=font_caption,
-                anchor="ls",
+    page.alpha_composite(Image.fromarray(np.ascontiguousarray(subject_rgba), "RGBA"), dest=(margin, header))
+    if scale_bar and metres_per_pixel and metres_per_pixel > 0:
+        # The engine's own scale bar: a graduated, geodetic bar with its label,
+        # in the round distances a map reads best.
+        bar = engine_scale_bar(metres_per_pixel, max(120, int(width * 0.28)))
+        if bar is not None:
+            page.alpha_composite(
+                Image.fromarray(np.ascontiguousarray(bar), "RGBA"),
+                dest=(margin, header + height - bar.shape[0] - margin // 2),
             )
     if caption:
         draw.text(
@@ -1361,6 +1343,50 @@ def compose_plate(
             anchor="ma",
         )
     return np.asarray(page.convert("RGB"))
+
+
+def engine_scale_bar(metres_per_pixel: float, width_px: int):
+    """The engine's scale bar for the plate (its own graduated bar and label)."""
+    try:
+        from forge3d.scale_bar import ScaleBar, ScaleBarConfig
+
+        config = ScaleBarConfig(
+            units="km",
+            style="alternating",
+            width_px=max(80, int(width_px)),
+            height_px=26,
+            divisions=4,
+            font_size=12,
+            bar_color_1=(38, 38, 42, 255),
+            bar_color_2=(255, 255, 255, 255),
+            label_color=(38, 38, 42, 255),
+            background=(255, 255, 255, 0),
+            border_color=(38, 38, 42, 255),
+        )
+        return np.asarray(ScaleBar(float(metres_per_pixel), config).render(), dtype=np.uint8)
+    except Exception:  # noqa: BLE001 - the page keeps its title without a bar
+        return None
+
+
+def engine_north_arrow(rotation_deg: float, title_size: int):
+    """The engine's north arrow for the plate (its geometry and its "N")."""
+    try:
+        from forge3d.north_arrow import NorthArrow, NorthArrowConfig
+
+        size = max(24, int(title_size * 0.9))
+        config = NorthArrowConfig(
+            style="arrow",
+            size=size,
+            rotation_deg=float(rotation_deg),
+            color=(38, 38, 42, 255),
+            background=(255, 255, 255, 0),
+            show_n_label=True,
+            font_size=max(10, int(title_size * 0.45)),
+            border_width=0,
+        )
+        return np.asarray(NorthArrow(config).render(), dtype=np.uint8)
+    except Exception:  # noqa: BLE001 - the page keeps its title without an arrow
+        return None
 
 
 def compose_legend(
@@ -1836,6 +1862,7 @@ def vector_label_plan(
     size_px: float = 14.0,
     halo_colour=(1.0, 1.0, 1.0, 0.8),
     halo_width: float = 1.5,
+    layer_id: str = "vector-labels",
 ):
     """The engine's own label plan for the layer's named features.
 
@@ -1859,7 +1886,7 @@ def vector_label_plan(
         crs=None,
         target_crs=None,
         occlusion="none",
-        layer_id="vector-labels",
+        layer_id=layer_id,
         atlas=f3d.FontAtlas.default_latin(),
     )
     for record, source in zip(layer.labels, records):
@@ -1915,6 +1942,8 @@ class PreparedCartography:
     def __init__(self) -> None:
         # The numpy path: the vector coverages and the label plans.
         self.vector_overlays: List[Any] = []
+        # The vector layers themselves, for the plate's legend.
+        self.vector_layers: List[Any] = []
         self.label_plans: List[Any] = []
         # The engine's GPU path: the batches `render_interactive` takes.
         self.vector_batches: List[Any] = []
@@ -1942,19 +1971,22 @@ def prepare_cartography(
     heights,
     dem_crs,
 ):
-    """The map's vector layers and label layers, ready to draw.
+    """The map's vector layers, graticule and label layers, ready to draw.
 
     The lines are draped on the terrain and rasterized by the engine's own
     OIT bridge; the labels are placed by the engine's label plan and shaped
     against its packaged atlas. The depth raster the engine draws with is the
-    terrain's own, so a line over the sky is dropped and the engine's GPU
-    cartography can depth-test the lines against the ground.
+    terrain's own, so a line over the sky is dropped and a line behind a ridge
+    is hidden by it.
     """
-    import numpy as np
+    import forge3d as f3d
 
     prepared = PreparedCartography()
     vector_layers = [
         layer for layer in visible if str(layer.get("type", "")) == "vector"
+    ]
+    graticule_layers = [
+        layer for layer in visible if str(layer.get("type", "")) == "graticule"
     ]
     label_layers = [
         layer for layer in visible if str(layer.get("type", "")) == "labels"
@@ -1976,7 +2008,7 @@ def prepare_cartography(
         # The rasterizer's own floor is one pixel: 0.5 and 1.0 px render
         # identically (0 changed samples, measured).
         stroke_px = max(1.0, float(vector.get("widthPx", 2.0) or 2.0))
-        overlay = vector_overlay_rgba(
+        overlay, paths = vector_overlay_rgba(
             params,
             heights,
             bounds,
@@ -1991,18 +2023,74 @@ def prepare_cartography(
         )
         if overlay is None:
             continue
-        prepared.vector_overlays.append(overlay)
-        # The engine's GPU batch: the coverage plus the depth the lines are
-        # drawn at (the terrain's own, because the lines are draped on it).
-        batch = {
-            "rgba": np.ascontiguousarray(overlay, dtype=np.uint8),
-            "depth_test": depth is not None,
-            "layer": str(vector.get("name", "vector")),
-            "terrain_draped": True,
-        }
-        if depth is not None:
-            batch["depth"] = np.ascontiguousarray(depth, dtype=np.float32)
+        # The engine's GPU batch, and the plain path's overlay: one coverage,
+        # so both paths draw the same line.
+        batch = vector_batch(
+            overlay, paths, depth, str(vector.get("name", "vector"))
+        )
+        prepared.vector_overlays.append(batch["rgba"])
+        prepared.vector_layers.append(vector)
         prepared.vector_batches.append(batch)
+
+    for grid in graticule_layers:
+        # The engine's own graticule: the meridians and parallels of the
+        # map's bounds, in the DEM's CRS, with the labels along its edges.
+        try:
+            lines, annotations = graticule_geometry(
+                bounds,
+                dem_crs,
+                float(grid.get("intervalDeg", 1.0) or 1.0),
+                bool(grid.get("labels", True)),
+            )
+        except Exception as exc:  # noqa: BLE001 - the frame must still come back
+            warn("the graticule drew nothing: %s" % exc)
+            continue
+        if not lines:
+            continue
+        overlay, paths = vector_overlay_rgba(
+            params,
+            heights,
+            bounds,
+            lines,
+            width,
+            height,
+            colour=tuple(
+                float(c) for c in grid.get("colour", (0.1, 0.1, 0.12, 0.75))
+            ),
+            stroke_px=max(1.0, float(grid.get("widthPx", 1.0) or 1.0)),
+            terrain_depth=depth,
+        )
+        if overlay is None:
+            continue
+        batch = vector_batch(
+            overlay, paths, depth, str(grid.get("name", "graticule"))
+        )
+        prepared.vector_overlays.append(batch["rgba"])
+        prepared.vector_batches.append(batch)
+        if not annotations:
+            continue
+        grid_colour = tuple(
+            float(c) for c in grid.get("colour", (0.1, 0.1, 0.12, 0.75))
+        )
+        anchors = graticule_label_anchors(
+            params, heights, bounds, lines, annotations, width, height
+        )
+        if not anchors:
+            continue
+        layer, plan = vector_label_plan(
+            vector_label_records(anchors),
+            width,
+            height,
+            colour=grid_colour,
+            size_px=GRATICULE_LABEL_SIZE_PX,
+            halo_colour=halo_for(grid_colour),
+            layer_id="graticule-labels",
+        )
+        prepared.label_plans.append((layer, plan))
+        prepared.label_batches.extend(
+            f3d.label_batches([layer], {layer.layer_id: plan}, int(width), int(height))
+        )
+        report_rejected_labels("the graticule", anchors, plan)
 
     for label_layer in label_layers:
         field = str(label_layer.get("field", "") or "")
@@ -2020,10 +2108,6 @@ def prepare_cartography(
         label_colour = tuple(
             float(c) for c in label_layer.get("colour", (0.08, 0.08, 0.1, 1.0))
         )
-        # A halo in the opposite tone keeps the text readable on any ground:
-        # light text gets a dark halo and the other way round.
-        dark_text = sum(label_colour[:3]) / 3.0 < 0.5
-        halo = (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
         anchors = vector_label_anchors(params, heights, bounds, points, width, height)
         if not anchors:
             continue
@@ -2033,37 +2117,208 @@ def prepare_cartography(
             height,
             colour=label_colour,
             size_px=float(label_layer.get("sizePx", 14.0) or 14.0),
-            halo_colour=halo,
+            halo_colour=halo_for(label_colour),
         )
         prepared.label_plans.append((layer, plan))
-        import forge3d as f3d
-
         prepared.label_batches.extend(
             f3d.label_batches([layer], {layer.layer_id: plan}, int(width), int(height))
         )
-        if not plan.accepted:
-            # Say why the labels drew nothing: the engine rejected them (a name
-            # outside the packaged atlas, say), and a silent empty layer looks
-            # like a broken control.
-            counts: Dict[str, int] = {}
-            for label in plan.rejected:
-                reason = str(getattr(label, "reason", "rejected"))
-                counts[reason] = counts.get(reason, 0) + 1
-            reasons = ", ".join(
-                "%s %d" % (reason, count) for reason, count in sorted(counts.items())
-            )
-            print(
-                json.dumps(
-                    {
-                        "event": "warning",
-                        "message": "the label layer drew nothing: %d features named, "
-                        "none accepted (%s)"
-                        % (len(anchors), reasons or "no reasons given"),
-                    }
-                ),
-                flush=True,
-            )
+        report_rejected_labels("the label layer", anchors, plan)
     return prepared
+
+
+def vector_batch(coverage, paths, terrain_depth, layer_name):
+    """The engine's GPU batch for a drawn overlay, with the ground's occlusion.
+
+    The batch carries the coverage and the depth of the lines themselves: the
+    engine's own rule (the nearest segment's interpolated depth) is the
+    engine's `projected_depth`, so the depth always matches the coverage it
+    was computed for. The occlusion is applied here, once, so the plain path's
+    composite and the engine's GPU path draw the same line: a line whose depth
+    is behind the ground's depth at that pixel is hidden by the ground.
+    """
+    import numpy as np
+
+    from forge3d.vector import projected_depth
+
+    height, width = np.asarray(coverage).shape[:2]
+    line_depth, offsets = projected_depth(coverage, paths, int(width), int(height))
+    if terrain_depth is not None:
+        hidden = hidden_by_ground(coverage, line_depth, terrain_depth, offsets)
+        if hidden.any():
+            coverage = np.asarray(coverage).copy()
+            coverage[hidden] = 0
+    batch = {
+        "rgba": np.ascontiguousarray(coverage, dtype=np.uint8),
+        "depth_test": terrain_depth is not None,
+        "layer": str(layer_name),
+        "terrain_draped": True,
+    }
+    if terrain_depth is not None:
+        batch["depth"] = np.ascontiguousarray(line_depth, dtype=np.float32)
+    return batch
+
+
+def graticule_geometry(bounds, dem_crs, interval_deg, with_labels):
+    """The engine's graticule: the grid lines and what each one is worth.
+
+    The engine generates the grid (`forge3d.graticule.generate_graticule`): the
+    meridians and the parallels of the map's own bounds, in the DEM's own CRS,
+    and the coordinate each line stands for. The bounds the engine takes are
+    geographic, so a projected DEM's bounds are transformed with the engine's
+    own `transform_bounds`.
+
+    Returns `(lines, annotations)`: the grid lines and, for each of them, the
+    engine's annotation (`{"kind": "meridian" | "parallel", "text": "8 degE"}`).
+    """
+    from forge3d.graticule import generate_graticule
+
+    west, south, east, north = (float(value) for value in bounds)
+    target = str(dem_crs or "EPSG:4326")
+    if crs_code(target) == "4326":
+        geographic = (west, south, east, north)
+    else:
+        from forge3d.gis import transform_bounds
+
+        geographic = transform_bounds(
+            target, "EPSG:4326", (west, south, east, north), densify=8
+        )
+    grid = generate_graticule(
+        geographic,
+        interval_deg=float(interval_deg),
+        target_crs=target,
+        include_labels=bool(with_labels),
+    )
+    lines = []
+    for feature in grid.get("features", ()):
+        geometry = feature.get("geometry") or {}
+        if str(geometry.get("type", "")).lower() != "linestring":
+            continue
+        coordinates = geometry.get("coordinates") or []
+        if len(coordinates) >= 2:
+            lines.append([(float(x), float(y)) for x, y in coordinates])
+    # The engine pairs every grid line with its annotation, in the same order.
+    annotations = []
+    for label in grid.get("labels", ()):
+        text = str(label.get("text", "") or "")
+        if not text:
+            continue
+        annotations.append({"kind": str(label.get("kind", "") or ""), "text": text})
+    return lines, annotations
+
+
+def graticule_label_anchors(params, heights, bounds, lines, annotations, width, height):
+    """Where the grid's annotations go: on their line, at the frame's edge.
+
+    The engine says what each grid line is worth ("8 degE"); the studio says
+    where that goes: the point of the line that leaves the frame — the bottom
+    edge for a meridian, the left edge for a parallel — which is where a map
+    prints its grid annotations. The anchor is a little inside the frame, so
+    the text is never cut off.
+    """
+    west, south, east, north = (float(value) for value in bounds)
+    margin = 24.0
+    anchors = []
+    for index, (line, annotation) in enumerate(zip(lines, annotations)):
+        text = str(annotation.get("text", "") or "")
+        kind = str(annotation.get("kind", "") or "")
+        if not text or len(line) < 2:
+            continue
+        batch = []
+        for x, y in line:
+            u = (float(x) - west) / (east - west)
+            v = (north - float(y)) / (north - south)
+            batch.append([u, v, _sample_height(heights, u, v), 0.0])
+        projected = params.project_terrain_points(batch, shared_frame=True)
+        best = None
+        for value in projected:
+            if value is None:
+                continue
+            px, py, depth = float(value[0]), float(value[1]), float(value[2])
+            if not (0.0 <= px < width and 0.0 <= py < height):
+                continue
+            # The point that leaves the frame: the lowest for a meridian, the
+            # leftmost for a parallel.
+            score = py if kind == "meridian" else -px
+            if best is None or score > best[0]:
+                best = (score, px, py, depth)
+        if best is None:
+            continue
+        anchors.append(
+            {
+                "id": "graticule-%d" % index,
+                "text": text,
+                "x": min(max(best[1], margin), width - margin),
+                "y": min(max(best[2], margin), height - margin),
+                "depth": best[3],
+            }
+        )
+    return anchors
+
+
+def halo_for(colour):
+    """The halo that keeps a text readable on any ground.
+
+    Light text gets a dark halo and the other way round.
+    """
+    dark_text = sum(colour[:3]) / 3.0 < 0.5
+    return (0.0, 0.0, 0.0, 0.8) if dark_text else (1.0, 1.0, 1.0, 0.8)
+
+
+def report_rejected_labels(what: str, anchors, plan) -> None:
+    """Say why the labels drew nothing.
+
+    The engine rejected them (a name outside the packaged atlas, say), and a
+    silent empty layer looks like a broken control.
+    """
+    if plan.accepted:
+        return
+    counts: Dict[str, int] = {}
+    for label in plan.rejected:
+        reason = str(getattr(label, "reason", "rejected"))
+        counts[reason] = counts.get(reason, 0) + 1
+    reasons = ", ".join(
+        "%s %d" % (reason, count) for reason, count in sorted(counts.items())
+    )
+    warn(
+        "%s drew nothing: %d features named, none accepted (%s)"
+        % (what, len(anchors), reasons or "no reasons given")
+    )
+
+
+def warn(message: str) -> None:
+    """A warning the studio can show, as the service's own JSON event."""
+    print(json.dumps({"event": "warning", "message": str(message)}), flush=True)
+
+
+def hidden_by_ground(coverage, line_depth, terrain_depth, offsets):
+    """The pixels where the ground stands in front of the line.
+
+    The engine's own rule (its recipe path applies the same test): a line is
+    hidden where its depth is behind the ground's depth at that pixel. The
+    bias is the terrain's depth gradient across the pixel times the line's
+    sub-pixel offset from the nearest segment, so a line that lies *on* the
+    ground does not flicker against it.
+    """
+    import numpy as np
+
+    # The covered pixels, in the order the depth raster reports them.
+    yy, xx = np.nonzero(np.asarray(coverage)[..., 3])
+    if not len(xx):
+        return np.zeros(terrain_depth.shape, dtype=bool)
+    dx = np.abs(np.diff(terrain_depth, axis=1))
+    dy = np.abs(np.diff(terrain_depth, axis=0))
+    dx = np.maximum(np.pad(dx, ((0, 0), (0, 1))), np.pad(dx, ((0, 0), (1, 0))))
+    dy = np.maximum(np.pad(dy, ((0, 1), (0, 0))), np.pad(dy, ((1, 0), (0, 0))))
+    bias = (
+        dx[yy, xx] * np.abs(offsets[:, 0])
+        + dy[yy, xx] * np.abs(offsets[:, 1])
+        + 4 * np.finfo(np.float32).eps
+    )
+    hidden = np.zeros(terrain_depth.shape, dtype=bool)
+    away = line_depth[yy, xx] > terrain_depth[yy, xx] + bias
+    hidden[yy[away], xx[away]] = True
+    return hidden
 
 
 def terrain_depth_raster(params, heights, width: int, height: int):
@@ -2157,14 +2412,20 @@ def vector_overlay_rgba(
         return None
 
     # 3. the rasterizer works in NDC; the engine's projection returns pixels.
+    #    The pixel depth rides along: the renderer needs the depth of the line
+    #    itself, not the terrain's, to know that a ridge stands in front of it.
     polylines = []
+    pixel_paths = []
     for values in projected:
         current = []
+        current_pixels = []
         for value in values:
             if value is None:
                 if len(current) >= 2:
                     polylines.append(current)
+                    pixel_paths.append(current_pixels)
                 current = []
+                current_pixels = []
                 continue
             px, py, depth = float(value[0]), float(value[1]), float(value[2])
             if terrain_depth is not None:
@@ -2178,11 +2439,15 @@ def vector_overlay_rgba(
                         # No terrain at this pixel: the line is over the sky.
                         if len(current) >= 2:
                             polylines.append(current)
+                            pixel_paths.append(current_pixels)
                         current = []
+                        current_pixels = []
                         continue
             current.append((2.0 * px / max(width, 1) - 1.0, 1.0 - 2.0 * py / max(height, 1)))
+            current_pixels.append((px, py, depth))
         if len(current) >= 2:
             polylines.append(current)
+            pixel_paths.append(current_pixels)
     if not polylines:
         return None
 
@@ -2210,7 +2475,9 @@ def vector_overlay_rgba(
         polyline_rgba=[colour for _ in segments],
         stroke_width=[float(stroke_px) for _ in segments],
     )
-    return np.asarray(overlay, dtype=np.uint8)
+    # The projected paths the coverage was drawn from, so the caller can ask
+    # the engine for the depth that matches those pixels.
+    return np.asarray(overlay, dtype=np.uint8), pixel_paths
 
 
 def composite_overlay(rgb: np.ndarray, overlay) -> np.ndarray:

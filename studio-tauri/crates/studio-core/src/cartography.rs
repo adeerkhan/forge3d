@@ -85,12 +85,25 @@ pub enum CartographyLayerKind {
         /// The label size in pixels.
         size_px: f32,
     },
+    /// The graticule: the grid of meridians and parallels, with its
+    /// coordinate labels. The engine generates the grid and places the labels;
+    /// the layer only says how often the grid repeats and how it is drawn.
+    Graticule {
+        /// The grid's interval in degrees.
+        interval_deg: f32,
+        /// The line colour, RGBA in 0..=1.
+        colour: [f32; 4],
+        /// The line's symbol width in pixels.
+        width_px: f32,
+        /// Draw the coordinate labels along the grid.
+        labels: bool,
+    },
     /// The map plate: the page the map is cut out on, with its furniture.
     Plate {
         title: String,
         /// The line along the bottom of the page.
         caption: String,
-        /// The north arrow (only where the view is north-up).
+        /// The north arrow (turned to the map's orientation).
         north_arrow: bool,
         /// The scale bar (only where the ground scale is known).
         scale_bar: bool,
@@ -112,6 +125,7 @@ impl CartographyLayerKind {
             CartographyLayerKind::Imagery { .. } => "Imagery".to_owned(),
             CartographyLayerKind::Vector { .. } => "Vector layer".to_owned(),
             CartographyLayerKind::Labels { .. } => "Labels".to_owned(),
+            CartographyLayerKind::Graticule { .. } => "Graticule".to_owned(),
             CartographyLayerKind::Plate { .. } => "Map plate".to_owned(),
         }
     }
@@ -188,6 +202,32 @@ impl CartographyLayerKind {
                 }
                 Ok(())
             }
+            CartographyLayerKind::Graticule {
+                interval_deg,
+                colour,
+                width_px,
+                ..
+            } => {
+                // The engine takes any positive interval; the studio's range
+                // is inside it (a tenth of a degree to half a hemisphere).
+                if !interval_deg.is_finite() || !(0.05..=30.0).contains(interval_deg) {
+                    return Err(
+                        "the graticule's interval must be between 0.05 and 30 degrees".to_owned(),
+                    );
+                }
+                if !colour
+                    .iter()
+                    .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+                {
+                    return Err(
+                        "the graticule's colour channels must be between 0 and 1".to_owned()
+                    );
+                }
+                if !width_px.is_finite() || !(1.0..=20.0).contains(width_px) {
+                    return Err("the graticule's width must be between 1 and 20 pixels".to_owned());
+                }
+                Ok(())
+            }
             CartographyLayerKind::Plate { .. } => Ok(()),
         }
     }
@@ -246,6 +286,37 @@ mod tests {
         let back: CartographyLayer = serde_json::from_str(&text).expect("deserialize");
         assert_eq!(layer, back);
         assert!(text.contains("\"type\":\"vector\""), "{text}");
+    }
+
+    #[test]
+    fn the_graticule_keeps_the_engine_own_ranges() {
+        let grid = |interval_deg: f32, width_px: f32| CartographyLayerKind::Graticule {
+            interval_deg,
+            colour: [0.1, 0.1, 0.12, 0.75],
+            width_px,
+            labels: true,
+        };
+        assert!(grid(1.0, 1.0).validate().is_ok());
+        // The engine takes any positive interval; the studio's range is
+        // inside it, and it refuses what the engine would refuse.
+        assert!(grid(0.0, 1.0).validate().is_err());
+        assert!(grid(45.0, 1.0).validate().is_err());
+        assert!(grid(1.0, 0.0).validate().is_err());
+    }
+
+    #[test]
+    fn the_graticule_round_trips_through_json() {
+        let layer = CartographyLayer::new(CartographyLayerKind::Graticule {
+            interval_deg: 0.5,
+            colour: [0.1, 0.1, 0.12, 0.75],
+            width_px: 1.0,
+            labels: true,
+        });
+        let text = serde_json::to_string(&layer).expect("serialize");
+        let back: CartographyLayer = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(layer, back);
+        assert!(text.contains("\"type\":\"graticule\""), "{text}");
+        assert!(text.contains("\"intervalDeg\":0.5"), "{text}");
     }
 
     #[test]

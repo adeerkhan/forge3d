@@ -17,6 +17,7 @@ const KIND_LABEL: Record<CartographyLayer["type"], string> = {
   imagery: "imagery",
   vector: "vector",
   labels: "labels",
+  graticule: "grid",
   plate: "plate",
 };
 
@@ -33,6 +34,10 @@ function swatch(layer: CartographyLayer): string {
       )}, ${Math.round((layer.colour?.[2] ?? 0.1) * 255)}, 1)`;
     case "labels":
       return "#1c1f26";
+    case "graticule":
+      return `rgba(${Math.round((layer.colour?.[0] ?? 0.1) * 255)}, ${Math.round(
+        (layer.colour?.[1] ?? 0.1) * 255,
+      )}, ${Math.round((layer.colour?.[2] ?? 0.12) * 255)}, 1)`;
     case "plate":
       return "#e8ebf0";
     default:
@@ -151,6 +156,9 @@ function AddLayer() {
           )}
           <button type="button" onClick={() => void actions.addRampLayer("viridis")}>
             Elevation ramp
+          </button>
+          <button type="button" onClick={() => void actions.addGraticuleLayer()}>
+            Graticule
           </button>
           <button type="button" onClick={() => void actions.addPlateLayer("")}>
             Map plate

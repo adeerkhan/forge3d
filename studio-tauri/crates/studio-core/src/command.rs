@@ -63,9 +63,11 @@ impl CommandError {
     }
 }
 
-/// The map look's camera: from the north, 31 degrees off straight down — the
-/// gallery's Swiss land-cover framing.
-const MAP_AZIMUTH_DEG: f64 = 90.0;
+/// The map look's camera: from the south, 31 degrees off straight down — the
+/// gallery's Swiss land-cover framing. North is up the screen (the engine's
+/// `north` camera mode reads the azimuth from east towards north, so the
+/// north-up view stands at 270°; at 90° the map showed upside down).
+const MAP_AZIMUTH_DEG: f64 = 270.0;
 const MAP_POLAR_DEG: f64 = 31.0;
 /// The gallery's sun: north-west, 24 degrees above the horizon.
 const MAP_SUN_AZIMUTH_DEG: f64 = 315.0;

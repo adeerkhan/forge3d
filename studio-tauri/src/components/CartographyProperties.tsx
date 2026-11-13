@@ -171,6 +171,58 @@ export function CartographyProperties() {
             </p>
           </>
         )}
+        {layer.type === "graticule" && (
+          <>
+            <NumberField
+              label="Interval (degrees)"
+              value={layer.intervalDeg ?? 1}
+              step={0.05}
+              min={0.05}
+              max={30}
+              onCommit={(intervalDeg) => update({ intervalDeg })}
+            />
+            <NumberField
+              label="Width (px)"
+              value={layer.widthPx ?? 1}
+              step={1}
+              min={1}
+              max={20}
+              onCommit={(widthPx) => update({ widthPx })}
+            />
+            <div className="pair">
+              {(["R", "G", "B"] as const).map((channel, index) => (
+                <NumberField
+                  key={channel}
+                  label={channel}
+                  value={layer.colour?.[index] ?? 0}
+                  step={0.05}
+                  min={0}
+                  max={1}
+                  onCommit={(value) => {
+                    const colour = [...(layer.colour ?? [0.1, 0.1, 0.12, 0.75])] as [
+                      number,
+                      number,
+                      number,
+                      number,
+                    ];
+                    colour[index] = value;
+                    update({ colour });
+                  }}
+                />
+              ))}
+            </div>
+            <Toggle
+              label="Coordinate annotations"
+              checked={layer.labels ?? true}
+              onChange={(labels) => update({ labels })}
+            />
+            <p className="hint">
+              The engine generates the grid of meridians and parallels for the
+              map&apos;s own bounds, and the engine&apos;s label plan places the
+              coordinate annotations where each line leaves the frame.
+            </p>
+          </>
+        )}
         {layer.type === "imagery" && (
           <>
             <NumberField

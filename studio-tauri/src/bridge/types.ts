@@ -97,7 +97,14 @@ export interface CartographyLayer {
   name: string;
   /** The eye: a hidden layer is not drawn. */
   visible: boolean;
-  type: "relief" | "elevationRamp" | "imagery" | "vector" | "labels" | "plate";
+  type:
+    | "relief"
+    | "elevationRamp"
+    | "imagery"
+    | "vector"
+    | "labels"
+    | "graticule"
+    | "plate";
   /** elevationRamp */
   colormap?: string;
   strength?: number;
@@ -114,6 +121,9 @@ export interface CartographyLayer {
   source?: string;
   field?: string;
   sizePx?: number;
+  /** graticule */
+  intervalDeg?: number;
+  labels?: boolean;
   /** plate */
   title?: string;
   caption?: string;

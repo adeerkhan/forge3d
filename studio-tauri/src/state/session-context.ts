@@ -108,6 +108,7 @@ export interface SessionApi {
     addCartographyLayer(layer: CartographyLayer, index?: number): Promise<void>;
     addRampLayer(colormap: string): Promise<void>;
     addPlateLayer(title: string): Promise<void>;
+    addGraticuleLayer(): Promise<void>;
     addLabelLayer(source: string, field: string): Promise<void>;
     updateCartographyLayer(layer: CartographyLayer): Promise<void>;
     removeCartographyLayer(id: string): Promise<void>;
