@@ -905,6 +905,34 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   the map upside down for the engine's `north` camera mode; it now stands at
   270.
 
+### 5.29 MapScene — the first mapping: the still (0.5 day) — **partial**
+
+- **A still can render through the engine's `MapScene` recipe now.** The
+  service composes a `TerrainSource` from the heights it already scaled into
+  the view budget, an `OrbitCamera` from the request, a `LightingPreset`
+  carrying the sun and the IBL's path/intensity, and the recipe's own
+  `OutputSpec`, then calls `scene.render()`. The studio's numpy cartography
+  sits on top, as it does on the plain path. `RenderSettings::render_via_mapscene`
+  / the "MapScene" toggle in the Inspector's Stills section switches the still
+  over; `renderPath: "mapscene"` reports the path.
+- **The recipe produces a different image, not a matching one.** Measured on
+  the Swiss DEM (900×700, phi 270): the recipe's alpine output is bright, low
+  contrast, green-tinted — the IBL and material shading read stronger there
+  than on the live interactive path, and the studio's tuning (TAA history,
+  exposure compression) does not exist on the recipe's `pbr_pom` path. The
+  path does not match the current default yet and is a development toggle, not
+  a switch.
+- **The plate drops silently on the recipe path.** The recipe produces
+  nothing with a depth AOV, so `compose_plate` cannot cut the terrain out of
+  the frame; a warning is emitted and the plate file is not written (the
+  default AOV/plat path still produces it).
+- **What is next for the convergence** — in order: (1) the recipe must carry
+  the studio's depth AOV so the plate works; (2) the recipe must run the
+  studio's IBL/exposure exactly as the interactive path does, so the look
+  matches byte-for-byte; (3) the still/preview path switches to the recipe; the
+  service stops hand-building `make_terrain_params_config`; (4) the engine's
+  own overlay layer takes over the colormap and the imagery drape.
+
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 
 **Trigger:** a user asks for AOVs or cleaner stills.

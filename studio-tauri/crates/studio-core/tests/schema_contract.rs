@@ -80,6 +80,7 @@ fn project_document_key_shape_is_stable() {
             "clouds",
             "bloom",
             "vignette",
+            "renderViaMapscene",
         ],
     );
     assert_eq!(value["render"]["environmentBackgroundIntensity"], 1.0);
@@ -108,6 +109,7 @@ fn project_document_key_shape_is_stable() {
     );
     assert_eq!(value["render"]["bloom"]["enabled"], false);
     assert_eq!(value["render"]["vignette"], 0.0);
+    assert_eq!(value["render"]["renderViaMapscene"], false);
     // The default project uses the built-in studio sky.
     assert_eq!(value["render"]["environment"], serde_json::Value::Null);
 

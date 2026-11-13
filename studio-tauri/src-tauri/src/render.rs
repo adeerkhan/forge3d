@@ -523,6 +523,8 @@ pub struct RenderRequest {
     pub bloom_softness: f32,
     pub bloom_intensity: f32,
     pub vignette: f32,
+    /// Render the still through the engine's MapScene recipe (development).
+    pub render_via_mapscene: bool,
 }
 
 impl RenderRequest {
@@ -565,6 +567,7 @@ impl RenderRequest {
         self.bloom_softness = settings.bloom.softness;
         self.bloom_intensity = settings.bloom.intensity;
         self.vignette = settings.vignette;
+        self.render_via_mapscene = settings.render_via_mapscene;
         self
     }
 
@@ -654,6 +657,7 @@ impl RenderRequest {
                     "depth": final_quality && (self.aov_depth || self.has_plate()),
                 },
                 "denoise": final_quality && self.still_denoise,
+                "mapsceneStill": self.render_via_mapscene,
                 "shadowTechnique": self.shadow_technique,
                 "shadowResolution": self.shadow_resolution,
                 // Terrain self-shadowing. Cheap enough for previews (one ray
@@ -810,6 +814,7 @@ impl RenderRequest {
             bloom_softness: 0.2,
             bloom_intensity: 0.3,
             vignette: 0.0,
+            render_via_mapscene: false,
         })
     }
 }
@@ -872,6 +877,7 @@ mod tests {
             bloom_softness: 0.2,
             bloom_intensity: 0.3,
             vignette: 0.0,
+            render_via_mapscene: false,
         }
     }
 
@@ -1726,5 +1732,20 @@ mod tests {
         assert_eq!(frame.radius, 900.0);
         assert_eq!(frame.target, [4.0, 5.0, 6.0]);
         assert_eq!(frame.fov_deg, 30.0);
+    }
+
+    #[test]
+    fn the_mapscene_still_flag_rides_the_payload_in_both_qualities() {
+        let settings = studio_core::RenderSettings {
+            render_via_mapscene: true,
+            ..studio_core::RenderSettings::default()
+        };
+        let with_flag = request().with_settings(&settings);
+        for quality in ["preview", "final"] {
+            let payload = with_flag.to_payload(quality, None);
+            assert_eq!(payload["quality"]["mapsceneStill"], true, "{quality}");
+        }
+        let plain = request().to_payload("final", None);
+        assert_eq!(plain["quality"]["mapsceneStill"], false);
     }
 }

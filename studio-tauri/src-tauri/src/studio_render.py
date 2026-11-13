@@ -259,6 +259,106 @@ class StudioRenderer:
         # frames, against the plain path's 2.582).
         return frames[-1].astype(np.uint8)
 
+    def _mapscene_still(
+        self,
+        width: int,
+        height: int,
+        camera: Mapping[str, Any],
+        sun: Mapping[str, Any],
+        environment,
+        output_path: str,
+        exposure: float = 1.35,
+    ) -> np.ndarray:
+        """The still through the engine's MapScene recipe.
+
+        The recipe declares the terrain, the camera, the sun and the
+        environment, and calls the engine's own composition — the terrain
+        pass runs the same pipeline the hand-built params took, but the
+        studio stops hand-building every keyword. The heights go in as the
+        studio scaled them; the camera's radius and target are scaled the
+        same way. Post-processing (gradients, vignette, the plate) is the
+        studio's own and runs on the frame afterwards.
+        """
+        from pathlib import Path
+
+        import forge3d as f3d
+
+        span_x, span_y = self.span_x * self.scale, self.span_y * self.scale
+        heights = self.heights
+        mean_z = float(heights.mean())
+        res_x = span_x / max(1.0, float(heights.shape[1]))
+        res_y = span_y / max(1.0, float(heights.shape[0]))
+
+        def _v(key: str, default: float) -> float:
+            value = camera.get(key, default)
+            return float(value) if value is not None else float(default)
+
+        target = camera.get("target") or [0.0, 0.0, mean_z]
+        target = [
+            float(target[0]) * self.scale,
+            float(target[1]) * self.scale,
+            float(target[2]) * self.scale,
+        ]
+        environment_path = str(Path(self.sky_path).resolve()) if environment is None else str(environment)
+        if not Path(environment_path).exists():
+            environment_path = str(Path(self.sky_path).resolve())
+
+        terrain = f3d.TerrainSource(
+            data=heights,
+            crs=self.dem_crs,
+            metadata={
+                "source_id": "studio-dem",
+                "width": int(heights.shape[1]),
+                "height": int(heights.shape[0]),
+                "bounds": list(self.dem_bounds) if self.dem_bounds else None,
+                "resolution": (res_x, res_y),
+                "asset_status": "fixture",
+            },
+            elevation_sampling_available=True,
+        )
+        camera_az = _v("phiDeg", 90.0)
+        radius = float(camera.get("radius") or 1.5 * max(span_x, span_y)) * self.scale
+        scene = f3d.MapScene(
+            terrain=terrain,
+            camera=f3d.OrbitCamera(
+                target=tuple(target),
+                distance=radius,
+                azimuth_deg=camera_az,
+                elevation_deg=_v("thetaDeg", 45.0),
+                fov_deg=_v("fovDeg", 45.0),
+            ),
+            lighting=f3d.LightingPreset(
+                name="studio-daylight",
+                intensity=float(sun.get("intensity", 3.0)),
+                sun_direction=(
+                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
+                    * math.cos(math.radians(float(sun.get("azimuthDeg", 135.0)))),
+                    math.cos(math.radians(float(sun.get("elevationDeg", 35.0))))
+                    * math.sin(math.radians(float(sun.get("azimuthDeg", 135.0)))),
+                    math.sin(math.radians(float(sun.get("elevationDeg", 35.0)))),
+                ),
+                settings={
+                    "camera": {"camera_mode": "mesh:zup"},
+                    "terrain_shading_model": "lambert_physical",
+                    "hue_variation_strength": 0.0,
+                    "albedo_mode": "material",
+                    "colormap_strength": 0.0,
+                    "renderer_config": {
+                        "ibl": {"path": environment_path},
+                        "gi": {"modes": ["ibl"]},
+                        "lighting": {"exposure": float(exposure)},
+                    },
+                },
+            ),
+            layers=[],
+            output=f3d.OutputSpec(width=width, height=height, format="png", path=output_path),
+        )
+        scene.render()
+        from PIL import Image
+
+        frame = np.asarray(Image.open(output_path).convert("RGB"), dtype=np.float32) / 255.0
+        return frame
+
     def environment_map(self, path: Optional[str]):
         """The IBL for one frame: the project's HDRI, or the built-in studio sky.
 
@@ -915,7 +1015,40 @@ class StudioRenderer:
             self.heights,
             self.dem_crs,
         )
-        if want_aov or want_denoise:
+        aov_frame = None
+        if bool(quality.get("mapsceneStill")):
+            # One still through the engine's MapScene recipe instead of the
+            # hand-built params + interactive path. The recipe declares the
+            # terrain, the camera, the sun and the environment, and the engine
+            # compiles the frame — the studio stops hand-building the keyword
+            # list. The cartography layers the studio already composites
+            # (vectors, labels, graticule) are drawn by the same numpy
+            # compositor the plain path uses, so the difference under review is
+            # the terrain pass only.
+            import tempfile
+
+            stem = Path(output_path).with_suffix("") if output_path else None
+            if stem is not None:
+                stem = stem.with_name(stem.name + "_mapscene")
+                Path(stem.parent).mkdir(parents=True, exist_ok=True)
+                mapscene_path = str(stem) + ".png"
+            else:
+                mapscene_path = str(Path(tempfile.gettempdir()) / "forge3d-mapscene-still.png")
+            image = self._mapscene_still(
+                width,
+                height,
+                camera,
+                sun,
+                environment,
+                mapscene_path,
+                exposure=float(request.get("exposure", 1.35)),
+            )
+            # The recipe returns 0..1 floats; the rest of the path is uint8.
+            image = np.ascontiguousarray(
+                np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
+            )
+            render_path = "mapscene"
+        elif want_aov or want_denoise:
             # The engine's AOV renderer is the plain path: it has no quality
             # surface, so the AOV/denoise finals cannot carry the screen-space
             # effects. The path is reported in the reply.
@@ -936,9 +1069,12 @@ class StudioRenderer:
             aov_frame = None
             render_path = "concordia"
         rgb = image[:, :, :3].astype(np.uint8)
-        if render_path == "plain":
-            # The plain path has no GPU cartography: the overlays are
-            # composited over the frame here.
+        if render_path in ("plain", "mapscene"):
+            # Neither the AOV renderer nor the MapScene recipe carries the
+            # studio's numpy cartography: the overlays are composited over the
+            # frame here. The recipe moved the terrain pass into the engine; the
+            # vector/label/graticule compositor stays the studio's until the
+            # recipe layers build it.
             rgb = cartography.composite_overlays(rgb)
 
         if want_denoise:
@@ -974,6 +1110,20 @@ class StudioRenderer:
             if str(layer.get("type", "")) == "plate":
                 plate_layer = layer
         plate_rgb = None
+        plate_skipped_for = None
+        if plate_layer is not None and (aov_frame is None or not getattr(aov_frame, "has_depth", False)):
+            plate_skipped_for = str(plate_layer.get("name", "plate"))
+        if plate_skipped_for:
+            print(
+                json.dumps(
+                    {
+                        "event": "warning",
+                        "message": "the MapScene still has no depth AOV, so the plate "
+                        "layer %r was not composited; the AOV finals keep the plate." % plate_skipped_for,
+                    }
+                ),
+                flush=True,
+            )
         if (
             plate_layer is not None
             and aov_frame is not None

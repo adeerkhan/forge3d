@@ -29,12 +29,13 @@ Two rules govern the table:
 | 12 | Map plate, map furniture, categorical legend | done |
 | 13 | The map look (one button), the release audit as a CI gate | done |
 | 14 | **The engine's cartographic tier** (vectors, labels, furniture) | shipped: lines, labels, furniture and the graticule |
-| 15 | Convergence on `MapScene` as the scene model | design increment, trigger-gated |
+| 15 | Convergence on `MapScene` as the scene model | partial: stills can render through the engine's `MapScene` recipe (development preview) |
 
-Studio exposes **85 controls** — the app's 55 numeric fields, 3 range sliders,
-18 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
-predated the vector layer's colour, width and label controls, and the
-graticule's six came with the grid) — over 28
+Studio exposes **86 controls** — the app's 55 numeric fields, 3 range sliders,
+19 toggles, 5 choice fields and 4 text fields (the earlier count, 68,
+predated the vector layer's colour, width and label controls, the
+graticule's six came with the grid, and the MapScene still preview came
+with them) — over 28
 render settings, the scene model (terrain, mesh, camera, light), the timeline,
 the map plate and the map's layer stack. The engine's
 public Python surface is **383 names** (the label compositor joined it); the
@@ -146,6 +147,19 @@ the plate's scale bar and north arrow are the engine's own (`ScaleBar`,
 engine's label plan. Still open in the tier: polygons, a legend for the
 vector attributes, and labels occluded by the terrain's ridges.
 
+**Phase 15 (MapScene — development preview).** A still can render through the
+engine's `MapScene` recipe now: the studio composes a `TerrainSource` from the
+DEM, the camera and the lighting recipe the studio asks for, the engine
+compiles and renders the frame, and Studio composites the numpy cartography
+(and the plate) on top. The path is `RenderSettings::render_via_mapscene` /
+the "MapScene" toggle in the Inspector's Stills section; the reply reports
+`renderPath: "mapscene"`. Measured on the Swiss DEM at 900×700, phi 270: the
+recipe path's output is a **washed out green frame** — the recipe's IBL and
+material shading produce a different character, not a match, and the plate is
+dropped because the recipe produces no depth AOV (the reply warns). Per the
+roadmap's §5.29, the convergence is to make the recipe the default path; this
+increment ships the recipe render as a preview so it can be compared, not a
+switch.
 **Converge on `MapScene`.** The engine's typed map scene carries labels,
 buildings, 3D Tiles, furniture, graticules and bundles; Studio has its own
 model and its own service. The map's layer stack (above) is shaped like

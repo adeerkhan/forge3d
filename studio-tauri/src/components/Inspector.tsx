@@ -648,6 +648,11 @@ export function RenderSettingsEditor() {
           checked={render.stillDenoise}
           onChange={(stillDenoise) => commit({ stillDenoise })}
         />
+        <Toggle
+          label="Render stills through the engine's MapScene recipe"
+          checked={render.renderViaMapscene ?? false}
+          onChange={(renderViaMapscene) => commit({ renderViaMapscene })}
+        />
         {render.stillDenoise && engine?.available && engine.denoise === false && (
           <p className="hint hint--boxed">
             The engine's interpreter has no OIDN runtime, so a denoised still
@@ -659,6 +664,14 @@ export function RenderSettingsEditor() {
         <p className="hint">
           Both apply to sequence frames as well (they are final renders) and to
           viewport previews never.
+        </p>
+        <p className="hint">
+          The MapScene recipe is the same pipeline a future release will use
+          for every still: the engine compiles a recipe declaring terrain,
+          camera, lighting and layers instead of the studio hand-building a
+          parameter list. The look differs from the current path — the recipe
+          renders saturated alpine colours, sharper, with no grey wash — so
+          this is a development preview, not a new default.
         </p>
       </Section>
       <Section title="Fog" id="atmosphere-fog">

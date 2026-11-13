@@ -188,6 +188,8 @@ export interface RenderSettings {
   /** Final-quality OIDN denoise of the beauty pass. Needs an OIDN runtime
    *  beside the engine; the render fails loudly without one. */
   stillDenoise: boolean;
+  /** Render stills through the engine's MapScene recipe (development). */
+  renderViaMapscene: boolean;
   /** Shadow filter: PCF is the cheap inset filter, PCSS adds a blocker search. */
   shadowTechnique: ShadowTechnique;
   /** Shadow-map edge length in texels (256-8192); bigger is crisper and slower. */

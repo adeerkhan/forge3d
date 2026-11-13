@@ -934,3 +934,33 @@ def test_the_plate_furniture_is_the_engine_own():
     turned = service.engine_north_arrow(90.0, 24)
     assert turned is not None
     assert not np.array_equal(arrow, turned), "the arrow must turn with the map"
+
+
+def test_mapscene_still_is_opted_into():
+    """The MapScene recipe render is opt-in (`quality.mapsceneStill`); the
+    default still path does not go through it."""
+    service = load_service()
+    source = SERVICE.read_text()
+    # The service always goes through the recipe before reporting `mapscene`:
+    # the flag lives in the render body, and is honoured before the
+    # TerrainRenderParams-driven interactive path is picked.
+    assert 'quality.get("mapsceneStill")' in source
+    assert '"renderPath": render_path' in source
+    assert '"mapscene"' in source
+    # The recipe render must use the engine's own recipe compilation, which
+    # goes through `TerrainSource` + `MapScene.render()`.
+    assert "f3d.TerrainSource" in source
+    assert "scene.render()" in source
+
+
+def test_mapscene_still_compiles_a_recipe_before_rendering():
+    """The MapScene dev path must build the recipe before rendering; no
+    ad-hoc hand-built params sneak into it."""
+    service = load_service()
+    source = SERVICE.read_text()
+    recipe_at = source.index("f3d.MapScene(")
+    assert source.index("self.renderer.render_interactive") < recipe_at
+    assert source.index("self.renderer.render_interactive") < source.index(
+        '"renderPath": render_path'
+    )
+    assert source.index("f3d.TerrainSource") < recipe_at

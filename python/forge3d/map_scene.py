@@ -1497,6 +1497,8 @@ def _build_mapscene_terrain_params(
     configured_material_slope_bias = settings.get("material_slope_bias")
     configured_material_layer_centers = settings.get("material_layer_centers")
     camera_mode = _mapscene_effective_camera_mode(recipe)
+    shading_model = settings.get("terrain_shading_model")
+    shading_model_name = str(shading_model) if shading_model else "stylized"
     config = make_terrain_params_config(
         size_px=render_size,
         render_scale=1.0,
@@ -1533,6 +1535,7 @@ def _build_mapscene_terrain_params(
         cam_theta_deg=float(recipe.camera.elevation_deg),
         fov_y_deg=float(recipe.camera.fov_deg),
         camera_mode=camera_mode,
+        terrain_shading_model=shading_model_name,
         **_mapscene_lighting_extras(settings),
         clip=(0.1, clip_far),
         shadows=_mapscene_shadow_settings(renderer_config.shadows),
