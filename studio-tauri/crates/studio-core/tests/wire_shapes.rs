@@ -38,6 +38,12 @@ fn ts_camel_case_shapes_deserialize() {
         (
             "addCartographyLayer",
             format!(
+                r#"{{"type":"addCartographyLayer","layer":{{"id":"{id}","name":"Graticule","visible":true,"type":"graticule","intervalDeg":1.0,"colour":[0.1,0.1,0.12,0.75],"widthPx":1.0,"labels":true}}}}"#
+            ),
+        ),
+        (
+            "addCartographyLayer",
+            format!(
                 r#"{{"type":"addCartographyLayer","layer":{{"id":"{id}","name":"Rail network","visible":true,"type":"vector","asset":"{id}","colour":[0.9,0.29,0.1,1.0],"widthPx":3.0}}}}"#
             ),
         ),

@@ -2198,12 +2198,16 @@ def graticule_geometry(bounds, dem_crs, interval_deg, with_labels):
         if len(coordinates) >= 2:
             lines.append([(float(x), float(y)) for x, y in coordinates])
     # The engine pairs every grid line with its annotation, in the same order.
+    # A grid with a broken line (or a mid-pair label) is dropped whole rather
+    # than annotated against the wrong line.
     annotations = []
     for label in grid.get("labels", ()):
         text = str(label.get("text", "") or "")
         if not text:
             continue
         annotations.append({"kind": str(label.get("kind", "") or ""), "text": text})
+    if len(annotations) != len(lines):
+        annotations = []
     return lines, annotations
 
 

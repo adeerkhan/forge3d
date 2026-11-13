@@ -151,6 +151,10 @@ def test_the_polygon_overlay_path_is_reachable():
         ],
     )
     projected = project_vector_recipe(recipe.recipe)
+    # The recipe path is only exercised when the projection rebuilds the
+    # recipe (a 3D camera mode); a silently skipped branch hides the whole
+    # polygon path, as this test exists to prevent.
+    assert projected is not recipe.recipe, "the recipe must be projected for a 3D camera mode"
     batches = vector_batches(recipe.recipe, projected)
     assert batches, "the polygon overlay must author a batch"
     rgba = batches[0]["rgba"]

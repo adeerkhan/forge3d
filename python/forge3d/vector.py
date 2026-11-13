@@ -56,6 +56,15 @@ def projected_depth(
         raise ValueError("the coverage must be an HxWx4 image")
     height = int(height)
     width = int(width)
+    if coverage.shape[:2] != (height, width):
+        raise ValueError("the coverage's shape must be (height, width)")
+    # Each path point carries its depth; nothing else gets silently read.
+    for path in paths or ():
+        for point in path:
+            if len(point) < 3:
+                raise ValueError(
+                    "every path point must be (x, y, depth), got %r" % (point,)
+                )
     depth = np.ones((height, width), dtype=np.float32)
     yy, xx = np.nonzero(coverage[..., 3])
     offsets = np.zeros((len(xx), 2), dtype=np.float32)

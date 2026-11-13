@@ -42,7 +42,7 @@ export function clearAssetCaches(): void {
   nodesByPath.clear();
 }
 
-export function parseGltf(buffer: ArrayBuffer, path: string): Promise<Group> {
+function parseGltf(buffer: ArrayBuffer, path: string): Promise<Group> {
   return new Promise((resolve, reject) => {
     const loader = new GLTFLoader();
     // GLB is self-contained. A .gltf with external buffers cannot be resolved

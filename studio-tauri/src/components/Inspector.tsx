@@ -405,7 +405,7 @@ function LightEditor({ object, light }: { object: SceneObject; light: LightObjec
   );
 }
 
-export function AssetsPanel() {
+function AssetsPanel() {
   const { state, actions, assetIntegrity } = useSession();
   const project = state?.project;
   if (!project || project.assets.length === 0) return null;
