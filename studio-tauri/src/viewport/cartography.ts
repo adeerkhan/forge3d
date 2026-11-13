@@ -77,12 +77,74 @@ export function worldPosition(
   ];
 }
 
+/** Cohen–Sutherland outcodes for the 0..1 terrain lattice. */
+const LEFT = 1;
+const RIGHT = 2;
+const BOTTOM = 4;
+const TOP = 8;
+
+function outcode(x: number, y: number): number {
+  let code = 0;
+  if (x < 0) code |= LEFT;
+  else if (x > 1) code |= RIGHT;
+  if (y < 0) code |= BOTTOM;
+  else if (y > 1) code |= TOP;
+  return code;
+}
+
+/**
+ * Clip one segment to the unit square (the DEM's footprint). A segment that
+ * ends outside the terrain — a rail clipped by a national framing, say — is
+ * cut at the frame, exactly like the still's off-frame segments vanish.
+ * Returns the clipped endpoints, or null when fully outside.
+ */
+export function clipToLattice(
+  a: [number, number],
+  b: [number, number],
+): [[number, number], [number, number]] | null {
+  let [x0, y0] = a;
+  let [x1, y1] = b;
+  let code0 = outcode(x0, y0);
+  let code1 = outcode(x1, y1);
+  for (;;) {
+    if ((code0 | code1) === 0) return [[x0, y0], [x1, y1]];
+    if ((code0 & code1) !== 0) return null;
+    const code = code0 !== 0 ? code0 : code1;
+    let x = 0;
+    let y = 0;
+    if (code & TOP) {
+      x = x0 + ((x1 - x0) * (1 - y0)) / (y1 - y0);
+      y = 1;
+    } else if (code & BOTTOM) {
+      x = x0 + ((x1 - x0) * (0 - y0)) / (y1 - y0);
+      y = 0;
+    } else if (code & RIGHT) {
+      y = y0 + ((y1 - y0) * (1 - x0)) / (x1 - x0);
+      x = 1;
+    } else {
+      y = y0 + ((y1 - y0) * (0 - x0)) / (x1 - x0);
+      x = 0;
+    }
+    if (code === code0) {
+      x0 = x;
+      y0 = y;
+      code0 = outcode(x0, y0);
+    } else {
+      x1 = x;
+      y1 = y;
+      code1 = outcode(x1, y1);
+    }
+  }
+}
+
 /**
  * Drape a batch of polylines on the terrain and flatten them into a segment
  * soup (one `LineSegments2` draw call per layer).
  *
- * Returns flat vertex positions (xyz per vertex) and `pairs`, the indices of
- * each segment — consecutive vertices of every polyline.
+ * Segments that leave the DEM's footprint are clipped to it (the still's
+ * depth test does the same); a polyline with no visible stretch emits
+ * nothing. Returns flat vertex positions (xyz per vertex) and `pairs`, the
+ * indices of each segment.
  */
 export function drapePolylines(
   lines: number[][][],
@@ -94,15 +156,18 @@ export function drapePolylines(
   const vertices: number[] = [];
   const segments: number[] = [];
   for (const line of lines) {
-    const base = vertices.length / 3;
-    for (const point of line) {
-      if (point.length < 2) continue;
-      const [x, y, z] = worldPosition(preview, spanXz, zScale, point[0], point[1], lift);
-      vertices.push(x, y, z);
-    }
-    const count = vertices.length / 3 - base;
-    for (let index = 0; index + 1 < count; index += 1) {
-      segments.push(base + index, base + index + 1);
+    for (let index = 0; index + 1 < line.length; index += 1) {
+      const a = line[index];
+      const b = line[index + 1];
+      if (a.length < 2 || b.length < 2) continue;
+      const clipped = clipToLattice([a[0], a[1]], [b[0], b[1]]);
+      if (!clipped) continue;
+      const base = vertices.length / 3;
+      for (const [u, v] of clipped) {
+        const [x, y, z] = worldPosition(preview, spanXz, zScale, u, v, lift);
+        vertices.push(x, y, z);
+      }
+      segments.push(base, base + 1);
     }
   }
   return {

@@ -1035,7 +1035,9 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   header read; ≈ 990 KB of JSON over IPC per layer load, cached per stack
   edit). The lines draw as one `LineSegments2` per layer (fat lines at the
   layer's `widthPx`, draped at the mesh's relief with a clearance lift) and
-  hide behind the terrain where the ground stands in front (`depthTest`). The
+  hide behind the terrain where the ground stands in front (`depthTest`), and
+  are clipped to the DEM's footprint so out-of-frame stretches never float in
+  space. The
   labels are HTML divs ride the camera projection, hidden behind the terrain
   by a raycast on camera move, dropped over the sky (behind-camera/outside
   view tests), with the engine's own halo rule inverted for readability;

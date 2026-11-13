@@ -6,6 +6,7 @@
  */
 import {
   anchorWorld,
+  clipToLattice,
   drapeLift,
   drapePolylines,
   sampleHeight,
@@ -120,4 +121,31 @@ import { expandPairs } from "./cartography.ts";
   ok("expandPairs: six floats per segment", flat.length === 6);
   near("expandPairs: segment starts at vertex 0", flat[0], positions[0]);
   near("expandPairs: segment ends at vertex 1", flat[3], positions[3]);
+}
+
+// --- clipToLattice -------------------------------------------------------
+ok("clip: fully inside is untouched", JSON.stringify(clipToLattice([0.1, 0.1], [0.9, 0.9])) === JSON.stringify([[0.1, 0.1], [0.9, 0.9]]));
+ok("clip: fully outside (same side) is dropped", clipToLattice([1.2, 1.2], [2, 2]) === null);
+ok("clip: fully outside (same x-side) is dropped", clipToLattice([1.2, 0.5], [2, 0.6]) === null);
+{
+  const clipped = clipToLattice([-0.5, 0.5], [0.5, 0.5]);
+  ok("clip: crossing the west edge lands on u=0", clipped !== null && Math.abs(clipped[0][0]) < 1e-12 && Math.abs(clipped[0][1] - 0.5) < 1e-12);
+  ok("clip: the inside end survives", clipped !== null && Math.abs(clipped[1][0] - 0.5) < 1e-12);
+}
+{
+  const clipped = clipToLattice([0.5, -0.4], [0.5, 0.8]);
+  ok("clip: crossing the bottom edge lands on v=0", clipped !== null && Math.abs(clipped[0][1]) < 1e-12);
+}
+// A line crossing the far side still clips to the opposite edge.
+{
+  const clipped = clipToLattice([0.5, 0.2], [0.5, 1.6]);
+  ok("clip: crossing the top edge lands on v=1", clipped !== null && Math.abs(clipped[1][1] - 1) < 1e-12);
+}
+// Drape honours the clip: one segment crossing the west edge contributes one
+// segment; a segment fully outside contributes none.
+{
+  const { pairs } = drapePolylines([[[1.2, 0.5], [0.5, 0.5]]], preview, [100, 100], 1, 0.02);
+  ok("drape: crossing segment is clipped, not dropped", pairs.length === 2);
+  const out = drapePolylines([[[1.2, 1.2], [2, 2]]], preview, [100, 100], 1, 0.02);
+  ok("drape: segment outside the footprint vanishes", out.pairs.length === 0 && out.positions.length === 0);
 }
