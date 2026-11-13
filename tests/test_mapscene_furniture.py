@@ -8,6 +8,8 @@ from forge3d.graticule import GraticuleSpec, generate_graticule
 from forge3d.map_plate import BBox
 from forge3d.scale_bar import ScaleBar
 
+from _terrain_runtime import terrain_rendering_available
+
 
 def test_scale_bar_uses_geodesic_distance_when_pyproj_is_available():
     pyproj = pytest.importorskip("pyproj")
@@ -89,6 +91,8 @@ def _furniture_scene(
 
 
 def test_mapscene_render_composites_map_furniture(tmp_path):
+    if not terrain_rendering_available():
+        pytest.skip("MapScene render requires a terrain-capable GPU runtime")
     plain_path = tmp_path / "plain.png"
     furnished_path = tmp_path / "furnished.png"
     plain = _furniture_scene(plain_path, furniture=None)
@@ -137,6 +141,8 @@ def test_map_furniture_accepts_graticule_spec_roundtrip():
 
 
 def test_mapscene_graticule_render_uses_scene_target_crs(monkeypatch, tmp_path):
+    if not terrain_rendering_available():
+        pytest.skip("MapScene render requires a terrain-capable GPU runtime")
     calls = []
 
     def fake_generate_graticule(bounds, **kwargs):
@@ -173,6 +179,8 @@ def test_place_overlay_avoids_keepout_rect():
 
 
 def test_mapscene_scale_bar_config_scales_with_output_dpi(monkeypatch, tmp_path):
+    if not terrain_rendering_available():
+        pytest.skip("MapScene render requires a terrain-capable GPU runtime")
     from forge3d import scale_bar as scale_bar_module
 
     configs = []

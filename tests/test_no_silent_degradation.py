@@ -479,6 +479,7 @@ def test_e_validation_profiles_are_exhaustive_and_honest():
 
     fast_lane = set(ci_pytest_lane.fast_lane_files())
     expected_fast = {
+        "tests/test_studio_surface_audit.py",
         "tests/test_aether_acceptance_evidence.py",
         "tests/test_nephele_acceptance.py",
         "tests/test_nephele_fixture_contracts.py",

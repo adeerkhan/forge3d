@@ -102,6 +102,10 @@ def test_geojson_building_layer_is_scalar_render_supported(tmp_path) -> None:
 
 
 def test_mapscene_render_composites_building_layer(tmp_path) -> None:
+    from _terrain_runtime import terrain_rendering_available
+
+    if not terrain_rendering_available():
+        pytest.skip("MapScene render requires a terrain-capable GPU runtime")
     path = tmp_path / "buildings.geojson"
     path.write_text(json.dumps(_building_geojson()), encoding="utf-8")
     layer = f3d.MapSceneBuildingLayer.from_geojson(path, metadata={"asset_status": "fixture"})

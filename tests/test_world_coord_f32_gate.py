@@ -604,15 +604,40 @@ def _undo_splat_env_map_transition(sites):
     return [site for site in sites if site not in added]
 
 
+def _undo_studio_branch_transition(sites):
+    """Restore the three render files to their main-side inventory.
+
+    This branch rewrote the viewer relief LUT and the shadow-setup cascade
+    loop. Every added site narrows a bounded screen-space operand — the u8
+    colour interpolation and its [0, 1] domain ratio, the cascade-index ratio,
+    the u32 grid constant, and the render-frame dimensions — none narrows an
+    absolute world coordinate. Reviewed and recorded 2026-11-13 (see the
+    ``studio_branch_relief_lut`` ledger record).
+    """
+    files = _ledger_data()["studio_branch_relief_lut"]["files"]
+    by_file = {}
+    for site in sites:
+        by_file.setdefault(site[0], []).append(site)
+    for rel, change in files.items():
+        assert by_file.get(rel, []) == list(map(tuple, change["result"])), (
+            f"studio branch inventory drift in {rel}")
+        by_file[rel] = list(map(tuple, change["base"]))
+    # Match the scanner's `sorted(Path)` file order, not plain string order.
+    return [site for rel in sorted(by_file, key=Path) for site in by_file[rel]]
+
+
 def conversion_inventory():
     """The chain's input: the inventory below the branch's own transition.
 
     Every `_undo_*` below reconstructs an earlier freeze, so the chain starts
     from the inventory those freezes describe — the additions this branch
     made on top of it are removed first, and are checked by
+    ``test_studio_branch_relief_lut_is_reviewed_inventory_transition`` and
     ``test_splat_fused_env_map_inventory_transition_is_exact``.
     """
-    return _undo_splat_env_map_transition(_raw_conversion_inventory())
+    return _undo_splat_env_map_transition(
+        _undo_studio_branch_transition(_raw_conversion_inventory())
+    )
 
 
 def _inventory_digest(sites) -> str:
@@ -1185,7 +1210,9 @@ def test_splat_fused_env_map_inventory_transition_is_exact():
     # freeze, so the whole-tree pair is locked by the combined record.
     combined = _ledger_data()["nephele_splat_env_map_2026_10_30"]
     assert combined["review"]
-    sites = _raw_conversion_inventory()
+    # The studio branch's own relief-LUT increment sits on top of the combined
+    # freeze; it comes off before the comparison (see `studio_branch_relief_lut`).
+    sites = _undo_studio_branch_transition(_raw_conversion_inventory())
     assert (len(sites), _inventory_digest(sites)) == (
         combined["result_count"], combined["result_digest"],
     )
@@ -1221,6 +1248,53 @@ def test_splat_fused_env_map_inventory_transition_is_exact():
     current = collections.Counter(_raw_conversion_inventory())
     for site in added:
         assert current[site] > 0, f"recorded addition missing: {site}"
+
+
+def test_studio_branch_relief_lut_is_reviewed_inventory_transition():
+    """The studio branch's own increment, recorded and verified in both
+    directions — nothing of it narrows a world position."""
+    record = _ledger_data()["studio_branch_relief_lut"]
+    assert record["review"]
+    files = record["files"]
+    assert set(files) == {
+        "src/terrain/renderer/shadows/render.rs",
+        "src/terrain/renderer/shadows/setup.rs",
+        "src/terrain/renderer/viewer.rs",
+    }
+    sites = _raw_conversion_inventory()
+    # The merged tree carries exactly the recorded sites.
+    assert (len(sites), _inventory_digest(sites)) == (
+        record["result_count"], record["result_digest"],
+    )
+    # Undoing them restores the exact main-side inventory.
+    base = _undo_studio_branch_transition(sites)
+    assert (len(base), _inventory_digest(base)) == (
+        record["base_count"], record["base_digest"],
+    )
+    # The restored base is the combined env-map freeze verbatim: same sites,
+    # same digest, same count — the two records describe the same tree.
+    combined = _ledger_data()["nephele_splat_env_map_2026_10_30"]
+    assert (record["base_count"], record["base_digest"]) == (
+        combined["result_count"], combined["result_digest"],
+    )
+    # Every added site is in the three render files, and none narrows a world
+    # coordinate or touches the Anchor.
+    for rel, change in files.items():
+        for site in change["result"]:
+            assert site[0] == rel
+            assert site[0] != SANCTIONED
+    body = _function_body("src/terrain/renderer/viewer.rs", "relief_lut_bytes")
+    assert "anchor" not in body.lower()
+    assert "to_render_f32" not in body
+
+    # A drifted site is rejected, not silently accepted.
+    import pytest
+
+    mutated = list(sites)
+    victim = next(i for i, site in enumerate(mutated) if site[0].endswith("viewer.rs"))
+    mutated[victim] = (*mutated[victim][:4], mutated[victim][4] + " unreviewed")
+    with pytest.raises(AssertionError):
+        _undo_studio_branch_transition(mutated)
 
 
 def test_tessella_and_splat_combined_freeze_is_exact():
