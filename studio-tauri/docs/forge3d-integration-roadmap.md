@@ -937,11 +937,44 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   `<stem>_depth.png` through the recipe's native capture — the same files the
   plain path writes from its capture. Everyone pays out of the same native
   flow; nothing crosses the Python boundary twice.
-- **What is next for the convergence** — in order: (2) the recipe must run the
-  studio's IBL/exposure exactly as the interactive path does, so the look
-  matches byte-for-byte; (3) the still/preview path switches to the recipe; the
-  service stops hand-building `make_terrain_params_config`; (4) the engine's
-  own overlay layer takes over the colormap and the imagery drape.
+- **Step 2 — the recipe matches the default still byte-for-byte (done).** The
+  recipe now receives everything the hand-built path passed it, through the
+  recipe's own settings channel (no second code path):
+  the IBL's .hdr path is wired at the TOP level of the lighting settings
+  (`"ibl": {"path": ...}` — `_native_ibl_path` only reads the top-level key;
+  before the fix the recipe silently fell back to its built-in neutral sky,
+  which was the entire systematic colour-temperature difference), plus the
+  studio's terrain span, math-light azimuth/elevation, the `clip` pair, the
+  no-op camera token `mesh:zup:north:dem`, the `overlays: []`, and the PCF
+  shadow block (`map_size 4096, cascades 1, moment_bias 5e-05, max_distance
+  30000, slope_scale_bias 1e-04, normal_bias 1e-05`) forwarded through the
+  renderer_config's raw shadows dict. The engine grew three small recipes in
+  `_build_mapscene_terrain_params` to honour them: the `terrain_span` metadata
+  override (the span the studio scaled the heights to — the recipe's
+  diagonal heuristic taking `max(cols*sx, rows*sy)` disagreed by 4025 m on the
+  Fuji DEM), the `light_azimuth_deg`/`light_elevation_deg` settings override
+  (the recipe's `atan2`-decode cannot even reach the studio's 315° azimuth —
+  the light would wrap below the horizon), and the `clip` sequence override.
+  The recipe also warms its TAA history exactly as the default does — three
+  `scene.render()` calls inside the engine's shared native render context
+  (one renderer, cumulative temporal history), keeping the converged frame —
+  and when AOVs or denoise are requested the recipe skips TAA entirely (the
+  engine forbids the combination) and takes the same one-shot
+  `render_with_aov` path the default falls back to.
+- **Measured (Mount Fuji, Swiss DEM, 900×700): both byte-identical to the
+  default still** (Fuji phi 68/theta 45, mean abs diff 0.0, 0/630 000 samples
+  differ; Swiss phi 270/theta 10, same). The still-AOV PNGs are byte-identical
+  as well (albedo/normal/depth md5s match), and the AOV/denoise path takes the
+  same one-shot `render_with_aov` route as the default — no 3-frame warm-up,
+  no TAA, exactly the default's behaviour in that case. The recipe costs ~3.2 s
+  for a converged still vs ~0.6 s for the default (it renders the same passes
+  three times plus the PNG write); the one-shot AOV captures are ~1.7 s.
+- **What is next for the convergence** — in order: (3) the still/preview path
+  switches to the recipe (delete the hand-built `make_terrain_params_config`
+  path — both produce identical bytes, so the switch is safe today); the
+  default still, the AOV finals and the plate all work identically on both
+  paths; (4) the engine's own overlay layer takes over the colormap and the
+  imagery drape.
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**
 

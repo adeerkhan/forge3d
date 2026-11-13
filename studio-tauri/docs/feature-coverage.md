@@ -147,7 +147,7 @@ the plate's scale bar and north arrow are the engine's own (`ScaleBar`,
 engine's label plan. Still open in the tier: polygons, a legend for the
 vector attributes, and labels occluded by the terrain's ridges.
 
-**Phase 15 (MapScene — development preview).** A still can render through the
+**Phase 15 (MapScene — convergence preview).** A still can render through the
 engine's `MapScene` recipe now: the studio composes a `TerrainSource` from the
 DEM, the camera and the lighting recipe the studio asks for, the engine
 compiles and renders the frame, and Studio composites the numpy cartography
@@ -155,13 +155,13 @@ compiles and renders the frame, and Studio composites the numpy cartography
 the "MapScene" toggle in the Inspector's Stills section; the reply reports
 `renderPath: "mapscene"` — the reply also reports `plate: true | null` and
 `plateSkippedFor` (with a warning) when the plate is not composited. Measured
-on the Swiss DEM at 900×700, phi 270: the recipe path's output is a **washed
-out green frame** — the recipe's IBL and material shading produce a different
-character, not a match. The plate now works there too (a depth AOV from the
-recipe's `render_with_aov` is used by the same plate compositor); the
-convergence is still open per the roadmap §5.29 (recipe default is the next
-increment after the IBL/exposure match); this increment ships the recipe
-render as a preview so it can be compared, not a switch.
+on the Swiss DEM and on Mount Fuji at 900×700: the recipe path now renders a
+**byte-identical frame** to the default still, and the AOV PNGs are
+byte-identical too — the recipe receives the same native params, the same IBL,
+the same TAA warm-up sequence as the current default (roadmap §5.29). The
+recipe also costs ~3.2 s per converged still vs ~0.6 s for the default path,
+which is why it is still an opt-in preview; the default switch is the §5.29
+step 3 decision.
 **Converge on `MapScene`.** The engine's typed map scene carries labels,
 buildings, 3D Tiles, furniture, graticules and bundles; Studio has its own
 model and its own service. The map's layer stack (above) is shaped like

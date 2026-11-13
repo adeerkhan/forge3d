@@ -591,6 +591,9 @@ def _terrain_scene_diagonal(terrain: "TerrainSource") -> float:
     import numpy as np
 
     metadata = _metadata_dict(terrain.metadata)
+    span_override = metadata.get("terrain_span")
+    if span_override is not None and float(span_override) > 0.0:
+        return float(span_override)
     width = float(metadata.get("width") or metadata.get("cols") or 1.0)
     height = float(metadata.get("height") or metadata.get("rows") or 1.0)
     resolution = _metadata_resolution(metadata)
@@ -786,20 +789,25 @@ def _mapscene_offline_settings(output: "OutputSpec") -> Any:
     )
 
 
-def _mapscene_shadow_settings(shadow_config: Any) -> Any:
+def _mapscene_shadow_settings(shadow_config: Any, raw: Mapping[str, Any] | None = None) -> Any:
     from .terrain_params import ShadowSettings
+
+    def pick(key: str, default: Any) -> Any:
+        if isinstance(raw, Mapping) and raw.get(key) is not None:
+            return float(raw[key])
+        return default
 
     settings = ShadowSettings(
         enabled=shadow_config.enabled if shadow_config else True,
         technique=shadow_config.technique.upper() if shadow_config else "PCSS",
         resolution=shadow_config.map_size if shadow_config else 4096,
         cascades=shadow_config.cascades if shadow_config else 3,
-        max_distance=4000.0,
-        softness=1.5,
-        intensity=0.8,
-        slope_scale_bias=0.001,
-        depth_bias=shadow_config.moment_bias if shadow_config else 0.0005,
-        normal_bias=0.0002,
+        max_distance=pick("max_distance", 4000.0),
+        softness=float(raw.get("softness", 1.5)) if isinstance(raw, Mapping) else 1.5,
+        intensity=float(raw.get("intensity", 0.8)) if isinstance(raw, Mapping) else 0.8,
+        slope_scale_bias=pick("slope_scale_bias", 0.001),
+        depth_bias=pick("depth_bias", shadow_config.moment_bias if shadow_config else 0.0005),
+        normal_bias=pick("normal_bias", 0.0002),
         min_variance=1e-4,
         light_bleed_reduction=0.5,
         evsm_exponent=40.0,
@@ -1484,12 +1492,21 @@ def _build_mapscene_terrain_params(
     # geometry frame, where +Y runs south (row 0 is north), so compass A maps
     # to A - 90 in every camera mode.
     azimuth = azimuth - 90.0
+    if settings.get("light_azimuth_deg") is not None:
+        azimuth = float(settings["light_azimuth_deg"])
+        elevation = float(settings["light_elevation_deg"])
     renderer_config_data = settings.get("renderer_config") if isinstance(settings.get("renderer_config"), Mapping) else None
+    raw_shadows = renderer_config_data.get("shadows") if isinstance(renderer_config_data, Mapping) else None
     renderer_config = load_renderer_config(renderer_config_data)
     ibl = settings.get("ibl") if isinstance(settings.get("ibl"), Mapping) else {}
     sun = settings.get("sun") if isinstance(settings.get("sun"), Mapping) else {}
     terrain_span = max(1.0, _terrain_scene_diagonal(recipe.terrain))
     clip_far = max(6000.0, terrain_span * 1.5)
+    clip_override = settings.get("clip")
+    if isinstance(clip_override, Sequence) and not isinstance(clip_override, (str, bytes)) and len(clip_override) == 2:
+        clip_pair = (float(clip_override[0]), float(clip_override[1]))
+    else:
+        clip_pair = (0.1, clip_far)
     preset_albedo = "mix" if preset_name else "colormap"
     preset_colormap_strength = 0.5 if preset_name else 1.0
     configured_colormap_strength = settings.get("colormap_strength")
@@ -1537,9 +1554,9 @@ def _build_mapscene_terrain_params(
         camera_mode=camera_mode,
         terrain_shading_model=shading_model_name,
         **_mapscene_lighting_extras(settings),
-        clip=(0.1, clip_far),
-        shadows=_mapscene_shadow_settings(renderer_config.shadows),
-        overlays=[overlay],
+        clip=clip_pair,
+        shadows=_mapscene_shadow_settings(renderer_config.shadows, raw=raw_shadows),
+        overlays=list(settings["overlays"]) if isinstance(settings.get("overlays"), list) else [overlay],
         aa_samples=max(1, int(output.samples if output is not None else 1)),
         aa_seed=_mapscene_aa_seed(recipe),
         aov=_mapscene_aov_settings(

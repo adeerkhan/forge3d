@@ -270,6 +270,7 @@ class StudioRenderer:
         exposure: float = 1.35,
         *,
         aovs: Sequence[str] = (),
+        taa: bool = True,
     ) -> Tuple[np.ndarray, Any]:
         """The still through the engine's MapScene recipe.
 
@@ -318,6 +319,7 @@ class StudioRenderer:
                 "height": int(heights.shape[0]),
                 "bounds": list(self.dem_bounds) if self.dem_bounds else None,
                 "resolution": (res_x, res_y),
+                "terrain_span": span_x,
                 "asset_status": "fixture",
             },
             elevation_sampling_available=True,
@@ -344,15 +346,32 @@ class StudioRenderer:
                     math.sin(math.radians(float(sun.get("elevationDeg", 35.0)))),
                 ),
                 settings={
-                    "camera": {"camera_mode": "mesh:zup"},
+                    "camera": {"camera_mode": "mesh:zup:north:dem"},
                     "terrain_shading_model": "lambert_physical",
                     "hue_variation_strength": 0.0,
                     "albedo_mode": "material",
                     "colormap_strength": 0.0,
+                    "light_azimuth_deg": float(sun.get("azimuthDeg", 135.0)),
+                    "light_elevation_deg": float(sun.get("elevationDeg", 35.0)),
+                    "clip": [10.0, 400000.0],
+                    "overlays": [],
+                    "sun": {"color": [float(c) for c in sun.get("color", (1.0, 0.97, 0.92))]},
+                    **({"screen_space": {"enabled": True, "taa_enabled": True}} if taa else {}),
+                    "ibl": {"path": environment_path},
                     "renderer_config": {
                         "ibl": {"path": environment_path},
                         "gi": {"modes": ["ibl"]},
                         "lighting": {"exposure": float(exposure)},
+                        "shadows": {
+                            "enabled": True,
+                            "technique": "pcf",
+                            "map_size": 4096,
+                            "cascades": 1,
+                            "moment_bias": 5e-05,
+                            "max_distance": 30000.0,
+                            "slope_scale_bias": 0.0001,
+                            "normal_bias": 0.00001,
+                        },
                     },
                 },
             ),
@@ -362,9 +381,21 @@ class StudioRenderer:
                 aovs=tuple(aovs),
             ),
         )
-        scene.render()
         from PIL import Image
 
+        if taa:
+            # The default still renders through the temporal filter three
+            # times and keeps the converged frame; the recipe one-shot does
+            # not converge. The engine's own flythrough helper shares one
+            # native renderer across the sequence, so the temporal history is
+            # warm exactly as it is in the default path.
+            from forge3d.map_scene import _shared_terrain_render_context
+
+            with _shared_terrain_render_context():
+                for _ in range(3):
+                    scene.render()
+        else:
+            scene.render()
         frame = np.asarray(Image.open(output_path).convert("RGB"), dtype=np.float32) / 255.0
         return frame, scene.last_aov_frame
 
@@ -1059,6 +1090,7 @@ class StudioRenderer:
                         for channel in ("albedo", "normal", "depth")
                         if aov_flags[channel] or want_denoise
                     ),
+                    taa=not (want_aov or want_denoise),
                 )
                 # The recipe returns 0..1 floats; the rest of the path is
                 # uint8. The recipe's own PNG is a temp file — it is read
