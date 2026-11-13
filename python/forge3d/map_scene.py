@@ -5820,6 +5820,7 @@ class MapScene:
         self.last_render_backend: str | None = None
         self.last_render_metadata: dict[str, Any] | None = None
         self.last_bundle_path: str | None = None
+        self.last_aov_frame: Any | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {"kind": "map_scene", "recipe": self.recipe.to_dict()}
@@ -6353,6 +6354,7 @@ class MapScene:
         backend = "gpu_terrain"
         native_metadata = dict(native_result.metadata)
         aov_frame = native_result.aov_frame
+        self.last_aov_frame = aov_frame
         hdr_frame = native_result.hdr_frame
         aov_paths = _write_mapscene_aovs(
             target_path,

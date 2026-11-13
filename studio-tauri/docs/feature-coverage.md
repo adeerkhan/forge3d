@@ -153,13 +153,15 @@ DEM, the camera and the lighting recipe the studio asks for, the engine
 compiles and renders the frame, and Studio composites the numpy cartography
 (and the plate) on top. The path is `RenderSettings::render_via_mapscene` /
 the "MapScene" toggle in the Inspector's Stills section; the reply reports
-`renderPath: "mapscene"`. Measured on the Swiss DEM at 900×700, phi 270: the
-recipe path's output is a **washed out green frame** — the recipe's IBL and
-material shading produce a different character, not a match, and the plate is
-dropped because the recipe produces no depth AOV (the reply warns). Per the
-roadmap's §5.29, the convergence is to make the recipe the default path; this
-increment ships the recipe render as a preview so it can be compared, not a
-switch.
+`renderPath: "mapscene"` — the reply also reports `plate: true | null` and
+`plateSkippedFor` (with a warning) when the plate is not composited. Measured
+on the Swiss DEM at 900×700, phi 270: the recipe path's output is a **washed
+out green frame** — the recipe's IBL and material shading produce a different
+character, not a match. The plate now works there too (a depth AOV from the
+recipe's `render_with_aov` is used by the same plate compositor); the
+convergence is still open per the roadmap §5.29 (recipe default is the next
+increment after the IBL/exposure match); this increment ships the recipe
+render as a preview so it can be compared, not a switch.
 **Converge on `MapScene`.** The engine's typed map scene carries labels,
 buildings, 3D Tiles, furniture, graticules and bundles; Studio has its own
 model and its own service. The map's layer stack (above) is shaped like

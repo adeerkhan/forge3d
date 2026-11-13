@@ -922,12 +922,22 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   exposure compression) does not exist on the recipe's `pbr_pom` path. The
   path does not match the current default yet and is a development toggle, not
   a switch.
-- **The plate drops silently on the recipe path.** The recipe produces
-  nothing with a depth AOV, so `compose_plate` cannot cut the terrain out of
-  the frame; a warning is emitted and the plate file is not written (the
-  default AOV/plat path still produces it).
-- **What is next for the convergence** — in order: (1) the recipe must carry
-  the studio's depth AOV so the plate works; (2) the recipe must run the
+- **The plate composite works on the recipe path too.** The recipe's
+  `OutputSpec(aovs=("depth",))` produces a native depth frame on the engine's
+  `render_with_aov` path, and `MapScene.last_aov_frame()` hands it to the
+  caller. The studio's plate path (`AovFrame.has_depth()` /
+  `AovFrame.depth()`) consumes it unchanged; a still with a plate layer now
+  composites the plate transparently in the recipe instead of dropping it with
+  a warning. The reply carries `plate: true` and `plateSkippedFor: null` when
+  the plate is composited, `plateSkippedFor: <name>` when the recipe failed to
+  produce a depth frame (a warning is also printed; the plate file is not
+  written).
+- **Still AOVs work when requested:** `aov={albedo, normal, depth}` with
+  `mapsceneStill` writes `<stem>_albedo.png` / `<stem>_normal.png` /
+  `<stem>_depth.png` through the recipe's native capture — the same files the
+  plain path writes from its capture. Everyone pays out of the same native
+  flow; nothing crosses the Python boundary twice.
+- **What is next for the convergence** — in order: (2) the recipe must run the
   studio's IBL/exposure exactly as the interactive path does, so the look
   matches byte-for-byte; (3) the still/preview path switches to the recipe; the
   service stops hand-building `make_terrain_params_config`; (4) the engine's

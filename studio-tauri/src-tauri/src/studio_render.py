@@ -31,7 +31,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -268,7 +268,9 @@ class StudioRenderer:
         environment,
         output_path: str,
         exposure: float = 1.35,
-    ) -> np.ndarray:
+        *,
+        aovs: Sequence[str] = (),
+    ) -> Tuple[np.ndarray, Any]:
         """The still through the engine's MapScene recipe.
 
         The recipe declares the terrain, the camera, the sun and the
@@ -278,6 +280,10 @@ class StudioRenderer:
         studio scaled them; the camera's radius and target are scaled the
         same way. Post-processing (gradients, vignette, the plate) is the
         studio's own and runs on the frame afterwards.
+
+        Returns `(frame, aov_frame)` so the plate path gets the recipe's own
+        depth AOV from `MapScene.last_aov_frame()` — no EXR round-trip and
+        no second implementation of anything the engine already does.
         """
         from pathlib import Path
 
@@ -351,13 +357,16 @@ class StudioRenderer:
                 },
             ),
             layers=[],
-            output=f3d.OutputSpec(width=width, height=height, format="png", path=output_path),
+            output=f3d.OutputSpec(
+                width=width, height=height, format="png", path=output_path,
+                aovs=tuple(aovs),
+            ),
         )
         scene.render()
         from PIL import Image
 
         frame = np.asarray(Image.open(output_path).convert("RGB"), dtype=np.float32) / 255.0
-        return frame
+        return frame, scene.last_aov_frame
 
     def environment_map(self, path: Optional[str]):
         """The IBL for one frame: the project's HDRI, or the built-in studio sky.
@@ -1024,29 +1033,41 @@ class StudioRenderer:
             # list. The cartography layers the studio already composites
             # (vectors, labels, graticule) are drawn by the same numpy
             # compositor the plain path uses, so the difference under review is
-            # the terrain pass only.
+            # the terrain pass only. AOVs follow the same rules as the plain
+            # path: a plate reads the recipe's native depth frame out of the
+            # recipe's AOV hand-off, so the plate is composited by the same
+            # code either way, and AOV finals still write <stem>_albedo/normal/
+            # depth.png from the recipe's own capture.
             import tempfile
+            import uuid
 
-            stem = Path(output_path).with_suffix("") if output_path else None
-            if stem is not None:
-                stem = stem.with_name(stem.name + "_mapscene")
-                Path(stem.parent).mkdir(parents=True, exist_ok=True)
-                mapscene_path = str(stem) + ".png"
-            else:
-                mapscene_path = str(Path(tempfile.gettempdir()) / "forge3d-mapscene-still.png")
-            image = self._mapscene_still(
-                width,
-                height,
-                camera,
-                sun,
-                environment,
-                mapscene_path,
-                exposure=float(request.get("exposure", 1.35)),
+            tempfile_path = Path(tempfile.gettempdir()) / (
+                "forge3d-mapscene-still-%s.png" % uuid.uuid4().hex
             )
-            # The recipe returns 0..1 floats; the rest of the path is uint8.
-            image = np.ascontiguousarray(
-                np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
-            )
+            mapscene_path = str(tempfile_path)
+            try:
+                frame, aov_frame = self._mapscene_still(
+                    width,
+                    height,
+                    camera,
+                    sun,
+                    environment,
+                    mapscene_path,
+                    exposure=float(request.get("exposure", 1.35)),
+                    aovs=tuple(
+                        channel
+                        for channel in ("albedo", "normal", "depth")
+                        if aov_flags[channel] or want_denoise
+                    ),
+                )
+                # The recipe returns 0..1 floats; the rest of the path is
+                # uint8. The recipe's own PNG is a temp file — it is read
+                # into numpy and removed, not shipped as a second artifact.
+                image = np.ascontiguousarray(
+                    np.clip(np.rint(frame * 255.0), 0, 255).astype(np.uint8)
+                )
+            finally:
+                Path(mapscene_path).unlink(missing_ok=True)
             render_path = "mapscene"
         elif want_aov or want_denoise:
             # The engine's AOV renderer is the plain path: it has no quality
@@ -1216,6 +1237,9 @@ class StudioRenderer:
             # The quality surface is temporally filtered (the engine's TAA), so
             # its frame is the converged one; the plain path is byte-stable.
             "temporal": render_path != "plain",
+            # The plate is composited only when the path exposes a depth AOV.
+            "plate": plate_rgb is not None,
+            "plateSkippedFor": plate_skipped_for,
             "png": base64.b64encode(png).decode("ascii"),
         }
 
