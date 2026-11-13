@@ -713,6 +713,41 @@ pub fn terrain_preview(
     crate::forge3d::sample_terrain(&python, &path, resolution.unwrap_or(96))
 }
 
+/// The vector layer's feature lines (and, with a label field, its labelled
+/// points), in the DEM's own frame, normalised to the preview's 0..1 lattice.
+/// The still and the preview read the same file through the same reader.
+#[tauri::command(async)]
+pub fn vector_geometry(
+    forge: State<'_, Forge3dState>,
+    dem_path: String,
+    vector_path: String,
+    label_field: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let python = forge.probe(false).python;
+    crate::forge3d::vector_geometry(
+        &python,
+        &dem_path,
+        &vector_path,
+        label_field.as_deref().unwrap_or(""),
+    )
+}
+
+/// The graticule for the DEM's CRS and bounds, from the engine's own
+/// `generate_graticule`. Coordinate annotations ride the same call.
+#[tauri::command(async)]
+pub fn graticule_geometry(
+    forge: State<'_, Forge3dState>,
+    dem_path: String,
+    interval_deg: f64,
+    labels: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    if !interval_deg.is_finite() || interval_deg <= 0.0 {
+        return Err("the graticule interval must be a positive number of degrees".to_owned());
+    }
+    let python = forge.probe(false).python;
+    crate::forge3d::graticule_geometry(&python, &dem_path, interval_deg, labels.unwrap_or(true))
+}
+
 /// The engine's colormap, sampled into the stops the Material preview paints.
 #[tauri::command(async)]
 pub fn colormap_stops(

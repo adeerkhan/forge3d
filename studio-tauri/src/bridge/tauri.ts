@@ -18,6 +18,8 @@ import type {
   ShellInfo,
   TerrainPreview,
   WrittenFrame,
+  GraticuleGeometry,
+  VectorGeometry,
 } from "./types";
 
 /** The real bridge: Tauri IPC. Argument names match the Rust command params. */
@@ -99,6 +101,18 @@ export const tauriBridge: StudioBridge = {
     invoke<TerrainPreview>("terrain_preview", { path, resolution: resolution ?? null }),
 
   colormapStops: (name) => invoke<number[][]>("colormap_stops", { name }),
+  vectorGeometry: (demPath, vectorPath, labelField) =>
+    invoke<VectorGeometry & { ok: boolean }>("vector_geometry", {
+      demPath,
+      vectorPath,
+      labelField,
+    }),
+  graticuleGeometry: (demPath, intervalDeg, labels) =>
+    invoke<GraticuleGeometry & { ok: boolean }>("graticule_geometry", {
+      demPath,
+      intervalDeg,
+      labels,
+    }),
 
   importTerrainDem: (path) => invoke<SessionState>("import_terrain_dem", { path }),
 

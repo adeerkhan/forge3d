@@ -824,6 +824,106 @@ fn parse_solar_reply(line: &str) -> Result<SolarPosition, String> {
     })
 }
 
+/// The Cartography viewport layers the still draws, over IPC.
+///
+/// Reads the vector layer's geometry (or the graticule's grid) in the DEM's
+/// own frame and normalises it to the same 0..1 lattice the terrain preview
+/// uses, so the lines land exactly where the still would put them. The
+/// vector reader is the still's own (`studio_render.read_vector_features`),
+/// imported from the service file — never a second implementation.
+const VECTOR_PREVIEW_SCRIPT: &str = r#"
+import json, os, sys
+
+kind = sys.argv[1]
+dem_path = sys.argv[2]
+service_dir = sys.argv[3]
+
+sys.path.append(service_dir)
+
+import studio_render as sr
+
+# Bounds and CRS only — the features are what the preview is for, so the DEM
+# header is read, never the raster (a full read of a 90 MB Swiss grid to
+# learn two corners would be silly).
+try:
+    import rasterio
+    with rasterio.open(dem_path) as src:
+        dem_crs_value = src.crs
+        dem_bounds_value = src.bounds
+    crs = str(dem_crs_value or "")
+    bounds = (dem_bounds_value.left, dem_bounds_value.bottom, dem_bounds_value.right, dem_bounds_value.top)
+except Exception:
+    from forge3d import io as fio
+    try:
+        dem = fio.load_dem(dem_path, fill_nodata_values=True)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "detail": "the DEM could not be read: %s" % (exc,)}))
+        raise SystemExit(0)
+    crs = str(dem.crs or "")
+    bounds = dem.bounds
+if bounds is None:
+    print(json.dumps({"ok": False, "detail": "the DEM has no bounds"}))
+    raise SystemExit(0)
+west, south, east, north = (float(value) for value in bounds)
+span_x = max(east - west, 1e-9)
+span_y = max(north - south, 1e-9)
+
+def normalize(line):
+    return [[(float(x) - west) / span_x, (north - float(y)) / span_y] for x, y in line]
+
+if kind == "vector":
+    vector_path = sys.argv[4]
+    label_field = sys.argv[5]
+    lines, points, vector_crs = sr.read_vector_features(vector_path, label_field)
+    file_code = sr.crs_code(vector_crs)
+    dem_code = sr.crs_code(crs)
+    if dem_code and file_code and dem_code != file_code:
+        print(json.dumps({
+            "ok": False,
+            "detail": "the vector file is in EPSG:%s and the DEM in EPSG:%s; reproject the file onto the DEM's CRS first" % (file_code, dem_code),
+        }))
+        raise SystemExit(0)
+    out_lines = [normalize(line) for line in lines if len(line) >= 2]
+    out_points = []
+    for _identifier, x, y, text in points:
+        u = (float(x) - west) / span_x
+        v = (north - float(y)) / span_y
+        if 0.0 <= u <= 1.0 and 0.0 <= v <= 1.0:
+            out_points.append({"u": u, "v": v, "text": str(text)})
+    print(json.dumps({"ok": True, "kind": "vector", "lines": out_lines, "points": out_points}))
+    raise SystemExit(0)
+
+if kind == "graticule":
+    interval = float(sys.argv[4])
+    with_labels = sys.argv[5] == "1"
+    lines, annotations = sr.graticule_geometry(
+        (west, south, east, north), crs, interval, with_labels
+    )
+    out_lines = [normalize(line) for line in lines if len(line) >= 2]
+    labels = []
+    for index, (line, annotation) in enumerate(zip(lines, annotations)):
+        text = str(annotation.get("text", "") or "")
+        if not text:
+            continue
+        kind_of = str(annotation.get("kind", "") or "")
+        # Same rule the still uses to place a grid annotation: the point that
+        # leaves the frame — lowest for a meridian, leftmost for a parallel.
+        if kind_of == "meridian":
+            ax, ay = min(line, key=lambda point: point[1])
+        else:
+            ax, ay = min(line, key=lambda point: point[0])
+        labels.append({
+            "kind": kind_of,
+            "text": text,
+            "u": (float(ax) - west) / span_x,
+            "v": (north - float(ay)) / span_y,
+        })
+    print(json.dumps({"ok": True, "kind": "graticule", "lines": out_lines, "labels": labels}))
+    raise SystemExit(0)
+
+print(json.dumps({"ok": False, "detail": "unknown preview kind: %s" % kind}))
+"#;
+
 /// Decoded raster preview for the Material preview's terrain drape: a
 /// downsampled RGBA PNG, colour handling mirroring
 /// `studio_render.build_overlay`'s preserve-colours path so Material and
@@ -905,6 +1005,77 @@ pub fn raster_preview_png(python: &str, path: &str, width: u32) -> Result<Vec<u8
     base64::engine::general_purpose::STANDARD
         .decode(png)
         .map_err(|error| format!("invalid preview image: {error}"))
+}
+
+/// Read a vector layer's geometry (feature lines and labelled points) in
+/// the DEM's own frame, normalised to the terrain preview's 0..1 lattice.
+///
+/// The one job the still and the viewport cannot share over stdin: the
+/// viewport needs the geometry itself, not pixels. `label_field` empty reads
+/// only the lines; the field is the labels layer's attribute.
+pub fn vector_geometry(
+    python: &str,
+    dem_path: &str,
+    vector_path: &str,
+    label_field: &str,
+) -> Result<serde_json::Value, String> {
+    run_vector_preview(
+        python,
+        "vector",
+        dem_path,
+        &[vector_path.to_owned(), label_field.to_owned()],
+    )
+}
+
+/// Read the graticule's grid (and, when asked, its coordinate annotations)
+/// for the DEM's CRS and bounds — the engine's own `generate_graticule`.
+pub fn graticule_geometry(
+    python: &str,
+    dem_path: &str,
+    interval_deg: f64,
+    with_labels: bool,
+) -> Result<serde_json::Value, String> {
+    run_vector_preview(
+        python,
+        "graticule",
+        dem_path,
+        &[
+            interval_deg.to_string(),
+            if with_labels { "1" } else { "0" }.to_owned(),
+        ],
+    )
+}
+
+fn run_vector_preview(
+    python: &str,
+    kind: &str,
+    dem_path: &str,
+    tail: &[String],
+) -> Result<serde_json::Value, String> {
+    let service = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("studio_render.py");
+    let mut args = vec![
+        kind.to_owned(),
+        dem_path.to_owned(),
+        service.to_string_lossy().into_owned(),
+    ];
+    args.extend_from_slice(tail);
+    let (stdout, stderr) = run_script(python, VECTOR_PREVIEW_SCRIPT, &args, SCRIPT_TIMEOUT)?;
+    let line = stdout
+        .lines()
+        .find(|line| line.trim_start().starts_with('{'))
+        .ok_or_else(|| format!("the vector preview produced no output: {}", stderr.trim()))?;
+    let value: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|error| format!("the vector preview returned invalid JSON: {error}"))?;
+    if value.get("ok").and_then(|ok| ok.as_bool()) != Some(true) {
+        return Err(value
+            .get("detail")
+            .and_then(|detail| detail.as_str())
+            .unwrap_or("the vector preview failed")
+            .to_owned());
+    }
+    Ok(value)
 }
 
 /// Interpreter candidates, most specific first.

@@ -469,6 +469,36 @@ export interface CapabilityTable {
   camera: ParameterCapability[];
 }
 
+/** A feature line from the vector preview IPC, in 0..1 terrain UV. */
+export type PreviewLine = [number, number][];
+
+/** A labelled point from the vector preview IPC, in 0..1 terrain UV. */
+export interface PreviewPoint {
+  u: number;
+  v: number;
+  text: string;
+}
+
+/** A coordinate annotation from the graticule preview IPC, in 0..1 terrain UV. */
+export interface PreviewAnnotation {
+  kind: string;
+  text: string;
+  u: number;
+  v: number;
+}
+
+/** The geometry a visible vector layer draws, normalised to the preview lattice. */
+export interface VectorGeometry {
+  lines: PreviewLine[];
+  points: PreviewPoint[];
+}
+
+/** The graticule for one grid layer: the grid and its coordinate annotations. */
+export interface GraticuleGeometry {
+  lines: PreviewLine[];
+  labels: PreviewAnnotation[];
+}
+
 /** A DEM sampled for the Studio viewport (heights are row-major, bottom-up). */
 export interface TerrainPreview {
   ok: boolean;

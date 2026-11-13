@@ -25,6 +25,8 @@ import type {
   TerrainPreview,
   AnimationFrameRequest,
   WrittenFrame,
+  GraticuleGeometry,
+  VectorGeometry,
 } from "./types";
 
 export interface StudioBridge {
@@ -81,6 +83,20 @@ export interface StudioBridge {
   /** The engine's colormap as 32 linear-RGB stops, for the Material preview's
    *  elevation ramp and the panel's colour strip. */
   colormapStops(name: string): Promise<number[][]>;
+  /** The vector layer's feature lines (and, with a label field, its
+   *  labelled points), in the DEM's frame, normalised to the preview lattice. */
+  vectorGeometry(
+    demPath: string,
+    vectorPath: string,
+    labelField?: string,
+  ): Promise<VectorGeometry & { ok: boolean }>;
+  /** The graticule for the DEM's CRS and bounds (the engine's own grid),
+   *  with its coordinate annotations. */
+  graticuleGeometry(
+    demPath: string,
+    intervalDeg: number,
+    labels?: boolean,
+  ): Promise<GraticuleGeometry & { ok: boolean }>;
   /** Replace the scene terrain's DEM with a raster the user picked — or add
    *  the terrain when the scene has none yet. */
   importTerrainDem(path: string): Promise<SessionState>;

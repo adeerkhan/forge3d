@@ -30,3 +30,19 @@ export function topImagery(project: Project | null | undefined): CartographyLaye
   const layers = visibleLayers(project).filter((layer) => layer.type === "imagery");
   return layers.length > 0 ? layers[layers.length - 1] : null;
 }
+
+/** The visible labels layers, in draw order. */
+export function labelLayers(project: Project | null | undefined): CartographyLayer[] {
+  return visibleLayers(project).filter((layer) => layer.type === "labels");
+}
+
+/** The visible graticule layers, in draw order. */
+export function graticuleLayers(project: Project | null | undefined): CartographyLayer[] {
+  return visibleLayers(project).filter((layer) => layer.type === "graticule");
+}
+
+/** The topmost visible plate layer, or null. */
+export function plateLayer(project: Project | null | undefined): CartographyLayer | null {
+  const plates = visibleLayers(project).filter((layer) => layer.type === "plate");
+  return plates.length > 0 ? plates[plates.length - 1] : null;
+}

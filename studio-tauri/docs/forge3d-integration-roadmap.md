@@ -1023,10 +1023,36 @@ work in both states (reach 0.5 → 0.15 changed 92,457 samples).
   new field on the project root. The still renders with the engine's own
   shading regardless of the toggle (the engine decides its own specular
   response; the hillshade is a preview aid, not a hidden print change).
+- **The second slice landed: the map's vector layers, their labels and the
+  graticule, in the viewport** — the same layers the still rasterizes, draped
+  on the same preview terrain, read through the still's own reader. A new
+  `vector_geometry` IPC (a `-c` script that imports `studio_render.py` for
+  `read_vector_features`/`graticule_geometry`, one implementation — never a
+  second GeoPackage parser) emits feature lines and labelled points
+  normalised to the preview's 0..1 lattice in the DEM's bounds; the DEM's
+  bounds come from a rasterio header read, never a full raster pass (measured:
+  Luxembourg rail, 2,035 lines ≈ 150k vertices — 1.3 s cold → 0.36 s with the
+  header read; ≈ 990 KB of JSON over IPC per layer load, cached per stack
+  edit). The lines draw as one `LineSegments2` per layer (fat lines at the
+  layer's `widthPx`, draped at the mesh's relief with a clearance lift) and
+  hide behind the terrain where the ground stands in front (`depthTest`). The
+  labels are HTML divs ride the camera projection, hidden behind the terrain
+  by a raycast on camera move, dropped over the sky (behind-camera/outside
+  view tests), with the engine's own halo rule inverted for readability;
+  graticule annotations pin to the point that leaves the frame — lowest for a
+  meridian, leftmost for a parallel, the same rule the still's anchors use —
+  and take the engine's own 12 px grid size. Label/graticule anchors are
+  sampled on the mesh surface like every other drape.
+- **The plate's crop frame landed** — while a visible Plate layer exists, the
+  viewport draws a dashed letterbox at the still's render aspect (project
+  render settings) centred on the canvas, labelled `plate · W × H` — the
+  frame the still will compose into. It is an aspect indicator, not the
+  page: the plate compositor still cuts the subject silhouette onto the page
+  in Python at render time, and no three.js code mimics it.
 - **What is still open for Phase 16** — the preview's shadows aligned with the
-  still's PCF, the Material preview's lighting matched to the still's
-  `lambert_physical`, and the plate's crop shape in the viewport. Each lands in
-  its own increment, measured against the still.
+  still's PCF, and the Material preview's lighting matched to the still's
+  `lambert_physical`. Each lands in its own increment, measured against the
+  still.
 
 
 ## 6. Increment 10.0 — High-quality stills: AOV + denoise (1 day) — **done**

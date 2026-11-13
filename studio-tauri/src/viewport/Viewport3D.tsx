@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { LineSegments2 } from "three/addons/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/addons/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/addons/lines/LineMaterial.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 
@@ -16,7 +19,7 @@ import type {
 import { ViewportToolbar } from "../components/ViewportToolbar";
 import { useSession } from "../state/session-context";
 import { AxisGizmo, type Axis } from "./AxisGizmo";
-import type { Material, TerrainPreview } from "../bridge/types";
+import type { CartographyLayer, Material, TerrainPreview } from "../bridge/types";
 import {
   base64ToArrayBuffer,
   clearAssetCaches,
@@ -24,10 +27,16 @@ import {
   loadAssetScene,
 } from "./assets";
 import { viewStore } from "./viewStore";
-import { topImagery, topRamp } from "../state/cartography";
+import { graticuleLayers, labelLayers, topImagery, topRamp, vectorLayers } from "../state/cartography";
 import { lightingRig } from "./lighting";
 import { rampColor } from "./colormap";
 import { TERRAIN_VIEW_SIZE, computeRenderView } from "./viewMath";
+import {
+  anchorWorld,
+  drapeLift,
+  drapePolylines,
+  expandPairs,
+} from "./cartography";
 
 const DEG = Math.PI / 180;
 /** Fly-camera keys: WASD in the view plane, Q/E down and up, Shift to sprint. */
@@ -71,6 +80,12 @@ interface Runtime {
   renderer: THREE.WebGLRenderer;
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
+  /** Cartography lines (vector, graticule) draped on the terrain; cleared and rebuilt per stack change. */
+  overlay: THREE.Group;
+  /** HTML labels for the graticule annotations and the named features. */
+  labelLayer: HTMLDivElement | null;
+  /** Line materials, whose resolution follows the canvas size in pixels. */
+  lineMaterials: LineMaterial[];
   orbit: OrbitControls;
   gizmo: TransformControls;
   sun: THREE.DirectionalLight;
@@ -604,6 +619,70 @@ function buildTerrainMesh(
   return mesh;
 }
 
+/** One label anchor: where its div goes, and what it says. */
+interface CartographyAnchor {
+  id: string;
+  text: string;
+  className: string;
+  /** Layer colour, pre-composed to CSS. */
+  colourCss: string;
+  /** Text-shadow halo: readable on any ground. */
+  haloCss: string;
+  fontSizePx: number;
+  /** World position on the terrain (the div rides the projection). */
+  world: THREE.Vector3;
+  /** Hidden this frame because the ground stands in front of the anchor. */
+  occluded: boolean;
+}
+
+/** Compose a layer RGBA into a readable label colour and its halo. */
+function labelInk(rgba: [number, number, number, number] | undefined): {
+  colourCss: string;
+  haloCss: string;
+} {
+  const colour = rgba ?? [1, 1, 1, 0.95];
+  const [r, g, b] = colour;
+  const luminance = r * 0.2126 + g * 0.7152 + b * 0.0722;
+  return {
+    colourCss: `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`,
+    haloCss:
+      luminance < 0.5
+        ? "0 0 2px rgba(255, 255, 255, 0.9), 0 0 1px rgba(255, 255, 255, 0.9)"
+        : "0 0 2px rgba(0, 0, 0, 0.85), 0 0 1px rgba(0, 0, 0, 0.9)",
+  };
+}
+
+/** Remove the draped lines and their GPU buffers. */
+function disposeOverlayLines(group: THREE.Group): void {
+  for (const child of [...group.children]) {
+    group.remove(child);
+    const line = child as LineSegments2;
+    line.geometry?.dispose();
+    (line.material as LineMaterial | undefined)?.dispose();
+  }
+}
+
+/** Rebuild the label divs to match the current anchors. */
+function rebuildCartographyLabels(
+  layer: HTMLDivElement,
+  anchors: CartographyAnchor[],
+): Map<string, HTMLDivElement> {
+  layer.replaceChildren();
+  const divs = new Map<string, HTMLDivElement>();
+  for (const anchor of anchors) {
+    const div = document.createElement("div");
+    div.className = `cartography-label ${anchor.className}`;
+    div.textContent = anchor.text;
+    div.style.color = anchor.colourCss;
+    div.style.textShadow = anchor.haloCss;
+    div.style.fontSize = `${anchor.fontSizePx}px`;
+    div.style.display = "none";
+    layer.appendChild(div);
+    divs.set(anchor.id, div);
+  }
+  return divs;
+}
+
 function contentSignature(
   object: SceneObject,
   terrainResolution: number,
@@ -753,6 +832,16 @@ export function Viewport3D() {
   const flyAngles = useRef({ yaw: 0, pitch: 0 });
   const flyModeRef = useRef(flyMode);
   flyModeRef.current = flyMode;
+
+  /** Draped cartography (vector lines, graticule): geometry loaded per stack
+   *  change; the group is rebuilt, cameras never refetch. */
+  const anchorsRef = useRef<CartographyAnchor[]>([]);
+  const labelDivsRef = useRef(new Map<string, HTMLDivElement>());
+  /** The camera transform the label occlusion pass last saw. */
+  const occlusionCameraRef = useRef(new THREE.Vector3(Infinity, 0, 0));
+  const occlusionQuatRef = useRef(new THREE.Quaternion(Infinity, 0, 0));
+  const occlusionVersionRef = useRef(-1);
+  const anchorsVersionRef = useRef(0);
 
   const textureCache = useRef(new Map<string, Promise<THREE.Texture>>());
   const loadTexture = useCallback((path: string): Promise<THREE.Texture> => {
@@ -1009,6 +1098,15 @@ export function Viewport3D() {
     const axes = new THREE.AxesHelper(1.1);
     scene.add(axes);
 
+    const overlay = new THREE.Group();
+    overlay.name = "cartography-overlay";
+    overlay.userData.owned = true;
+    scene.add(overlay);
+    const labelLayer = document.createElement("div");
+    labelLayer.className = "viewport-cartography";
+    labelLayer.setAttribute("aria-hidden", "true");
+    container.appendChild(labelLayer);
+
     const runtime: Runtime = {
       renderer,
       scene,
@@ -1025,6 +1123,9 @@ export function Viewport3D() {
       environment: studioEnvironment,
       environmentBackground: null,
       pmrem,
+      overlay,
+      labelLayer,
+      lineMaterials: [],
       glStep: 0,
       glProbed: false,
       needsRender: true,
@@ -1039,6 +1140,11 @@ export function Viewport3D() {
       renderer.setSize(width, height, false);
       camera.aspect = width / height;
       camera.updateProjectionMatrix();
+      runtime.overlay.visible = viewportModeRef.current !== "rendered";
+      if (runtime.labelLayer) runtime.labelLayer.style.display = runtime.overlay.visible ? "" : "none";
+      for (const line of runtime.lineMaterials) {
+        line.resolution.set(width, height);
+      }
       runtime.needsRender = true;
       setSize((current) =>
         current.width === width && current.height === height
@@ -1252,6 +1358,79 @@ export function Viewport3D() {
       }
       updateViewStore();
       viewStore.cameraTransform = cameraTransform(camera);
+      // Cartography labels ride the projection: cheap per frame, and the
+      // occlusion pass (a ray per anchor against the terrain) only runs
+      // when the camera actually moved.
+      runtime.overlay.visible = viewportModeRef.current !== "rendered";
+      const labelLayerEl = runtime.labelLayer;
+      if (labelLayerEl) {
+        if (runtime.overlay.visible && anchorsRef.current.length > 0) {
+          const width = container.clientWidth;
+          const height = container.clientHeight;
+          const cameraMoved =
+            Math.abs(camera.position.x - occlusionCameraRef.current.x) > 1e-4 ||
+            Math.abs(camera.position.y - occlusionCameraRef.current.y) > 1e-4 ||
+            Math.abs(camera.position.z - occlusionCameraRef.current.z) > 1e-4 ||
+            Math.abs(camera.quaternion.x - occlusionQuatRef.current.x) > 1e-4 ||
+            Math.abs(camera.quaternion.y - occlusionQuatRef.current.y) > 1e-4 ||
+            Math.abs(camera.quaternion.z - occlusionQuatRef.current.z) > 1e-4 ||
+            Math.abs(camera.quaternion.w - occlusionQuatRef.current.w) > 1e-4 ||
+            anchorsVersionRef.current !== occlusionVersionRef.current;
+          if (cameraMoved) {
+            const terrainObject = stateRef.current?.project.scene.objects.find(
+              (object) => object.kind.type === "terrain",
+            );
+            const terrainGroup = terrainObject
+              ? runtime.objects.get(terrainObject.id)
+              : undefined;
+            let terrainMesh: THREE.Mesh | undefined;
+            for (const child of terrainGroup?.children ?? []) {
+              if ((child as THREE.Mesh).isMesh) {
+                terrainMesh = child as THREE.Mesh;
+                break;
+              }
+            }
+            const ray = new THREE.Raycaster();
+            for (const anchor of anchorsRef.current) {
+              if (!terrainMesh) {
+                anchor.occluded = false;
+                continue;
+              }
+              const direction = anchor.world.clone().sub(camera.position);
+              const distance = direction.length();
+              ray.set(camera.position, direction.normalize());
+              ray.far = distance - 0.05;
+              anchor.occluded = ray.intersectObject(terrainMesh, false).length > 0;
+            }
+            occlusionCameraRef.current.copy(camera.position);
+            occlusionQuatRef.current.copy(camera.quaternion);
+            occlusionVersionRef.current = anchorsVersionRef.current;
+          }
+          labelLayerEl.style.display = "";
+          const screen = new THREE.Vector3();
+          for (const anchor of anchorsRef.current) {
+            const div = labelDivsRef.current.get(anchor.id);
+            if (!div) continue;
+            // Behind the camera: a view-space test, not the projected z.
+            const view = anchor.world.clone().applyMatrix4(camera.matrixWorldInverse);
+            if (view.z >= -0.05 || anchor.occluded) {
+              div.style.display = "none";
+              continue;
+            }
+            screen.copy(anchor.world).project(camera);
+            const x = (screen.x * 0.5 + 0.5) * width;
+            const y = (-screen.y * 0.5 + 0.5) * height;
+            if (x < -80 || y < -40 || x > width + 80 || y > height + 40) {
+              div.style.display = "none";
+              continue;
+            }
+            div.style.display = "";
+            div.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -115%)`;
+          }
+        } else {
+          labelLayerEl.style.display = "none";
+        }
+      }
       for (const helper of runtime.helpers) helper.update();
       const q = camera.quaternion;
       if (
@@ -1309,6 +1488,10 @@ export function Viewport3D() {
       environmentRef.current?.background.dispose();
       environmentRef.current?.target.dispose();
       runtime.pmrem?.dispose();
+      disposeOverlayLines(overlay);
+      scene.remove(overlay);
+      overlay.clear();
+      labelLayer.remove();
       renderer.dispose();
       runtimeRef.current = null;
     };
@@ -1649,6 +1832,218 @@ export function Viewport3D() {
     tool,
   ]);
 
+  // The map overlay: vector lines, their labels and the graticule, draped
+  // on the terrain in the same 0..1 lattice the still uses. Rebuilt only
+  // when the relevant layers (or the terrain) change; a camera move never
+  // refetches.
+  const cartographyLayers = state?.project.cartography;
+  const cartographySignature = cartographyLayers
+    ? JSON.stringify(
+        cartographyLayers
+          .filter(
+            (layer) =>
+              layer.visible &&
+              (layer.type === "vector" ||
+                layer.type === "labels" ||
+                layer.type === "graticule"),
+          )
+          .map((layer) => [
+            layer.id,
+            layer.type,
+            layer.asset ?? "",
+            layer.colour?.join(",") ?? "",
+            layer.widthPx ?? 0,
+            layer.intervalDeg ?? 0,
+            layer.labels === false ? "0" : "1",
+            layer.source ?? "",
+            layer.field ?? "",
+            layer.sizePx ?? 0,
+          ]),
+      )
+    : "";
+  const lastCartographySignature = useRef("__unset__");
+  useEffect(() => {
+    const runtime = runtimeRef.current;
+    const container = containerRef.current;
+    if (!runtime || !container) return;
+    if (lastCartographySignature.current === cartographySignature) return;
+    lastCartographySignature.current = cartographySignature;
+    let cancelled = false;
+
+    // The overlay always mirrors the stack: whatever it had, it drops.
+    disposeOverlayLines(runtime.overlay);
+    runtime.overlay.visible = viewportModeRef.current !== "rendered";
+    if (runtime.labelLayer) {
+      runtime.labelLayer.style.display = runtime.overlay.visible ? "" : "none";
+      runtime.labelLayer.replaceChildren();
+    }
+    runtime.lineMaterials = [];
+    labelDivsRef.current = new Map();
+    anchorsRef.current = [];
+
+    const project = stateRef.current?.project;
+    const terrainObject = project?.scene.objects.find(
+      (object) => object.kind.type === "terrain",
+    );
+    if (!project || !terrainObject || terrainObject.kind.type !== "terrain") {
+      runtime.needsRender = true;
+      return;
+    }
+    const terrainKind = terrainObject.kind;
+    const terrainAsset = project.assets.find((asset) => asset.id === terrainKind.asset);
+    if (!terrainAsset) {
+      runtime.needsRender = true;
+      return;
+    }
+    const zScale = terrainKind.zScale;
+
+    (async () => {
+      let preview: TerrainPreview;
+      try {
+        // Shares the terrain cache with the mesh build — one read per DEM.
+        preview = await readTerrain(terrainAsset.path);
+      } catch {
+        // The terrain's own error path already reports this one.
+        return;
+      }
+      if (cancelled) return;
+      const spanXz = preview.spanXz;
+      const lift = drapeLift(spanXz, [preview.minElevation, preview.maxElevation], zScale);
+      const lineMaterials: LineMaterial[] = [];
+      const anchors: CartographyAnchor[] = [];
+      const addDraped = (lines: [number, number][][], layer: CartographyLayer) => {
+        if (lines.length === 0) return;
+        const { positions, pairs } = drapePolylines(lines, preview, spanXz, zScale, lift);
+        if (pairs.length === 0) return;
+        const geometry = new LineSegmentsGeometry();
+        geometry.setPositions(expandPairs(positions, pairs));
+        const rgba = layer.colour ?? [1, 0.62, 0.2, 1];
+        const material = new LineMaterial({
+          color: new THREE.Color(rgba[0], rgba[1], rgba[2]),
+          linewidth: Math.max(1, layer.widthPx ?? 2),
+          transparent: true,
+          opacity: rgba[3],
+          depthTest: true,
+          // Lines drape ON the terrain: the depth test keeps the hidden
+          // stretch of a line behind a ridge hidden.
+          depthWrite: false,
+        });
+        material.resolution.set(container.clientWidth, container.clientHeight);
+        const line = new LineSegments2(geometry, material);
+        // Instanced bounding boxes are unreliable here; the overlay is tiny.
+        line.frustumCulled = false;
+        line.renderOrder = 4;
+        runtime.overlay.add(line);
+        lineMaterials.push(material);
+      };
+      for (const layer of vectorLayers(project)) {
+        const assetId = layer.asset;
+        const file = assetId
+          ? project.assets.find((entry) => entry.id === assetId)
+          : undefined;
+        if (!file) continue;
+        try {
+          const result = await bridge.vectorGeometry(terrainAsset.path, file.path, "");
+          if (cancelled) return;
+          addDraped(result.lines, layer);
+        } catch (cause) {
+          if (!cancelled) {
+            setProblem(
+              `"${layer.name}" could not be drawn: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
+      }
+      for (const layer of labelLayers(project)) {
+        const source = project.cartography.find((entry) => entry.id === layer.source);
+        const file = source?.asset
+          ? project.assets.find((entry) => entry.id === source.asset)
+          : undefined;
+        // A label layer whose source vector is gone is skipped in silence
+        // (the Inspector shows the dangling reference).
+        if (!file) continue;
+        try {
+          const result = await bridge.vectorGeometry(
+            terrainAsset.path,
+            file.path,
+            layer.field ?? "",
+          );
+          if (cancelled) return;
+          const ink = labelInk(layer.colour);
+          for (const [index, point] of result.points.entries()) {
+            anchors.push({
+              id: `${layer.id}:${index}`,
+              text: point.text,
+              className: "cartography-label--feature",
+              ...ink,
+              fontSizePx: layer.sizePx ?? 13,
+              world: new THREE.Vector3(
+                ...anchorWorld(preview, spanXz, zScale, point.u, point.v),
+              ),
+              occluded: false,
+            });
+          }
+        } catch (cause) {
+          if (!cancelled) {
+            setProblem(
+              `"${layer.name}" could not be drawn: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
+      }
+      for (const layer of graticuleLayers(project)) {
+        const interval = layer.intervalDeg ?? 1;
+        try {
+          const result = await bridge.graticuleGeometry(
+            terrainAsset.path,
+            interval,
+            layer.labels ?? true,
+          );
+          if (cancelled) return;
+          addDraped(result.lines, layer);
+          const ink = labelInk(layer.colour);
+          for (const [index, annotation] of result.labels.entries()) {
+            anchors.push({
+              id: `${layer.id}:g${index}`,
+              text: annotation.text,
+              className: `cartography-label--graticule cartography-label--${annotation.kind}`,
+              ...ink,
+              // The engine's own grid annotation size.
+              fontSizePx: 12,
+              world: new THREE.Vector3(
+                ...anchorWorld(preview, spanXz, zScale, annotation.u, annotation.v),
+              ),
+              occluded: false,
+            });
+          }
+        } catch (cause) {
+          if (!cancelled) {
+            setProblem(
+              `"${layer.name}" could not be drawn: ${cause instanceof Error ? cause.message : String(cause)}`,
+            );
+          }
+        }
+      }
+      if (cancelled) return;
+      runtime.lineMaterials = lineMaterials;
+      anchorsRef.current = anchors;
+      anchorsVersionRef.current += 1;
+      if (runtime.labelLayer) {
+        labelDivsRef.current = rebuildCartographyLabels(runtime.labelLayer, anchors);
+      }
+      runtime.needsRender = true;
+    })().catch((cause) => {
+      if (!cancelled) {
+        setProblem(
+          `the map overlay could not be built: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [cartographySignature, readTerrain]);
+
   // A project HDRI replaces the studio sky for Material and Rendered. The
   // viewport decodes and pre-filters it here (Rendered receives the path and
   // lets the engine upload it); a replaced map is freed after the new one is
@@ -1872,6 +2267,38 @@ export function Viewport3D() {
   }, [demDims, renderScale, size.height, size.width, state?.project.render.height, state?.project.render.width]);
   // Only Rendered composes an engine frame. Solid and Material are the live
   // three.js scene — that is what keeps Material's orbit free and instant.
+  // The plate's crop frame: the still composes at the project's render
+  // settings, so the viewport shows that aspect as a dashed letterbox while
+  // the Plate layer is visible — the plate's crop shape, at the still's
+  // aspect, centred on the canvas.
+  const plateVisible = (state?.project.cartography ?? []).some(
+    (layer) => layer.type === "plate" && layer.visible,
+  );
+  const plateSettings = state?.project.render;
+  const plateAspect =
+    plateSettings && plateSettings.width > 0 && plateSettings.height > 0
+      ? plateSettings.width / plateSettings.height
+      : null;
+  const containerAspect = size.width > 0 && size.height > 0 ? size.width / size.height : null;
+  let plateFrame: { width: number; height: number; renderW: number; renderH: number } | null =
+    null;
+  if (plateVisible && plateAspect && containerAspect && plateSettings) {
+    if (containerAspect >= plateAspect) {
+      plateFrame = {
+        width: size.height * plateAspect,
+        height: size.height,
+        renderW: plateSettings.width,
+        renderH: plateSettings.height,
+      };
+    } else {
+      plateFrame = {
+        width: size.width,
+        height: size.width / plateAspect,
+        renderW: plateSettings.width,
+        renderH: plateSettings.height,
+      };
+    }
+  }
   const renderedMode = mode === "rendered";
   const modeRef = useRef(renderedMode);
   modeRef.current = renderedMode;
@@ -2091,6 +2518,17 @@ export function Viewport3D() {
               {render.busy ? "Rendering…" : "Re-render"}
             </button>
           </div>
+        </div>
+      )}
+      {plateFrame && !renderedMode && (
+        <div
+          className="viewport-plate-frame"
+          style={{ width: plateFrame.width, height: plateFrame.height }}
+          aria-hidden="true"
+        >
+          <span className="viewport-plate-frame__caption">
+            plate · {plateFrame.renderW} × {plateFrame.renderH}
+          </span>
         </div>
       )}
       <ViewportToolbar

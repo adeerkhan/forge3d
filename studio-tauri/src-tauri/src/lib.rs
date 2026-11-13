@@ -78,6 +78,8 @@ pub fn run() {
             commands::read_mesh_file,
             commands::file_size,
             commands::terrain_preview,
+            commands::vector_geometry,
+            commands::graticule_geometry,
             commands::colormap_stops,
             commands::import_terrain_dem,
             commands::read_image_asset,

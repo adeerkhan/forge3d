@@ -184,8 +184,11 @@ ramp rides the engine's own colormap overlay (the recipe builds a
 gone (the native UV drape now composites in row bands under the host
 budget).
 
-**Phase 16 — the preview matches the still.** The preview's shadows, the
-hillshade and the plate's crop in the viewport, so authoring shows the output.
+**Phase 16 — the preview matches the still.** The preview's hillshade raster,
+the map overlay (vector lines, feature labels and the graticule, draped on the
+terrain and read through the still's own reader) and the plate's crop frame in
+the viewport landed, so authoring shows the output. The Material preview's
+lighting and shadow match remain open.
 
 **Phase 17 — the engine's inputs.** Dataset fetching, the engine's presets,
 COG streaming: Studio opens what the engine can fetch.
